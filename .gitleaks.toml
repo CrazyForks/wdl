@@ -1,0 +1,70 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fixed fake local/test tokens used in docs and harnesses."
+regexTarget = "match"
+regexes = [
+  '''local-dev-token''',
+  '''local-internal-auth-token''',
+  '''test-internal-auth-token''',
+  '''test-bootstrap-token-for-unit-harness-1234567890''',
+  '''session-token-example'''
+]
+
+[[allowlists]]
+description = "AWS SigV4 official example credentials used by parity fixtures."
+regexTarget = "match"
+paths = [
+  '''^tests/unit/aws4fetch-sigv4\.test\.js$'''
+]
+regexes = [
+  '''AKIDEXAMPLE''',
+  '''wJalrXUtnFEMI/K7MDENG\+bPxRfiCYEXAMPLEKEY'''
+]
+condition = "AND"
+
+[[allowlists]]
+description = "Fixed AWS SigV4 signature fixture generated from official example credentials."
+regexTarget = "secret"
+paths = [
+  '''^tests/unit/aws4fetch-sigv4\.test\.js$'''
+]
+regexes = [
+  '''f54699d16ac946691025f331377c59814b85e1078bc70ea66925457e2549d0a7'''
+]
+condition = "AND"
+
+[[allowlists]]
+description = "Fixed fake local secret-envelope key used by tests and local examples."
+regexTarget = "match"
+regexes = [
+  '''MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=''',
+  '''0123456789abcdef0123456789abcdef''',
+  '''local:(?:test|k8s):secret-envelope:v[0-9]+'''
+]
+
+[[allowlists]]
+description = "Local Kubernetes overlay uses fixed fake development secrets only."
+regexTarget = "match"
+paths = [
+  '''^deploy/kubernetes/overlays/local/kustomization\.yaml$'''
+]
+regexes = [
+  '''BOOTSTRAP_TOKEN=local-dev-token''',
+  '''SECRET_ENVELOPE_LOCAL_KEY_B64=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=''',
+  '''SECRET_ENVELOPE_KID=local:k8s:secret-envelope:v1''',
+  '''(?:R2_S3_|S3_)(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)=test'''
+]
+condition = "AND"
+
+[[allowlists]]
+description = "Decoded form of the fixed fake local Kubernetes secret-envelope key."
+regexTarget = "secret"
+paths = [
+  '''^deploy/kubernetes/overlays/local/kustomization\.yaml$'''
+]
+regexes = [
+  '''0123456789abcdef0123456789abcdef'''
+]
+condition = "AND"

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreExportsUsedInFile": true,
+  "tags": ["-lintignore"],
+  "workspaces": {
+    ".": {
+      "entry": [
+        "auth/index.js",
+        "d1-runtime/index.js",
+        "do-runtime/index.js",
+        "gateway/index.js",
+        "runtime/do-owner-network.js",
+        "runtime/index.js",
+        "runtime/tail-worker.js",
+        "tests/integration/helpers/ws-roundtrip-runner.cjs",
+        "system-workers/s3-cleanup/src/index.js",
+        "scripts/**/*.js",
+        "scripts/**/*.mjs",
+        // Only executable tests/manual repros are entries. Test helpers must be
+        // reached through imports so knip can report orphaned helper files.
+        "tests/unit/**/*.test.js",
+        "tests/integration/**/*.test.js",
+        "tests/integration/**/*.manual.mjs"
+      ],
+      "project": [
+        "**/*.js",
+        "**/*.mjs",
+        "**/*.cjs"
+      ],
+      // These sources are embedded as text by workerd capnp and injected into
+      // loaded workers, so no ordinary JS import points at the files.
+      "ignoreFiles": [
+        "runtime/_wdl-d1-params.js",
+        "runtime/_wdl-d1-transport.js",
+        "runtime/_wdl-sql-splitter.js",
+        "runtime/d1-client.js"
+      ],
+      "ignore": [
+        "shared/vendor/**",
+        "examples/**",
+        "test-workers/**"
+      ]
+    },
+    "control": {
+      // Embedded by runtime/config-system.capnp as the control worker entrypoint.
+      "entry": ["index.js"],
+      "project": ["**/*.js"]
+    }
+  }
+}

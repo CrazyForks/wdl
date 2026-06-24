@@ -1,0 +1,50 @@
+{
+  "name": "wdl",
+  "private": true,
+  "license": "Apache-2.0",
+  "author": "Sean Consulting OÜ",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wdl-dev/wdl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wdl-dev/wdl/issues"
+  },
+  "homepage": "https://wdl.dev",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "control"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "lint:unused": "knip --include exports,types,files --no-config-hints",
+    "typecheck": "tsc --noEmit",
+    "typecheck:strict": "tsc --project tsconfig.strict.json",
+    "test:unit": "node --test --test-reporter=spec 'tests/unit/**/*.test.js'",
+    "compile:workerd": "node scripts/compile-workerd-configs.js",
+    "compile:workerd:local": "node scripts/compile-workerd-configs.js --local",
+    "dev:rebuild": "npm run compile:workerd:local && docker compose restart",
+    "test:integration": "node scripts/run-integration-tests.js",
+    "test:integration:cli": "node scripts/run-cli-integration-tests.js",
+    "test": "node scripts/run-parallel.js lint typecheck typecheck:strict && npm run test:unit",
+    "test:all": "npm run test && npm run test:integration",
+    "build:vendor": "esbuild ./shared/vendor/.entry-croner.mjs --bundle --format=esm --platform=browser --target=es2025 --outfile=./shared/vendor/croner.js && esbuild ./shared/vendor/.entry-aws4fetch.mjs --bundle --format=esm --platform=browser --target=es2025 --banner:js='// @ts-nocheck' --outfile=./shared/vendor/aws4fetch.js",
+    "build:third-party-licenses": "node scripts/generate-third-party-license-bundles.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260617.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.2",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.5.0",
+    "globals": "^17.6.0",
+    "knip": "^6.17.1",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "workerd": "1.20260617.1"
+  }
+}

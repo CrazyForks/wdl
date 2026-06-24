@@ -1,0 +1,13 @@
+region      = "ap-east-1"
+name_prefix = "wdl-demo"
+environment = "test"
+
+admin_host     = "api.wdl.dev"
+platform_domain = "*.wdl.sh"
+
+# Optional assets CDN alias. Leave empty to skip the us-east-1 CloudFront cert.
+assets_cdn_domain = "assets.wdl.dev"
+
+# First apply with false, copy ACM validation records to your external DNS
+# provider, then set true and apply again to create the HTTPS listener.
+validate_certificates = false

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: d1-data
+spec:
+  storageClassName: wdl-nfs-rwx
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: do-data
+spec:
+  storageClassName: wdl-nfs-rwx

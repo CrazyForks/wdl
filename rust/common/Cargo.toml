@@ -1,0 +1,25 @@
+[package]
+name = "wdl-rust-common"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "wdl_rust_common"
+path = "src/lib.rs"
+
+[features]
+default = ["axum"]
+axum = ["dep:axum"]
+
+[dependencies]
+axum = { workspace = true, features = ["http1"], optional = true }
+chrono = { workspace = true, features = ["clock"] }
+getrandom.workspace = true
+redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+serde_json.workspace = true
+subtle.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }

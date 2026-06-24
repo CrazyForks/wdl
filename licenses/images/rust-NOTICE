@@ -1,0 +1,8 @@
+WDL Rust services image
+Copyright 2026 Sean Consulting OÜ
+
+This image includes the WDL redis-proxy, scheduler, and workflows service
+binaries developed by Sean Consulting OÜ.
+
+Third-party Rust service crate notices are under
+`/usr/share/licenses/wdl/third-party/rust-services/`.

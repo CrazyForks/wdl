@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: scheduler
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wdl
+        app.kubernetes.io/component: scheduler
+    spec:
+      containers:
+        - name: scheduler
+          image: docker.io/getwdl/wdl-rust:latest
+          command: ["/scheduler"]
+          envFrom:
+            - configMapRef:
+                name: wdl-config
+            - secretRef:
+                name: wdl-secrets
+          env:
+            - name: RUNTIME_HOST
+              value: user-runtime
+            - name: RUNTIME_PORT
+              value: "8088"
+            - name: SYSTEM_RUNTIME_HOST
+              value: system-runtime
+            - name: SYSTEM_RUNTIME_PORT
+              value: "8088"
+            - name: WORKFLOWS_HOST
+              value: workflows
+            - name: WORKFLOWS_PORT
+              value: "9120"
+          readinessProbe:
+            exec:
+              command: ["/scheduler", "healthcheck"]
+          livenessProbe:
+            exec:
+              command: ["/scheduler", "healthcheck"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi

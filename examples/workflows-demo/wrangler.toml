@@ -1,0 +1,19 @@
+name = "workflows-demo"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+[[workflows]]
+name = "orders"
+binding = "ORDERS"
+class_name = "OrderWorkflow"
+
+[[durable_objects.bindings]]
+name = "PROGRESS"
+class_name = "Progress"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Progress"]
+
+[vars]
+LABEL = "workflows-demo"

@@ -1,0 +1,56 @@
+{
+  "compilerOptions": {
+    "target": "ES2025",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "lib": ["ES2025", "DOM", "DOM.Iterable"],
+    "types": ["node", "@cloudflare/workers-types"],
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "shared-*": ["shared/*.js"],
+      "gateway-*": ["gateway/*.js"],
+      "runtime-bindings-*": ["runtime/bindings/*.js"],
+      "runtime-bindings-r2-metadata": ["runtime/bindings/r2/metadata.js"],
+      "runtime-bindings-r2-xml": ["runtime/bindings/r2/xml.js"],
+      "runtime-dispatch-workflow-*": ["runtime/dispatch/workflow-*.js"],
+      "runtime-load-*": ["runtime/load/*.js"],
+      "runtime-do-transport": ["runtime/_wdl-do-transport.js"],
+      "runtime-owner-endpoint": ["runtime/_wdl-owner-endpoint.js"],
+      "runtime-owner-hint-cache": ["runtime/_wdl-owner-hint-cache.js"],
+      "runtime-state": ["runtime/runtime.js"],
+      "runtime-*": ["runtime/*.js"],
+      "do-runtime-protocol-*": ["do-runtime/protocol/*.js"],
+      "do-runtime-*": ["do-runtime/*.js"],
+      "d1-runtime-*": ["d1-runtime/*.js"],
+      "control-handlers-*": ["control/handlers/*.js"],
+      "control-routing-route-plan": ["control/routing/route-plan.js"],
+      "control-*": ["control/*.js"],
+      "auth-*": ["auth/*.js"]
+    }
+  },
+  "include": [
+    "auth/**/*.js",
+    "control/**/*.js",
+    "gateway/**/*.js",
+    "runtime/**/*.js",
+    "scripts/**/*.js",
+    "shared/**/*.js",
+    "do-runtime/**/*.js",
+    "d1-runtime/**/*.js",
+    "tests/**/*.js",
+    "system-workers/s3-cleanup/src/**/*.js",
+    "types/**/*.d.ts"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/.deploy-dist",
+    "shared/vendor/**"
+  ]
+}

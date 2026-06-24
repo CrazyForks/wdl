@@ -1,0 +1,232 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  WDL_CLI_PACKAGE: "@wdl-dev/cli@1.2.1"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node lint, typecheck, unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+      - run: npm audit --audit-level=moderate
+      - run: npm run lint
+      - run: npm run lint:unused
+      - run: npm run typecheck
+      - run: npm run typecheck:strict
+      - run: npm run compile:workerd
+      - run: npm run test:unit
+
+  rust:
+    name: Rust checks (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: "1"
+    defaults:
+      run:
+        working-directory: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - wdl-rust-common
+          - redis-proxy
+          - scheduler
+          - workflows
+          - supervisor
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-global-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-global-${{ runner.os }}-
+
+      - name: Cache Cargo target
+        uses: actions/cache@v5
+        with:
+          path: rust/target
+          key: cargo-target-${{ runner.os }}-${{ matrix.package }}-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml', 'rust/common/Cargo.toml', 'rust/redis-proxy/Cargo.toml', 'rust/scheduler/Cargo.toml', 'rust/workflows/Cargo.toml', 'rust/supervisor/Cargo.toml') }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-${{ matrix.package }}-
+
+      - run: cargo fmt --package ${{ matrix.package }} --check
+      - run: cargo check --locked -p ${{ matrix.package }}
+      - run: cargo test --locked -p ${{ matrix.package }}
+      - run: >
+          cargo clippy --locked --all-targets
+          -p ${{ matrix.package }}
+          --
+          -D warnings
+          -W clippy::correctness
+          -W clippy::suspicious
+          -W clippy::perf
+          -W clippy::complexity
+
+  rust-supply-chain:
+    name: Rust supply-chain
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/advisory-dbs
+          key: cargo-global-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-global-${{ runner.os }}-
+
+      - name: Cache cargo-deny
+        id: cache-cargo-deny
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-0.19.4
+
+      - name: Install cargo-deny
+        if: steps.cache-cargo-deny.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked --version 0.19.4
+
+      - run: cargo deny --manifest-path Cargo.toml check
+
+  ci-hygiene:
+    name: CI hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: gacts/gitleaks@c9a0338361dc45a01aa7ebaaa5330179f3c62873 # v1.3.2
+        with:
+          config-path: .gitleaks.toml
+
+      - uses: raven-actions/actionlint@205b530c5d9fa8f44ae9ed59f341a0db994aa6f8 # v2.1.2
+
+  integration:
+    name: Integration (serial)
+    runs-on: ubuntu-latest
+    needs: [node, rust, rust-supply-chain, ci-hygiene]
+    # Integration uses Docker Hub / Build Cloud credentials, so it only runs on
+    # trusted main-branch pushes.
+    if: ${{ github.event_name == 'push' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+      - run: npm install --global --ignore-scripts "$WDL_CLI_PACKAGE"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+          logout: false
+
+      - name: Set up Docker Build Cloud
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        with:
+          driver: cloud
+          endpoint: "getwdl/builder"
+          cache-binary: false
+
+      - name: Prepare integration images
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          npm run compile:workerd:local
+          docker compose build gateway workflows
+
+      - name: Drop Docker credentials before tests
+        if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          docker logout || true
+          rm -rf "$DOCKER_CONFIG"
+
+      - name: Restore integration durations
+        uses: actions/cache@v5
+        with:
+          path: .integration-test-durations.json
+          key: integration-durations-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            integration-durations-
+
+      - name: Run integration tests
+        env:
+          WDL_INTEGRATION_SKIP_PREPARE: "1"
+          WDL_INTEGRATION_SHARDS: "1"
+          WDL_TEARDOWN_INTEGRATION_STACK_ON_FAILURE: "1"
+        run: npm run test:integration
+
+      - name: Upload integration durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-durations
+          path: .integration-test-durations.json
+          if-no-files-found: ignore
+          include-hidden-files: true

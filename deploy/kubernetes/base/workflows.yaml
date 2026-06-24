@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: workflows
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: workflows
+spec:
+  ports:
+    - name: http
+      port: 9120
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: workflows
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflows
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: workflows
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: workflows
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wdl
+        app.kubernetes.io/component: workflows
+    spec:
+      containers:
+        - name: workflows
+          image: docker.io/getwdl/wdl-rust:latest
+          command: ["/workflows"]
+          envFrom:
+            - configMapRef:
+                name: wdl-config
+            - secretRef:
+                name: wdl-secrets
+          env:
+            - name: RUNTIME_HOST
+              value: user-runtime
+            - name: RUNTIME_PORT
+              value: "8088"
+            - name: SYSTEM_RUNTIME_HOST
+              value: system-runtime
+            - name: SYSTEM_RUNTIME_PORT
+              value: "8088"
+            - name: DO_RUNTIME_HOST
+              value: do-runtime
+            - name: DO_RUNTIME_PORT
+              value: "8788"
+          ports:
+            - name: http
+              containerPort: 9120
+          readinessProbe:
+            exec:
+              command: ["/workflows", "healthcheck"]
+          livenessProbe:
+            exec:
+              command: ["/workflows", "healthcheck"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi

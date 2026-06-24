@@ -1,0 +1,33 @@
+[package]
+name = "supervisor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "supervisor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "d1-supervisor"
+path = "src/bin/d1-supervisor.rs"
+
+[[bin]]
+name = "do-supervisor"
+path = "src/bin/do-supervisor.rs"
+
+[[bin]]
+name = "http-hc"
+path = "src/bin/http-hc.rs"
+
+[dependencies]
+libc = "0.2"
+# Drain/renew only call 127.0.0.1 over plain HTTP; keep reqwest TLS stacks off.
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+# Supervisor bins use #[tokio::main(flavor = "current_thread")].
+tokio = { workspace = true, features = ["macros", "process", "rt", "signal", "sync", "time"] }
+wdl-rust-common = { workspace = true, default-features = false }

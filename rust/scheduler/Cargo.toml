@@ -1,0 +1,29 @@
+[package]
+name = "scheduler"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "scheduler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scheduler"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
+chrono = { workspace = true, features = ["clock"] }
+chrono-tz = "0.10"
+croner = "3.0"
+futures-util = { workspace = true, features = ["std"] }
+redis = { workspace = true, features = ["tokio-comp", "streams", "connection-manager"] }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+wdl-rust-common = { workspace = true, features = ["axum"] }

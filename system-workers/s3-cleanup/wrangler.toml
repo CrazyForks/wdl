@@ -1,0 +1,27 @@
+name = "s3-cleanup"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+compatibility_flags = ["nodejs_compat"]
+
+# Cron drains D1-backed retry state; queue delivery is the ingress path.
+[triggers]
+crons = ["*/1 * * * *"]
+
+[[queues.consumers]]
+# Must match shared/s3-cleanup-lifecycle.js#S3_CLEANUP_QUEUE_NAME.
+# This retry budget is only for D1 persist failures before ack; S3 failures
+# are recorded in D1 and retried by cron from worker code.
+queue = "worker-delete-s3-cleanup"
+max_batch_size = 10
+max_batch_timeout = 1
+max_retries = 100
+retry_delay = 60
+
+[[d1_databases]]
+binding = "S3_CLEANUP_DB"
+database_name = "s3-cleanup-state"
+database_id = "s3-cleanup-state"
+migrations_dir = "migrations"
+
+# S3 creds are worker-level secrets — operator sets them via wdl secret
+# before first deploy.

@@ -1,0 +1,11 @@
+region      = "ap-east-1"
+name_prefix = "wdl-demo"
+environment = "test"
+
+# Optional: if empty, names are derived from name_prefix, account id, and region.
+state_bucket_name      = ""
+cloudtrail_bucket_name = ""
+
+# Optional: leave empty to skip creating an AWS Budget.
+budget_alert_emails     = []
+monthly_budget_limit_usd = 300

@@ -1,0 +1,139 @@
+export const R2_OBJECT_MAX_BUFFER_BYTES = 25 * 1024 * 1024;
+export const R2_LIST_LIMIT_MAX = 1000;
+// Keep in sync with shared/ns-pattern.js. This file is embedded into loaded
+// workers as _wdl-r2-utils.js, so it must stay standalone.
+export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/**
+ * @param {unknown} bucketName
+ * @returns {asserts bucketName is string}
+ */
+export function validateR2BucketName(bucketName) {
+  if (typeof bucketName !== "string" || !R2_BUCKET_NAME_RE.test(bucketName)) {
+    throw new Error(
+      `r2 bucket_name must match ${R2_BUCKET_NAME_RE}, got ${JSON.stringify(bucketName)}`
+    );
+  }
+}
+
+/**
+ * @param {unknown} key
+ * @returns {string}
+ */
+export function normalizeR2ObjectKey(key) {
+  if (typeof key !== "string" || key.length === 0) {
+    throw new TypeError("R2 key must be a non-empty string");
+  }
+  if (key.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new TypeError("R2 key must not contain . or .. path segments");
+  }
+  return key;
+}
+
+/**
+ * @typedef {{ ns: string, bucketName: string }} R2BindingProps
+ */
+
+/**
+ * @param {R2BindingProps} props
+ * @returns {string}
+ */
+export function r2PhysicalPrefix({ ns, bucketName }) {
+  if (typeof ns !== "string" || !ns) throw new Error("R2 prefix requires ns");
+  validateR2BucketName(bucketName);
+  return `r2/${ns}/${bucketName}/`;
+}
+
+/**
+ * @param {R2BindingProps} props
+ * @param {unknown} key
+ * @returns {string}
+ */
+export function r2PhysicalKey(props, key) {
+  return `${r2PhysicalPrefix(props)}${normalizeR2ObjectKey(key)}`;
+}
+
+/**
+ * @param {R2BindingProps} props
+ * @param {unknown} physicalKey
+ * @returns {string}
+ */
+export function stripR2PhysicalPrefix(props, physicalKey) {
+  const prefix = r2PhysicalPrefix(props);
+  if (typeof physicalKey !== "string" || !physicalKey.startsWith(prefix)) {
+    throw new Error("R2 backend returned an object outside the binding prefix");
+  }
+  return physicalKey.slice(prefix.length);
+}
+
+/**
+ * @param {unknown} key
+ * @returns {string}
+ */
+export function encodeS3KeyPath(key) {
+  return String(key).split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+/**
+ * @param {unknown} size
+ * @param {string} operation
+ */
+export function assertR2BufferSize(size, operation) {
+  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
+    throw new Error(`R2 ${operation}: invalid byte length ${size}`);
+  }
+  if (size > R2_OBJECT_MAX_BUFFER_BYTES) {
+    throw new Error(
+      `R2 ${operation}: object is ${size} bytes, exceeds the 25 MiB WDL R2 limit ` +
+        "(multipart upload is not supported yet)"
+    );
+  }
+}
+
+/**
+ * @param {unknown} limit
+ * @returns {number | undefined}
+ */
+export function normalizeR2ListLimit(limit) {
+  if (limit == null) return undefined;
+  let n;
+  if (typeof limit === "number") {
+    n = limit;
+  } else if (typeof limit === "string" && limit.trim() !== "") {
+    n = Number(limit);
+  } else {
+    throw new TypeError(`R2 list: limit must be an integer in [1, ${R2_LIST_LIMIT_MAX}]`);
+  }
+  if (!Number.isInteger(n) || n < 1 || n > R2_LIST_LIMIT_MAX) {
+    throw new TypeError(`R2 list: limit must be an integer in [1, ${R2_LIST_LIMIT_MAX}]`);
+  }
+  return n;
+}
+
+/**
+ * @param {Headers} headers
+ * @param {number} [fallbackSize]
+ * @returns {{ size: number, range?: { offset: number, length: number } }}
+ */
+export function r2RangeAndSizeFromHeaders(headers, fallbackSize = 0) {
+  const contentLength = Number(headers.get("content-length"));
+  const contentRange = headers.get("content-range");
+  if (contentRange) {
+    const m = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(contentRange);
+    if (m) {
+      const start = Number(m[1]);
+      const end = Number(m[2]);
+      const total = m[3] === "*" ? NaN : Number(m[3]);
+      return {
+        size: Number.isFinite(total)
+          ? total
+          : Number.isFinite(contentLength) ? contentLength : fallbackSize,
+        range: { offset: start, length: end - start + 1 },
+      };
+    }
+  }
+  return {
+    size: Number.isFinite(contentLength) ? contentLength : fallbackSize,
+    range: undefined,
+  };
+}

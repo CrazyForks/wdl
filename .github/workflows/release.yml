@@ -1,0 +1,303 @@
+name: WDL Docker release
+
+# Docker image release workflow. Release tags publish images automatically;
+# manual runs can validate or publish the same build path.
+# Docker Hub publishes under docker.io/getwdl, and GHCR publishes under the
+# repository owner. Leave `push` false for build validation. Validation still
+# uses Docker Build Cloud and therefore needs Docker Hub credentials.
+on:
+  push:
+    tags:
+      - "wdl.*"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push images to Docker Hub and GHCR"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-metadata:
+    name: Release metadata
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      image_tag: ${{ steps.platform-version.outputs.image_tag }}
+      version: ${{ steps.platform-version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set WDL platform version
+        id: platform-version
+        run: |
+          node --input-type=module <<'JS' >> "$GITHUB_OUTPUT"
+          import { readFileSync } from "node:fs";
+          const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+          const raw = String(lock.packages?.["node_modules/workerd"]?.version ?? "");
+          if (!/^1\.\d{8}\.\d+$/u.test(raw)) {
+            throw new Error(`unexpected locked workerd version for WDL platform version: ${raw}`);
+          }
+          console.log(`value=wdl.${raw.slice(2)}`);
+          console.log(`image_tag=wdl.${raw.slice(2, 10)}.${process.env.GITHUB_SHA.slice(0, 8)}`);
+          JS
+
+      - name: Validate release metadata
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push) }}
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          WDL_VERSION: ${{ steps.platform-version.outputs.value }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "push=true release must run from a tag, got ref type: $REF_TYPE" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$REF_NAME" | grep -Eq '^wdl\.[0-9]{8}\.[0-9]+$'; then
+            echo "release tag must match wdl.YYYYMMDD.N, got: $REF_NAME" >&2
+            exit 1
+          fi
+          if [ "$REF_NAME" != "$WDL_VERSION" ]; then
+            echo "release tag $REF_NAME does not match platform version $WDL_VERSION" >&2
+            exit 1
+          fi
+          tag_ref="refs/tags/$REF_NAME"
+          if [ "$(git cat-file -t "$tag_ref")" != "tag" ]; then
+            echo "release tag must be annotated: $REF_NAME" >&2
+            exit 1
+          fi
+          tag_sha="$(git rev-parse "$tag_ref")"
+          tag_verified="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.verification.verified')"
+          tag_reason="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.verification.reason')"
+          if [ "$tag_verified" != "true" ]; then
+            echo "release tag must have a verified signature; GitHub verification reason: $tag_reason" >&2
+            exit 1
+          fi
+          tag_commit="$(git rev-parse "$tag_ref^{commit}")"
+          default_tip="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+          if [ "$tag_commit" != "$default_tip" ]; then
+            echo "release tag commit $tag_commit is not the current $DEFAULT_BRANCH tip $default_tip" >&2
+            exit 1
+          fi
+          ci_result="$(gh run list \
+            --workflow CI \
+            --commit "$tag_commit" \
+            --branch "$DEFAULT_BRANCH" \
+            --event push \
+            --json conclusion,status,url \
+            --jq 'map(select(.status == "completed")) | first | [.conclusion, .url] | @tsv')"
+          if [ -z "$ci_result" ]; then
+            echo "release tag commit $tag_commit has no completed $DEFAULT_BRANCH push CI workflow run" >&2
+            exit 1
+          fi
+          ci_conclusion="${ci_result%%	*}"
+          ci_url="${ci_result#*	}"
+          if [ "$ci_conclusion" != "success" ]; then
+            echo "release tag commit $tag_commit $DEFAULT_BRANCH push CI conclusion is $ci_conclusion: $ci_url" >&2
+            exit 1
+          fi
+          node --input-type=module <<'JS'
+          import { readFileSync } from "node:fs";
+
+          const refName = process.env.REF_NAME;
+          const changelog = readFileSync("CHANGELOG.md", "utf8");
+          const heading = `## ${refName}`;
+          const start = changelog.indexOf(heading);
+          if (start === -1) {
+            throw new Error(`CHANGELOG.md is missing ${heading}`);
+          }
+          const bodyStart = changelog.indexOf("\n", start);
+          const next = changelog.indexOf("\n## ", bodyStart + 1);
+          const body = changelog.slice(bodyStart + 1, next === -1 ? undefined : next).trim();
+          if (!body) {
+            throw new Error(`CHANGELOG.md has empty notes for ${refName}`);
+          }
+          JS
+
+  docker:
+    name: Docker image (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: release-metadata
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: wdl-workerd
+            dockerfile: Dockerfile.workerd
+          - image: wdl-rust
+            dockerfile: Dockerfile.rust
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set Rust toolchain
+        run: |
+          channel="$(awk -F '"' '/^channel = / { print $2; exit }' rust/rust-toolchain.toml)"
+          if [ -z "$channel" ]; then
+            echo "rust/rust-toolchain.toml is missing a channel" >&2
+            exit 1
+          fi
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-global-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-global-${{ runner.os }}-
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Generate third-party license bundles
+        run: npm run build:third-party-licenses
+
+      - name: Set build date
+        id: build-date
+        run: echo "value=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+          logout: false
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push) }}
+        uses: docker/login-action@v4
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        with:
+          driver: cloud
+          endpoint: "getwdl/builder"
+          cache-binary: false
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push) }}
+          provenance: mode=max
+          sbom: true
+          tags: |
+            docker.io/getwdl/${{ matrix.image }}:${{ needs.release-metadata.outputs.image_tag }}
+            docker.io/getwdl/${{ matrix.image }}:latest
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.release-metadata.outputs.image_tag }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest
+          build-args: |
+            WDL_VERSION=${{ needs.release-metadata.outputs.image_tag }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.build-date.outputs.value }}
+          cache-from: type=gha,scope=release-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
+
+      - name: Drop Docker credentials
+        if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          docker logout || true
+          docker logout ghcr.io || true
+          rm -rf "$DOCKER_CONFIG"
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: docker
+    if: ${{ github.ref_type == 'tag' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push)) }}
+    permissions:
+      contents: write
+    environment:
+      name: release
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Extract release notes
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const refName = process.env.REF_NAME;
+          const notesFile = process.env.NOTES_FILE;
+          const changelog = readFileSync("CHANGELOG.md", "utf8");
+          const heading = `## ${refName}`;
+          const start = changelog.indexOf(heading);
+          if (start === -1) {
+            throw new Error(`CHANGELOG.md is missing ${heading}`);
+          }
+          const bodyStart = changelog.indexOf("\n", start);
+          const next = changelog.indexOf("\n## ", bodyStart + 1);
+          const body = changelog.slice(bodyStart + 1, next === -1 ? undefined : next).trim();
+          if (!body) {
+            throw new Error(`CHANGELOG.md has empty notes for ${refName}`);
+          }
+          writeFileSync(notesFile, `${body}\n`);
+          JS
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$REF_NAME" --title "$REF_NAME" --notes-file "$NOTES_FILE" --latest
+          else
+            gh release create "$REF_NAME" --title "$REF_NAME" --notes-file "$NOTES_FILE" --latest
+          fi

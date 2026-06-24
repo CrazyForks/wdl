@@ -1,0 +1,43 @@
+services:
+  redis-proxy-user:
+    image: docker.io/getwdl/wdl-rust:latest
+    pull_policy: always
+  redis-proxy-system:
+    image: docker.io/getwdl/wdl-rust:latest
+    pull_policy: always
+  redis-proxy-do:
+    image: docker.io/getwdl/wdl-rust:latest
+    pull_policy: always
+  scheduler:
+    image: docker.io/getwdl/wdl-rust:latest
+    pull_policy: always
+  workflows:
+    image: docker.io/getwdl/wdl-rust:latest
+    pull_policy: always
+  user-runtime:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  system-runtime:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  gateway:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  d1-runtime:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  d1-runtime-a:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  d1-runtime-b:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  do-runtime:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  do-runtime-a:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  do-runtime-b:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always

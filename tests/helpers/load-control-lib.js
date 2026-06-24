@@ -1,0 +1,94 @@
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  freshRepositoryModuleDataUrl,
+  moduleDataUrl,
+  readRepositoryFile,
+  repositoryFileUrl,
+} from "./load-shared-module.js";
+import { compileSharedAuthRoles } from "./load-auth-roles.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Resolve croner against the root package so tests pick up the hoisted
+// version used by control.
+const moduleRequire = createRequire(path.resolve(__dirname, "../../package.json"));
+const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
+const SHARED_QUEUE_KEYS_URL = repositoryFileUrl("shared/queue-keys.js");
+const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+
+/**
+ * Compile the control/* module graph against shared/* deps. Returns URLs so
+ * callers can rewrite imports in other source files (e.g. control/handlers/*.js)
+ * without re-stubbing control-lib's surface. Each control module is compiled
+ * once and the downstream URL is reused across siblings, so cross-module
+ * imports share one instance.
+ *
+ * @param {{ rolesPatch?: Record<string, unknown> }} [opts]
+ */
+export async function compileControlGraph(opts = {}) {
+  const { sharedAuthRolesUrl, sharedAuthRoles } = await compileSharedAuthRoles(opts);
+  const cronerUrl = pathToFileURL(moduleRequire.resolve("croner")).href;
+  const sharedCronTimeUrl = freshRepositoryModuleDataUrl("shared/cron-time.js", [
+    [/from "croner"/g, `from ${JSON.stringify(cronerUrl)}`],
+  ]);
+
+  // Dependency order: lib → (bindings, topology, lifecycle-indexes) → bundle.
+  const libUrl = freshRepositoryModuleDataUrl("control/lib.js", [
+    [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
+    [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
+    [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
+  ]);
+
+  const bindingsUrl = freshRepositoryModuleDataUrl("control/bindings.js", [
+    [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
+    [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
+    [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
+    [/from "control-lib"/g, `from ${JSON.stringify(libUrl)}`],
+  ]);
+
+  const topologyUrl = freshRepositoryModuleDataUrl("control/topology.js", [
+    [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
+    [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
+    [/from "control-lib"/g, `from ${JSON.stringify(libUrl)}`],
+    [/from "shared-cron-time"/g, `from ${JSON.stringify(sharedCronTimeUrl)}`],
+  ]);
+
+  const lifecycleIndexesUrl = freshRepositoryModuleDataUrl("control/lifecycle-indexes.js", [
+    [/from "control-lib"/g, `from ${JSON.stringify(libUrl)}`],
+    [/from "shared-queue-keys"/g, `from ${JSON.stringify(SHARED_QUEUE_KEYS_URL)}`],
+  ]);
+
+  const packageJsonSourceUrl = moduleDataUrl(
+    `export default ${JSON.stringify(readRepositoryFile("package.json"))};`
+  );
+  const bundleUrl = freshRepositoryModuleDataUrl("control/bundle.js", [
+    [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
+    [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
+    [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],
+  ]);
+
+  return {
+    sharedAuthRolesUrl,
+    sharedAuthRoles,
+    libUrl,
+    bindingsUrl,
+    topologyUrl,
+    lifecycleIndexesUrl,
+    bundleUrl,
+  };
+}
+
+/** @param {{ rolesPatch?: Record<string, unknown> }} [opts] */
+export async function loadControlLib(opts = {}) {
+  const { sharedAuthRoles, libUrl, bindingsUrl, topologyUrl, bundleUrl } =
+    await compileControlGraph(opts);
+  const [controlLib, controlBindings, controlTopology, controlBundle] = await Promise.all([
+    import(libUrl),
+    import(bindingsUrl),
+    import(topologyUrl),
+    import(bundleUrl),
+  ]);
+  return { controlLib, controlBindings, controlTopology, controlBundle, sharedAuthRoles };
+}

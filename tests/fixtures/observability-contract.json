@@ -1,0 +1,22 @@
+{
+  "metricPrefix": "wdl",
+  "requestMetricFamilies": [
+    "requests",
+    "request_duration_ms",
+    "request_errors"
+  ],
+  "requestMetricLabels": [
+    "route",
+    "service",
+    "status"
+  ],
+  "cardinalityWarnLimit": 100,
+  "prometheusContentType": "text/plain; version=0.0.4; charset=utf-8",
+  "labelEscapes": [
+    { "raw": "a\\b", "escaped": "a\\\\b" },
+    { "raw": "a\nb", "escaped": "a\\nb" },
+    { "raw": "a\rb", "escaped": "a\\rb" },
+    { "raw": "a\"b", "escaped": "a\\\"b" },
+    { "raw": "\r\n\"\\", "escaped": "\\r\\n\\\"\\\\" }
+  ]
+}

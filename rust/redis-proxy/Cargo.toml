@@ -1,0 +1,31 @@
+[package]
+name = "redis-proxy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "redis_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "redis-proxy"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+axum = { workspace = true, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+futures-util = { workspace = true, features = ["std"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+wdl-rust-common = { workspace = true, features = ["axum"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+serde_urlencoded = "0.7"

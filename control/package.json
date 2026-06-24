@@ -1,0 +1,11 @@
+{
+  "name": "control",
+  "private": true,
+  "license": "Apache-2.0",
+  "author": "Sean Consulting OÜ",
+  "type": "module",
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "croner": "^10.0.1"
+  }
+}

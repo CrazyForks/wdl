@@ -1,0 +1,13 @@
+name = "kv-demo"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+# KV namespace — `id` here is the platform-local namespace id (unlike
+# Cloudflare where it's a UUID assigned by the control plane). On deploy
+# the CLI propagates this binding into the uploaded manifest verbatim.
+[[kv_namespaces]]
+binding = "VISITS"
+id = "visits"
+
+[vars]
+GREETING = "hello from kv-demo"

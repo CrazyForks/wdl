@@ -1,0 +1,99 @@
+# Copyright 2026 Sean Consulting OÜ
+# SPDX-License-Identifier: Apache-2.0
+
+ARG WDL_VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+# d1-supervisor + do-supervisor are PID 1 of the d1-runtime / do-runtime
+# containers — same task as workerd, child-process spawn so SIGTERM is
+# orchestrated locally rather than racing a sidecar.
+FROM rust:1-alpine AS supervisor-build
+WORKDIR /src
+ENV CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/target
+
+COPY rust/rust-toolchain.toml ./rust-toolchain.toml
+COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/common/Cargo.toml ./common/
+COPY rust/supervisor/Cargo.toml ./supervisor/
+COPY rust/redis-proxy/Cargo.toml ./redis-proxy/
+COPY rust/scheduler/Cargo.toml ./scheduler/
+COPY rust/workflows/Cargo.toml ./workflows/
+COPY rust/common/src ./common/src
+COPY rust/supervisor/src ./supervisor/src
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/target,sharing=locked \
+    cargo build --release --locked -p supervisor \
+    && cp /target/release/d1-supervisor /d1-supervisor \
+    && cp /target/release/do-supervisor /do-supervisor \
+    && cp /target/release/http-hc /http-hc
+
+FROM node:24-slim AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --workspaces=false
+
+# Keep layout identical to the repo so relative `embed "../shared/*"` +
+# `embed "../control/*"` in the capnp files resolves without any rewrite.
+COPY shared ./shared
+COPY gateway ./gateway
+COPY runtime ./runtime
+COPY d1-runtime ./d1-runtime
+COPY do-runtime ./do-runtime
+COPY control ./control
+COPY auth ./auth
+COPY scripts ./scripts
+
+RUN npm run compile:workerd
+
+# Resolve the workerd npm package's symlink wrapper to the real binary so
+# the runtime stage can ship it without keeping all of node_modules. The
+# Cloudflare-published Linux binary is glibc-linked, so the runtime stage
+# must stay on a glibc base image.
+RUN cp -L /app/node_modules/.bin/workerd /workerd && /workerd --version
+
+FROM gcr.io/distroless/base-debian12@sha256:e7e678c88c59e70e105a46549bb3fbfb3d732ee3b4afd3a19fdab2e15afaa6b3 AS base
+WORKDIR /app
+ARG WDL_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+LABEL org.opencontainers.image.title="WDL workerd runtime" \
+      org.opencontainers.image.description="WDL gateway, runtime, D1, and Durable Object workerd image" \
+      org.opencontainers.image.source="https://github.com/wdl-dev/wdl" \
+      org.opencontainers.image.documentation="https://github.com/wdl-dev/wdl/tree/main/docs" \
+      org.opencontainers.image.vendor="Sean Consulting OÜ" \
+      org.opencontainers.image.authors="Sean Consulting OÜ" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${WDL_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
+COPY LICENSE /usr/share/licenses/wdl/LICENSE
+COPY licenses/images/workerd-NOTICE /usr/share/licenses/wdl/NOTICE
+# The GitHub release workflow runs `npm run build:third-party-licenses`
+# first; internal deployment builds may copy only the README placeholder.
+COPY licenses/third-party/supervisor /usr/share/licenses/wdl/third-party/supervisor
+COPY licenses/third-party/workerd /usr/share/licenses/wdl/third-party/workerd
+COPY --from=build /workerd /usr/local/bin/workerd
+COPY --from=supervisor-build /d1-supervisor /usr/local/bin/d1-supervisor
+COPY --from=supervisor-build /do-supervisor /usr/local/bin/do-supervisor
+COPY --from=supervisor-build /http-hc /usr/local/bin/http-hc
+COPY --from=build /app/dist ./dist
+RUN ["/usr/local/bin/workerd", "--version"]
+
+# ECS task definitions pick the entry/command:
+#   gateway        : entryPoint ["workerd"]
+#                    command    ["serve", "-b", "/app/dist/workerd-configs/gateway.bin", "--experimental"]
+#   user-runtime   : entryPoint ["workerd"]
+#                    command    ["serve", "-b", "/app/dist/workerd-configs/user-runtime.bin", "--experimental"]
+#   system-runtime : entryPoint ["workerd"]
+#                    command    ["serve", "-b", "/app/dist/workerd-configs/system-runtime.bin", "--experimental"]
+#   d1-runtime     : entryPoint ["d1-supervisor"]
+#                    stopTimeout >= 20s
+#                    env D1_OWNER_TTL_SECONDS=120 D1_PROBE_TIMEOUT_MS=500 D1_QUERY_TIMEOUT_MS=30000 D1_SHUTDOWN_TIMEOUT_MS=15000
+#   do-runtime     : entryPoint ["do-supervisor"]
+#                    stopTimeout >= 20s
+#                    env DO_OWNER_TTL_SECONDS=120 DO_DRAIN_IN_FLIGHT_TIMEOUT_MS=8000

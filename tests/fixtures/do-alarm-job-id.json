@@ -1,0 +1,46 @@
+[
+  {
+    "purpose": "legal alarm identity",
+    "input": {
+      "ns": "demo",
+      "worker": "worker",
+      "doStorageId": "do_123",
+      "className": "Room",
+      "objectName": "alice"
+    },
+    "expected": "doa-e2da42ffb7e4b66c7f94a179ca9b7d6bf9ce92966aaea0a532e4d00c3ad2bbdf"
+  },
+  {
+    "purpose": "legal alarm identity with punctuation in object name",
+    "input": {
+      "ns": "demo",
+      "worker": "alarms",
+      "doStorageId": "do_storage_long_456789",
+      "className": "AlarmCounter",
+      "objectName": "name:with/slashes and spaces"
+    },
+    "expected": "doa-d0c84ab1f1ff243ed78113b2c6e1589352eb45c95abce9ba82b06916428be0b6"
+  },
+  {
+    "purpose": "hash vector only; dispatch state validation rejects dotted class names",
+    "input": {
+      "ns": "tenant-123",
+      "worker": "WorkerABC123",
+      "doStorageId": "do_abcdef0123456789",
+      "className": "Namespace.Room",
+      "objectName": "unicode-\u2603"
+    },
+    "expected": "doa-a1a86d5b6167bab7cb3d735bf2aaf1ffa71ed1bb369bd0193ca164ca8176666a"
+  },
+  {
+    "purpose": "hash vector only; dispatch state validation rejects NUL object names",
+    "input": {
+      "ns": "__system__",
+      "worker": "system-worker",
+      "doStorageId": "do_system",
+      "className": "SystemAlarm",
+      "objectName": "object\u0000with\u0000nul"
+    },
+    "expected": "doa-f024c5a447ada9c2a55c7579c7a543cec12bfa98b9378eb38cab41ad344db0dc"
+  }
+]

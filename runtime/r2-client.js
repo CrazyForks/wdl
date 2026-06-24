@@ -1,0 +1,493 @@
+import {
+  R2_OBJECT_MAX_BUFFER_BYTES,
+  assertR2BufferSize,
+  normalizeR2ListLimit,
+  normalizeR2ObjectKey,
+} from "./_wdl-r2-utils.js";
+import { requestIdFromOptions } from "./_wdl-request-id.js";
+
+/**
+ * @typedef {Record<string, unknown>} AnyRecord
+ * @typedef {{
+ *   head?(key: string, requestMeta: object): Promise<AnyRecord | null>,
+ *   get?(key: string, options: AnyRecord, requestMeta: object): Promise<null | { meta: AnyRecord, body?: ReadableStream<Uint8Array> | null }>,
+ *   put?(key: string, body: Uint8Array, options: AnyRecord, requestMeta: object): Promise<AnyRecord | null>,
+ *   delete?(keys: string | string[], requestMeta: object): Promise<unknown>,
+ *   list?(options: AnyRecord, requestMeta: object): Promise<AnyRecord & { objects?: AnyRecord[], truncated?: unknown, cursor?: unknown, delimitedPrefixes?: unknown }>,
+ * }} R2Stub
+ * @typedef {{ stub: R2Stub, requestIdOptions: object }} R2BucketState
+ */
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder();
+
+/** @param {unknown} value */
+function dateFromUnknown(value) {
+  if (value instanceof Date || typeof value === "string" || typeof value === "number") {
+    return new Date(value);
+  }
+  return new Date(String(value));
+}
+
+/** @param {unknown} value */
+function stringOrUndefined(value) {
+  return typeof value === "string" ? value : undefined;
+}
+
+/** @param {Uint8Array} bytes @returns {ArrayBuffer} */
+function bytesToArrayBuffer(bytes) {
+  return /** @type {ArrayBuffer} */ (
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  );
+}
+
+/** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
+async function readStreamWithLimit(stream, operation) {
+  const reader = stream.getReader();
+  /** @type {Uint8Array[]} */
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
+        await reader.cancel(
+          `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
+        ).catch(() => {});
+        assertR2BufferSize(total, operation);
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  if (chunks.length === 1) {
+    const [chunk] = chunks;
+    if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
+      return chunk;
+    }
+    return new Uint8Array(chunk);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+/** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
+function cappedReadableStream(stream, operation) {
+  const reader = stream.getReader();
+  let total = 0;
+  return new ReadableStream({
+    async pull(controller) {
+      const { value, done } = await reader.read();
+      if (done) {
+        try { reader.releaseLock(); } catch {}
+        controller.close();
+        return;
+      }
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
+        await reader.cancel(
+          `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
+        ).catch(() => {});
+        try { reader.releaseLock(); } catch {}
+        try {
+          assertR2BufferSize(total, operation);
+        } catch (err) {
+          controller.error(err);
+          return;
+        }
+      }
+      controller.enqueue(chunk);
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        try { reader.releaseLock(); } catch {}
+      }
+    },
+  });
+}
+
+/** @param {Headers} headers */
+function headersToHttpMetadata(headers) {
+  const expires = headers.get("expires");
+  return {
+    contentType: headers.get("content-type") || undefined,
+    contentLanguage: headers.get("content-language") || undefined,
+    contentDisposition: headers.get("content-disposition") || undefined,
+    contentEncoding: headers.get("content-encoding") || undefined,
+    cacheControl: headers.get("cache-control") || undefined,
+    cacheExpiry: expires ? new Date(expires).getTime() : undefined,
+  };
+}
+
+/** @param {unknown} input */
+function normalizeHttpMetadata(input) {
+  if (input == null) return undefined;
+  if (input instanceof Headers) return headersToHttpMetadata(input);
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("R2 httpMetadata must be an object or Headers");
+  }
+  /** @type {AnyRecord} */
+  const out = {};
+  const record = /** @type {AnyRecord} */ (input);
+  for (const key of [
+    "contentType",
+    "contentLanguage",
+    "contentDisposition",
+    "contentEncoding",
+    "cacheControl",
+  ]) {
+    if (record[key] != null) out[key] = String(record[key]);
+  }
+  if (record.cacheExpiry != null) {
+    const ms = record.cacheExpiry instanceof Date
+      ? record.cacheExpiry.getTime()
+      : dateFromUnknown(record.cacheExpiry).getTime();
+    if (!Number.isFinite(ms)) throw new TypeError("R2 httpMetadata.cacheExpiry must be a Date");
+    out.cacheExpiry = ms;
+  }
+  return out;
+}
+
+/** @param {unknown} input */
+function normalizeCustomMetadata(input) {
+  if (input == null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("R2 customMetadata must be an object");
+  }
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value != null) out[key] = String(value);
+  }
+  return out;
+}
+
+/** @param {unknown} range */
+function normalizeRange(range) {
+  if (range == null) return undefined;
+  if (range instanceof Headers) {
+    const header = range.get("range");
+    return header ? { header } : undefined;
+  }
+  if (typeof range !== "object" || Array.isArray(range)) {
+    throw new TypeError("R2 range must be an object or Headers");
+  }
+  /** @type {AnyRecord} */
+  const out = {};
+  const record = /** @type {AnyRecord} */ (range);
+  for (const key of ["offset", "length", "suffix"]) {
+    if (record[key] != null) out[key] = Number(record[key]);
+  }
+  return out;
+}
+
+/** @param {unknown} onlyIf */
+function normalizeOnlyIf(onlyIf) {
+  if (onlyIf == null) return undefined;
+  if (onlyIf instanceof Headers) {
+    /** @type {AnyRecord} */
+    const out = {};
+    for (const [header, target] of [
+      ["if-match", "etagMatches"],
+      ["if-none-match", "etagDoesNotMatch"],
+      ["if-unmodified-since", "uploadedBefore"],
+      ["if-modified-since", "uploadedAfter"],
+    ]) {
+      const value = onlyIf.get(header);
+      if (value) out[target] = value;
+    }
+    return out;
+  }
+  if (typeof onlyIf !== "object" || Array.isArray(onlyIf)) {
+    throw new TypeError("R2 onlyIf must be an object or Headers");
+  }
+  const input = /** @type {AnyRecord} */ (onlyIf);
+  /** @type {AnyRecord} */
+  const out = {};
+  if (input.etagMatches != null) {
+    out.etagMatches = Array.isArray(input.etagMatches)
+      ? input.etagMatches.map(String)
+      : String(input.etagMatches);
+  }
+  if (input.etagDoesNotMatch != null) {
+    out.etagDoesNotMatch = Array.isArray(input.etagDoesNotMatch)
+      ? input.etagDoesNotMatch.map(String)
+      : String(input.etagDoesNotMatch);
+  }
+  if (input.uploadedBefore != null) out.uploadedBefore = dateFromUnknown(input.uploadedBefore).toUTCString();
+  if (input.uploadedAfter != null) out.uploadedAfter = dateFromUnknown(input.uploadedAfter).toUTCString();
+  return out;
+}
+
+/** @param {AnyRecord} [options] */
+function normalizeGetOptions(options = {}) {
+  return {
+    range: normalizeRange(options.range),
+    onlyIf: normalizeOnlyIf(options.onlyIf),
+  };
+}
+
+/** @param {AnyRecord} [options] */
+function normalizePutOptions(options = {}) {
+  const onlyIf = options.onlyIf !== null && typeof options.onlyIf === "object" && !Array.isArray(options.onlyIf)
+    ? /** @type {AnyRecord} */ (options.onlyIf)
+    : {};
+  if (options.ssecKey != null || options.md5 != null || options.sha1 != null ||
+      options.sha256 != null || options.sha384 != null || options.sha512 != null) {
+    throw new TypeError("R2 put: checksums and SSE-C are not supported by WDL R2 yet");
+  }
+  if (onlyIf.uploadedBefore != null || onlyIf.uploadedAfter != null) {
+    throw new TypeError(
+      "WDL R2 put({onlyIf}) only supports etag-based conditions; " +
+      "uploadedBefore/uploadedAfter are not supported yet"
+    );
+  }
+  return {
+    httpMetadata: normalizeHttpMetadata(options.httpMetadata),
+    customMetadata: normalizeCustomMetadata(options.customMetadata),
+    storageClass: options.storageClass == null ? undefined : String(options.storageClass),
+    onlyIf: normalizeOnlyIf(options.onlyIf),
+  };
+}
+
+/** @returns {never} */
+function unsupportedMultipartUpload() {
+  throw new TypeError("WDL R2 does not support multipart upload yet");
+}
+
+/** @param {AnyRecord} meta */
+function metaWithDates(meta) {
+  return {
+    ...meta,
+    uploaded: dateFromUnknown(meta.uploaded || Date.now()),
+    httpMetadata: meta.httpMetadata || {},
+    customMetadata: meta.customMetadata || {},
+    checksums: meta.checksums || {},
+  };
+}
+
+/** @type {WeakMap<R2Bucket, R2BucketState>} */
+const bucketState = new WeakMap();
+
+/** @param {R2Bucket} bucket */
+function bucketRequestMeta(bucket) {
+  const state = bucketState.get(bucket);
+  if (!state) return {};
+  const requestId = requestIdFromOptions(state.requestIdOptions);
+  return requestId ? { requestId } : {};
+}
+
+export class R2Object {
+  /** @type {string} */
+  key = "";
+  /** @type {string | undefined} */
+  version;
+  /** @type {number | undefined} */
+  size;
+  /** @type {string | undefined} */
+  etag;
+  /** @type {string | undefined} */
+  httpEtag;
+  /** @type {Date} */
+  uploaded = new Date(0);
+  /** @type {AnyRecord} */
+  httpMetadata = {};
+  /** @type {AnyRecord} */
+  customMetadata = {};
+  /** @type {AnyRecord} */
+  checksums = {};
+  /** @type {AnyRecord | undefined} */
+  range;
+  /** @type {string | undefined} */
+  storageClass;
+
+  /** @param {AnyRecord} meta */
+  constructor(meta) {
+    Object.assign(this, metaWithDates(meta));
+  }
+
+  /** @param {Headers} headers */
+  writeHttpMetadata(headers) {
+    const h = this.httpMetadata || {};
+    const contentType = stringOrUndefined(h.contentType);
+    const contentLanguage = stringOrUndefined(h.contentLanguage);
+    const contentDisposition = stringOrUndefined(h.contentDisposition);
+    const contentEncoding = stringOrUndefined(h.contentEncoding);
+    const cacheControl = stringOrUndefined(h.cacheControl);
+    if (contentType) headers.set("content-type", contentType);
+    if (contentLanguage) headers.set("content-language", contentLanguage);
+    if (contentDisposition) headers.set("content-disposition", contentDisposition);
+    if (contentEncoding) headers.set("content-encoding", contentEncoding);
+    if (cacheControl) headers.set("cache-control", cacheControl);
+    if (h.cacheExpiry) headers.set("expires", dateFromUnknown(h.cacheExpiry).toUTCString());
+  }
+}
+
+export class R2ObjectBody extends R2Object {
+  /** @type {ReadableStream<Uint8Array>} */
+  body;
+  /** @type {boolean} */
+  bodyUsed;
+
+  /** @param {AnyRecord} meta @param {ReadableStream<Uint8Array>} body */
+  constructor(meta, body) {
+    super(meta);
+    this.body = cappedReadableStream(body, "get");
+    this.bodyUsed = false;
+  }
+
+  takeBody() {
+    if (this.bodyUsed) {
+      throw new TypeError("Body has already been used. It can only be used once.");
+    }
+    this.bodyUsed = true;
+    return this.body;
+  }
+
+  async bytes() {
+    return readStreamWithLimit(this.takeBody(), "get");
+  }
+
+  async arrayBuffer() {
+    return bytesToArrayBuffer(await this.bytes());
+  }
+
+  async text() {
+    return utf8Decoder.decode(await this.bytes());
+  }
+
+  async json() {
+    return JSON.parse(await this.text());
+  }
+
+  async blob() {
+    return new Blob([await this.arrayBuffer()], {
+      type: stringOrUndefined(this.httpMetadata?.contentType) || "",
+    });
+  }
+}
+
+/** @param {unknown} value */
+async function valueToBytes(value) {
+  if (value == null) return new Uint8Array(0);
+  if (typeof value === "string") return utf8Encoder.encode(value);
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof Blob) {
+    return readStreamWithLimit(value.stream(), "put");
+  }
+  if (value instanceof ReadableStream) {
+    // WDL R2 does not implement multipart yet: stream PUT is buffered locally,
+    // capped at 25 MiB, then sent as one S3 PUT.
+    return readStreamWithLimit(value, "put");
+  }
+  throw new TypeError(
+    "R2 put: value must be string | ArrayBuffer | typed array | Blob | ReadableStream"
+  );
+}
+
+export class R2Bucket {
+  /** @param {R2Stub} stub @param {{ requestIdProvider?: () => string | null, requestId?: string | null }} [options] */
+  constructor(stub, options = {}) {
+    // Provider is used by class-style entrypoints where the same env wrapper
+    // can serve different fetch/queue/scheduled invocations with different ids.
+    bucketState.set(this, {
+      stub,
+      requestIdOptions: options,
+    });
+  }
+
+  /** @param {string} key */
+  async head(key) {
+    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    if (typeof stub.head !== "function") throw new TypeError("R2 stub head is not configured");
+    const meta = await stub.head(normalizeR2ObjectKey(key), bucketRequestMeta(this));
+    return meta ? new R2Object(meta) : null;
+  }
+
+  /** @param {string} key @param {AnyRecord} [options] */
+  async get(key, options) {
+    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    if (typeof stub.get !== "function") throw new TypeError("R2 stub get is not configured");
+    const result = await stub.get(
+      normalizeR2ObjectKey(key),
+      normalizeGetOptions(options),
+      bucketRequestMeta(this)
+    );
+    if (!result) return null;
+    if (!result.body) return new R2Object(result.meta);
+    return new R2ObjectBody(result.meta, result.body);
+  }
+
+  /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
+  async put(key, value, options) {
+    const bytes = await valueToBytes(value);
+    assertR2BufferSize(bytes.byteLength, "put");
+    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");
+    const meta = await stub.put(
+      normalizeR2ObjectKey(key),
+      bytes,
+      normalizePutOptions(options),
+      bucketRequestMeta(this)
+    );
+    return meta ? new R2Object(meta) : null;
+  }
+
+  /** @param {unknown[]} _args */
+  createMultipartUpload(..._args) {
+    unsupportedMultipartUpload();
+  }
+
+  /** @param {unknown[]} _args */
+  resumeMultipartUpload(..._args) {
+    unsupportedMultipartUpload();
+  }
+
+  /** @param {string | string[]} keys */
+  async delete(keys) {
+    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    if (typeof stub.delete !== "function") throw new TypeError("R2 stub delete is not configured");
+    if (Array.isArray(keys)) {
+      await stub.delete(
+        keys.map((key) => normalizeR2ObjectKey(key)),
+        bucketRequestMeta(this)
+      );
+      return;
+    }
+    await stub.delete(normalizeR2ObjectKey(keys), bucketRequestMeta(this));
+  }
+
+  /** @param {AnyRecord} [options] */
+  async list(options = {}) {
+    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    if (typeof stub.list !== "function") throw new TypeError("R2 stub list is not configured");
+    const out = await stub.list({
+      prefix: options.prefix == null ? undefined : String(options.prefix),
+      delimiter: options.delimiter == null ? undefined : String(options.delimiter),
+      cursor: options.cursor == null ? undefined : String(options.cursor),
+      startAfter: options.startAfter == null ? undefined : String(options.startAfter),
+      limit: normalizeR2ListLimit(options.limit),
+      include: Array.isArray(options.include) ? options.include.map(String) : undefined,
+    }, bucketRequestMeta(this));
+    const objects = /** @type {AnyRecord[]} */ (out.objects || []);
+    return {
+      ...out,
+      objects: objects.map((meta) => new R2Object(meta)),
+    };
+  }
+}

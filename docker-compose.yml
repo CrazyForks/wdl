@@ -1,0 +1,447 @@
+# Every local Rust sidecar entry must inherit this anchor so the shared image
+# build context and Dockerfile path cannot drift by service entry.
+x-rust-sidecar-image: &rust-sidecar-image
+  image: wdl-rust:dev
+  build:
+    context: .
+    dockerfile: Dockerfile.rust
+
+# Every local workerd service should inherit this image anchor so the shared
+# image build context and Dockerfile path cannot drift by service entry.
+x-workerd-image: &workerd-image
+  image: wdl-workerd:dev
+  build:
+    context: .
+    dockerfile: Dockerfile.workerd
+
+x-internal-auth-env: &internal-auth-env
+  WDL_INTERNAL_AUTH_TOKEN: ${WDL_INTERNAL_AUTH_TOKEN:-local-internal-auth-token}
+  WDL_INTERNAL_AUTH_PREVIOUS_TOKEN: ${WDL_INTERNAL_AUTH_PREVIOUS_TOKEN:-}
+
+# D1 runtime variants share local storage, health, entrypoint, and image wiring;
+# each service block below should only declare its task identity.
+x-d1-runtime-env: &d1-runtime-env
+  <<: *internal-auth-env
+  REDIS_ADDR: redis:6379
+  D1_OWNER_TTL_SECONDS: "5"
+  D1_OWNER_LEASE_GUARD_MS: ${D1_OWNER_LEASE_GUARD_MS:-1000}
+  D1_PROBE_TIMEOUT_MS: "500"
+  D1_QUERY_TIMEOUT_MS: "3000"
+  D1_TEST_HOOKS: ${D1_TEST_HOOKS:-0}
+
+x-d1-runtime-service: &d1-runtime-service
+  <<: *workerd-image
+  volumes:
+    - ./dist:/app/dist:ro
+    - d1-data:/data/d1
+  entrypoint: ["d1-supervisor"]
+  stop_grace_period: 20s
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/http-hc", "http://127.0.0.1:8787/healthz"]
+    interval: 1s
+    timeout: 5s
+    retries: 12
+    start_period: 15s
+  depends_on:
+    redis:
+      condition: service_healthy
+
+x-do-runtime-env: &do-runtime-env
+  <<: *internal-auth-env
+  REDIS_ADDR: redis:6379
+  REDIS_PROXY_URL: http://redis-proxy-do:7070
+  DO_OWNER_TTL_SECONDS: ${DO_OWNER_TTL_SECONDS:-120}
+  DO_OWNER_LEASE_GUARD_MS: ${DO_OWNER_LEASE_GUARD_MS:-1000}
+  DO_RENEW_START_DELAY_MS: ${DO_RENEW_START_DELAY_MS:-1000}
+  DO_RENEW_INTERVAL_MS: ${DO_RENEW_INTERVAL_MS:-1000}
+  # do-supervisor reads this to pick do-runtime-local.bin (Envoy mesh) over
+  # do-runtime.bin (Service Connect). Production leaves it unset.
+  WDL_WORKERD_CONFIG_VARIANT: local
+
+x-do-runtime-service: &do-runtime-service
+  <<: *workerd-image
+  volumes:
+    - ./dist:/app/dist:ro
+    - do-data:/data/do
+  entrypoint: ["do-supervisor"]
+  stop_grace_period: 20s
+  networks:
+    default:
+      aliases:
+        - do-runtime-router
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/http-hc", "http://127.0.0.1:8788/healthz"]
+    interval: 1s
+    timeout: 5s
+    retries: 12
+    start_period: 15s
+  depends_on:
+    redis-proxy-do:
+      condition: service_healthy
+
+services:
+  test-probe:
+    image: node:24-slim
+    command: ["sleep", "infinity"]
+    volumes:
+      - d1-data:/data/d1:ro
+    healthcheck:
+      test: ["CMD", "node", "--version"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  redis:
+    image: valkey/valkey:9
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Dev S3 emulator. `initialBuckets` provisions at boot so control's
+  # first deploy doesn't race a cold mock.
+  s3mock:
+    # 4.7.0 — `latest` (5.x on Java 25) ignores `initialBuckets`.
+    image: adobe/s3mock:4.7.0
+    ports:
+      # 9090 is sometimes reserved by Docker Desktop on WSL; 9500 has
+      # also been observed held by host-side Windows processes — bumped
+      # to 19500 to dodge.
+      - "${WDL_S3MOCK_HOST_PORT:-19500}:9090"
+    environment:
+      initialBuckets: wdl-assets,wdl-r2
+
+  redis-proxy-user:
+    <<: *rust-sidecar-image
+    command: ["/redis-proxy"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_URL: redis://redis:6379
+      DATA_REDIS_URL: redis://redis:6379/1
+      REDIS_PROXY_PORT: "7070"
+      SECRET_ENVELOPE_LOCAL_KEY_B64: ${SECRET_ENVELOPE_LOCAL_KEY_B64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      SECRET_ENVELOPE_KID: ${SECRET_ENVELOPE_KID:-local:compose:secret-envelope:v1}
+    healthcheck:
+      test: ["CMD", "/redis-proxy", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis-proxy-system:
+    <<: *rust-sidecar-image
+    command: ["/redis-proxy"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_URL: redis://redis:6379
+      DATA_REDIS_URL: redis://redis:6379/1
+      REDIS_PROXY_PORT: "7070"
+      SECRET_ENVELOPE_LOCAL_KEY_B64: ${SECRET_ENVELOPE_LOCAL_KEY_B64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      SECRET_ENVELOPE_KID: ${SECRET_ENVELOPE_KID:-local:compose:secret-envelope:v1}
+    healthcheck:
+      test: ["CMD", "/redis-proxy", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis-proxy-do:
+    <<: *rust-sidecar-image
+    command: ["/redis-proxy"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_URL: redis://redis:6379
+      DATA_REDIS_URL: redis://redis:6379/1
+      REDIS_PROXY_PORT: "7070"
+      SECRET_ENVELOPE_LOCAL_KEY_B64: ${SECRET_ENVELOPE_LOCAL_KEY_B64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      SECRET_ENVELOPE_KID: ${SECRET_ENVELOPE_KID:-local:compose:secret-envelope:v1}
+    healthcheck:
+      test: ["CMD", "/redis-proxy", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  d1-runtime:
+    <<: *d1-runtime-service
+    environment:
+      <<: *d1-runtime-env
+      D1_TASK_ID: d1-runtime
+      D1_TASK_ENDPOINT: d1-runtime:8787
+
+  d1-runtime-a:
+    profiles: ["d1-multi"]
+    <<: *d1-runtime-service
+    environment:
+      <<: *d1-runtime-env
+      D1_TASK_ID: d1-runtime-a
+      D1_TASK_ENDPOINT: d1-runtime-a:8787
+
+  d1-runtime-b:
+    profiles: ["d1-multi"]
+    <<: *d1-runtime-service
+    environment:
+      <<: *d1-runtime-env
+      D1_TASK_ID: d1-runtime-b
+      D1_TASK_ENDPOINT: d1-runtime-b:8787
+
+  d1-runtime-c:
+    profiles: ["d1-multi"]
+    <<: *d1-runtime-service
+    environment:
+      <<: *d1-runtime-env
+      D1_TASK_ID: d1-runtime-c
+      D1_TASK_ENDPOINT: d1-runtime-c:8787
+
+  do-runtime:
+    <<: *do-runtime-service
+    environment:
+      <<: *do-runtime-env
+      DO_TASK_ID: do-runtime
+      DO_TASK_ENDPOINT: do-runtime:8788
+
+  do-runtime-a:
+    profiles: ["do-multi"]
+    <<: *do-runtime-service
+    environment:
+      <<: *do-runtime-env
+      DO_TASK_ID: do-runtime-a
+      DO_TASK_ENDPOINT: do-runtime-a:8788
+
+  do-runtime-b:
+    profiles: ["do-multi"]
+    <<: *do-runtime-service
+    environment:
+      <<: *do-runtime-env
+      DO_TASK_ID: do-runtime-b
+      DO_TASK_ENDPOINT: do-runtime-b:8788
+
+  do-runtime-c:
+    profiles: ["do-multi"]
+    <<: *do-runtime-service
+    environment:
+      <<: *do-runtime-env
+      DO_TASK_ID: do-runtime-c
+      DO_TASK_ENDPOINT: do-runtime-c:8788
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "warning"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-lc",
+          "exec 3<>/dev/tcp/127.0.0.1/9901 && printf 'GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q 'LIVE' <&3",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  user-runtime:
+    <<: *workerd-image
+    volumes:
+      - ./dist:/app/dist:ro
+    entrypoint: ["workerd"]
+    command:
+      ["serve", "-b", "/app/dist/workerd-configs/user-runtime-local.bin", "--experimental"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_PROXY_URL: ${USER_RUNTIME_REDIS_PROXY_URL:-http://redis-proxy-user:7070}
+      D1_QUERY_TIMEOUT_MS: "3000"
+      # Must resolve from the browser (not from inside the container) —
+      # runtime only returns this URL to workers; it never fetches it.
+      ASSETS_CDN_BASE: ${ASSETS_CDN_BASE:-http://localhost:${WDL_S3MOCK_HOST_PORT:-19500}/wdl-assets}
+      R2_S3_ENDPOINT: http://s3mock:9090
+      R2_S3_BUCKET: wdl-r2
+      R2_S3_ACCESS_KEY_ID: test
+      R2_S3_SECRET_ACCESS_KEY: test
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/http-hc", "http://127.0.0.1:8088/_healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      redis:
+        condition: service_healthy
+      d1-runtime:
+        condition: service_healthy
+      do-runtime:
+        condition: service_healthy
+      redis-proxy-user:
+        condition: service_healthy
+      s3mock:
+        condition: service_started
+      envoy:
+        condition: service_healthy
+
+  # system-runtime: loader :8081 + internal dispatch :8088 + control :8082 in one container.
+  # :8082 is only reachable via gateway's CONTROL binding (not
+  # host-published) to keep dev/prod ingress symmetric.
+  system-runtime:
+    <<: *workerd-image
+    volumes:
+      - ./dist:/app/dist:ro
+    entrypoint: ["workerd"]
+    command:
+      ["serve", "-b", "/app/dist/workerd-configs/system-runtime-local.bin", "--experimental"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_ADDR: redis:6379
+      DATA_REDIS_ADDR: redis:6379
+      DATA_REDIS_DB: "1"
+      REDIS_PROXY_URL: http://redis-proxy-system:7070
+      D1_QUERY_TIMEOUT_MS: "3000"
+      ASSETS_CDN_BASE: ${ASSETS_CDN_BASE:-http://localhost:${WDL_S3MOCK_HOST_PORT:-19500}/wdl-assets}
+      PLATFORM_DOMAIN: workers.local
+      # Fixed dev value; CLI + tests share it. Prod is terraform-generated.
+      # Server-side env is BOOTSTRAP_TOKEN (auth's infra-managed ops
+      # token); CLI keeps the ADMIN_TOKEN env name as "value to send".
+      BOOTSTRAP_TOKEN: local-dev-token
+      SECRET_ENVELOPE_LOCAL_KEY_B64: ${SECRET_ENVELOPE_LOCAL_KEY_B64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      SECRET_ENVELOPE_KID: ${SECRET_ENVELOPE_KID:-local:compose:secret-envelope:v1}
+      S3_ENDPOINT: http://s3mock:9090
+      S3_BUCKET: wdl-assets
+      S3_ACCESS_KEY_ID: test
+      S3_SECRET_ACCESS_KEY: test
+      R2_S3_ENDPOINT: http://s3mock:9090
+      R2_S3_BUCKET: wdl-r2
+      R2_S3_ACCESS_KEY_ID: test
+      R2_S3_SECRET_ACCESS_KEY: test
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/http-hc", "http://127.0.0.1:8088/_healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-proxy-system:
+        condition: service_healthy
+      s3mock:
+        condition: service_started
+      d1-runtime:
+        condition: service_healthy
+      do-runtime:
+        condition: service_healthy
+      envoy:
+        condition: service_healthy
+
+  scheduler:
+    <<: *rust-sidecar-image
+    command: ["/scheduler"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_URL: redis://redis:6379
+      DATA_REDIS_URL: redis://redis:6379/1
+      RUNTIME_HOST: envoy
+      RUNTIME_PORT: "18088"
+      # `__system__`-ns loaded workers need system-runtime's private outbound.
+      SYSTEM_RUNTIME_HOST: envoy
+      SYSTEM_RUNTIME_PORT: "18089"
+      WORKFLOWS_HOST: workflows
+      WORKFLOWS_PORT: "9120"
+      WORKFLOWS_TICK_INTERVAL_MS: "500"
+      # Short PEL reap interval so integration tests hit the reap branch.
+      # Idle threshold must stay above scheduler's 60s fire timeout; tests
+      # explicitly age seeded PEL entries instead of waiting for the threshold.
+      SCHEDULER_SWEEP_MS: "3000"
+      QUEUE_PEL_REAP_MS: "3000"
+      QUEUE_PEL_IDLE_MS: "65000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/scheduler",
+          "healthcheck",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      redis:
+        condition: service_healthy
+      user-runtime:
+        condition: service_healthy
+      system-runtime:
+        condition: service_healthy
+      workflows:
+        condition: service_healthy
+      envoy:
+        condition: service_healthy
+
+  workflows:
+    <<: *rust-sidecar-image
+    command: ["/workflows"]
+    environment:
+      <<: *internal-auth-env
+      REDIS_URL: redis://redis:6379
+      WORKFLOWS_REDIS_DB: "2"
+      WORKFLOWS_PORT: "9120"
+      RUNTIME_HOST: envoy
+      RUNTIME_PORT: "18088"
+      SYSTEM_RUNTIME_HOST: envoy
+      SYSTEM_RUNTIME_PORT: "18089"
+      DO_RUNTIME_HOST: envoy
+      DO_RUNTIME_PORT: "18788"
+    healthcheck:
+      test: ["CMD", "/workflows", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  gateway:
+    <<: *workerd-image
+    volumes:
+      - ./dist:/app/dist:ro
+    entrypoint: ["workerd"]
+    command:
+      ["serve", "-b", "/app/dist/workerd-configs/gateway-local.bin", "--experimental"]
+    ports:
+      - "${WDL_GATEWAY_HOST_PORT:-8080}:8080"
+    environment:
+      PLATFORM_DOMAIN: workers.local
+      REDIS_ADDR: redis:6379
+      # Gateway short-circuits this host → env.CONTROL (system-runtime:8082).
+      ADMIN_HOST: admin.test
+      WEBSOCKET_RECONNECT_DELAYS_MS: ${WEBSOCKET_RECONNECT_DELAYS_MS:-0,100,250,500,1000,2000,5000}
+      WEBSOCKET_MAX_BUFFERED_MESSAGES: ${WEBSOCKET_MAX_BUFFERED_MESSAGES:-64}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/http-hc", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      user-runtime:
+        condition: service_healthy
+      system-runtime:
+        condition: service_healthy
+      envoy:
+        condition: service_healthy
+
+volumes:
+  d1-data:
+  do-data:

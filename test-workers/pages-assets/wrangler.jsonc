@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pages-assets",
+  "main": "src/index.js",
+  "compatibility_date": "2026-04-24",
+
+  // Files under ./public go to S3; worker uses env.ASSETS.url() to get
+  // CDN URLs back. Same field shape as Cloudflare Workers Assets.
+  "assets": {
+    "directory": "./public"
+  }
+}

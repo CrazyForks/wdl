@@ -1,0 +1,72 @@
+# Copyright 2026 Sean Consulting OÜ
+# SPDX-License-Identifier: Apache-2.0
+
+ARG WDL_VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+FROM rust:1-alpine AS rust-base
+WORKDIR /src
+# BuildKit is required for the cargo cache mounts below; compose/buildx paths
+# already use it, and avoiding a syntax frontend keeps builds off Docker Hub.
+ENV CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/target
+
+COPY rust/rust-toolchain.toml ./rust-toolchain.toml
+COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/common/Cargo.toml ./common/
+COPY rust/redis-proxy/Cargo.toml ./redis-proxy/
+COPY rust/scheduler/Cargo.toml ./scheduler/
+COPY rust/workflows/Cargo.toml ./workflows/
+COPY rust/supervisor/Cargo.toml ./supervisor/
+
+FROM rust-base AS redis-proxy-build
+COPY rust/common/src ./common/src
+COPY rust/redis-proxy/src ./redis-proxy/src
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/target,sharing=locked \
+    cargo build --release --locked -p redis-proxy \
+    && cp /target/release/redis-proxy /redis-proxy
+
+FROM rust-base AS scheduler-build
+COPY rust/common/src ./common/src
+COPY rust/scheduler/src ./scheduler/src
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/target,sharing=locked \
+    cargo build --release --locked -p scheduler \
+    && cp /target/release/scheduler /scheduler
+
+FROM rust-base AS workflows-build
+COPY rust/common/src ./common/src
+COPY rust/workflows/src ./workflows/src
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/target,sharing=locked \
+    cargo build --release --locked -p workflows \
+    && cp /target/release/workflows /workflows
+
+FROM scratch
+ARG WDL_VERSION
+ARG VCS_REF
+ARG BUILD_DATE
+LABEL org.opencontainers.image.title="WDL Rust services" \
+      org.opencontainers.image.description="WDL redis-proxy, scheduler, and workflows service binaries" \
+      org.opencontainers.image.source="https://github.com/wdl-dev/wdl" \
+      org.opencontainers.image.documentation="https://github.com/wdl-dev/wdl/tree/main/docs" \
+      org.opencontainers.image.vendor="Sean Consulting OÜ" \
+      org.opencontainers.image.authors="Sean Consulting OÜ" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${WDL_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+COPY LICENSE /usr/share/licenses/wdl/LICENSE
+COPY licenses/images/rust-NOTICE /usr/share/licenses/wdl/NOTICE
+# The GitHub release workflow runs `npm run build:third-party-licenses`
+# first; internal deployment builds may copy only the README placeholder.
+COPY licenses/third-party/rust-services /usr/share/licenses/wdl/third-party/rust-services
+COPY --from=redis-proxy-build /redis-proxy /redis-proxy
+COPY --from=scheduler-build /scheduler /scheduler
+COPY --from=workflows-build /workflows /workflows
+CMD ["/redis-proxy"]

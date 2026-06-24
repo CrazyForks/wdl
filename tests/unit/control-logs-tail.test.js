@@ -1,0 +1,316 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { importRepositoryModuleFresh } from "../helpers/load-shared-module.js";
+import { delay } from "../helpers/timing.js";
+
+function loadLogsTailHandler() {
+  return importRepositoryModuleFresh("control/handlers/logs-tail.js", [
+    [
+      /import \{ envValueOr \} from "shared-env";/,
+      "const envValueOr = (value, fallback) => value == null || value === '' ? fallback : value;",
+    ],
+    [
+      /import \{ RedisSession, redisDbFromEnv \} from "shared-redis";/,
+      `class RedisSession {
+        constructor(addr, opts = {}) {
+          this.addr = addr;
+          this.opts = opts;
+          /** @type {any} */ (globalThis).__tailSessions.push(this);
+          this.xReadCalls = [];
+          this.publishCalls = [];
+          this.closed = false;
+        }
+        async open() { this.opened = true; }
+        async publish(channel, payload) { this.publishCalls.push([channel, payload]); }
+        async xRead(...args) { this.xReadCalls.push(args); return null; }
+        async close() { this.closed = true; }
+      }
+      const redisDbFromEnv = (env, name) => Number(env?.[name] || 0);`,
+    ],
+    [
+      /import \{ PLATFORM_TIER_RESERVED_NS \} from "shared-auth-roles";/,
+      "const PLATFORM_TIER_RESERVED_NS = new Set(['__platform__']);",
+    ],
+    [
+      /import \{ isReservedNs \} from "shared-ns-pattern";/,
+      "const isReservedNs = (ns) => ns === '__system__' || ns === '__platform__';",
+    ],
+    [
+      /import \{\n {2}WORKER_NAME_RE,\n {2}compareStreamIds,\n {2}isValidResumeId,\n {2}isValidWorkerName,\n\} from "control-lib";/,
+      `const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+       const compareStreamIds = () => 0;
+       const isValidResumeId = () => true;
+       const isValidWorkerName = (name) => WORKER_NAME_RE.test(name);`,
+    ],
+    [
+      /import \{ controlTailRedis, errMessage, jsonError, requireControlLog \} from "control-shared";/,
+      `const jsonError = (status, error, message) =>
+         Response.json({ error, message }, { status });
+       const errMessage = (err) => err instanceof Error ? err.message : String(err);
+       const state = /** @type {any} */ (globalThis).__tailState;
+       const requireControlLog = () => state.log;
+       const controlTailRedis = () => state.dataRedis || state.redis;`,
+    ],
+  ]);
+}
+
+function resetTailState() {
+  /** @type {any} */ (globalThis).__tailSessions = [];
+  /** @type {any} */ (globalThis).__tailState = {
+    redis: {},
+    dataRedis: {
+      /** @type {Array<[string, number, Record<string, string>]>} */
+      hSetExCalls: [],
+      /** @type {Array<[string, string[]]>} */
+      hMGetCalls: [],
+      /** @type {string[]} */
+      hLenCalls: [],
+      /** @type {Map<string, string>} */
+      activeFields: new Map(),
+      hLenValue: 0,
+      async hExists() { return false; },
+      /** @param {string} key @param {string[]} fields */
+      async hMGet(key, fields) {
+        this.hMGetCalls.push([key, fields]);
+        return fields.map((field) => this.activeFields.get(field) ?? null);
+      },
+      /** @param {string} key */
+      async hLen(key) {
+        this.hLenCalls.push(key);
+        return this.hLenValue;
+      },
+      /** @param {string} key @param {number} ttlSeconds @param {Record<string, string>} fields */
+      async hSetEx(key, ttlSeconds, fields) {
+        this.hSetExCalls.push([key, ttlSeconds, fields]);
+      },
+    },
+    logs: [],
+    log: (/** @type {string} */ level, /** @type {string} */ event, /** @type {any} */ data) => {
+      /** @type {any} */ (globalThis).__tailState.logs.push({ level, event, data });
+    },
+  };
+}
+
+/** @param {{ read(): Promise<{ value?: Uint8Array, done?: boolean }> }} reader */
+async function readText(reader) {
+  const { value, done } = await reader.read();
+  return { done, text: value ? new TextDecoder().decode(value) : "" };
+}
+
+/** @param {string} value */
+function utf8(value) {
+  return new TextEncoder().encode(value);
+}
+
+test("RedisTailCursor decodes stream batches and keeps per-worker cursors", async () => {
+  resetTailState();
+  const { RedisTailCursor, tailActivationKeys } = await loadLogsTailHandler();
+  const cursor = new RedisTailCursor({ ns: "demo", workers: ["foo", "bar"] });
+
+  const batch = cursor.decode([
+    [utf8("logs:demo:foo:s"), [
+      [utf8("10-0"), [utf8("json"), utf8(JSON.stringify({ event: "worker_console", message: "hi" }))]],
+      [utf8("11-0"), [utf8("json"), utf8("{")]],
+      [utf8("12-0"), [utf8("other"), utf8("ignored")]],
+    ]],
+    [utf8("logs:demo:bar:s"), [
+      [utf8("20-0"), [utf8("json"), utf8(JSON.stringify({ message: "fallback" }))]],
+    ]],
+    [utf8("logs:demo:other:s"), [
+      [utf8("99-0"), [utf8("json"), utf8(JSON.stringify({ event: "wrong_stream" }))]],
+    ]],
+  ]);
+
+  assert.deepEqual(tailActivationKeys("demo", ["foo", "bar"]), ["demo:foo", "demo:bar"]);
+  assert.deepEqual(cursor.ids, ["12-0", "20-0"]);
+  assert.deepEqual(batch.parseFailures, [{ id: "11-0", workerName: "foo" }]);
+  assert.equal(batch.events.length, 2);
+  assert.deepEqual(batch.events[0], {
+    id: "10-0",
+    workerName: "foo",
+    eventName: "worker_console",
+    payloadObj: { event: "worker_console", message: "hi", worker: "foo" },
+  });
+  assert.deepEqual(batch.events[1], {
+    id: "20-0",
+    workerName: "bar",
+    eventName: "worker_event",
+    payloadObj: { message: "fallback", worker: "bar" },
+  });
+});
+
+test("RedisTailCursor skips array payloads instead of adding object fields to them", async () => {
+  resetTailState();
+  const { RedisTailCursor } = await loadLogsTailHandler();
+  const cursor = new RedisTailCursor({ ns: "demo", workers: ["foo"] });
+
+  const batch = cursor.decode([
+    [utf8("logs:demo:foo:s"), [
+      [utf8("10-0"), [utf8("json"), utf8(JSON.stringify(["not", "an", "event"]))]],
+      [utf8("11-0"), [utf8("json"), utf8(JSON.stringify({ event: "worker_console" }))]],
+    ]],
+  ]);
+
+  assert.deepEqual(batch.parseFailures, []);
+  assert.deepEqual(batch.events, [{
+    id: "11-0",
+    workerName: "foo",
+    eventName: "worker_console",
+    payloadObj: { event: "worker_console", worker: "foo" },
+  }]);
+});
+
+test("logs tail closes after the max session lifetime so reconnect reauthorizes", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "50" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  assert.match((await readText(reader)).text, /tail-open/);
+  assert.match((await readText(reader)).text, /hb|tail_warning/);
+  await delay(60);
+  let warning = await readText(reader);
+  if (!warning.text.includes("session_expired")) {
+    warning = await readText(reader);
+  }
+  assert.match(warning.text, /event: tail_warning/);
+  assert.match(warning.text, /session_expired/);
+  assert.equal((await readText(reader)).done, true);
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
+});
+
+test("logs tail emits idle keepalives below common proxy idle timeouts", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  assert.match((await readText(reader)).text, /tail-open/);
+  assert.match((await readText(reader)).text, /^: hb /);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].xReadCalls[0][1], "5000");
+  await reader.cancel();
+  await Promise.all(waitUntilPromises);
+});
+
+test("logs tail opens its stream session on the data Redis DB", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: {
+      REDIS_ADDR: "redis-control:6379",
+      DATA_REDIS_ADDR: "redis-data:6379",
+      DATA_REDIS_DB: "1",
+    },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail",
+  });
+
+  const reader = response.body.getReader();
+  await readText(reader);
+  await reader.cancel();
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].addr, "redis-data:6379");
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailSessions[0].opts, { db: 1 });
+});
+
+test("logs tail writes activation through the data Redis client", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: {
+      REDIS_ADDR: "redis-control:6379",
+      DATA_REDIS_ADDR: "redis-data:6379",
+      DATA_REDIS_DB: "1",
+    },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail",
+  });
+
+  const reader = response.body.getReader();
+  await readText(reader);
+  await reader.cancel();
+  await Promise.all(waitUntilPromises);
+
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
+    ["logs:tail:active", 30, { "demo:foo": "1" }],
+  ]);
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailSessions[0].publishCalls, []);
+});
+
+test("logs tail batches multi-worker activation while preserving the active cap", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  /** @type {any} */ (globalThis).__tailState.dataRedis.activeFields.set("demo:bar", "1");
+  /** @type {any} */ (globalThis).__tailState.dataRedis.hLenValue = 9_999;
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo&worker=bar&worker=baz"),
+    env: {
+      REDIS_ADDR: "redis-control:6379",
+      DATA_REDIS_ADDR: "redis-data:6379",
+      DATA_REDIS_DB: "1",
+    },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail",
+  });
+
+  const reader = response.body.getReader();
+  await readText(reader);
+  await reader.cancel();
+  await Promise.all(waitUntilPromises);
+
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hMGetCalls, [
+    ["logs:tail:active", ["demo:bar", "demo:baz", "demo:foo"]],
+  ]);
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hLenCalls, ["logs:tail:active"]);
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
+    ["logs:tail:active", 30, { "demo:bar": "1", "demo:baz": "1" }],
+  ]);
+});
+
+test("tailMaxSessionMs defaults to fifteen minutes and ignores invalid overrides", async () => {
+  resetTailState();
+  const { LOG_TAIL_MAX_SESSION_MS_DEFAULT, tailMaxSessionMs } = await loadLogsTailHandler();
+
+  assert.equal(LOG_TAIL_MAX_SESSION_MS_DEFAULT, 15 * 60 * 1000);
+  assert.equal(tailMaxSessionMs({}), LOG_TAIL_MAX_SESSION_MS_DEFAULT);
+  assert.equal(tailMaxSessionMs({ LOG_TAIL_MAX_SESSION_MS: "" }), LOG_TAIL_MAX_SESSION_MS_DEFAULT);
+  assert.equal(tailMaxSessionMs({ LOG_TAIL_MAX_SESSION_MS: "0" }), LOG_TAIL_MAX_SESSION_MS_DEFAULT);
+  assert.equal(tailMaxSessionMs({ LOG_TAIL_MAX_SESSION_MS: "120000" }), 120000);
+});

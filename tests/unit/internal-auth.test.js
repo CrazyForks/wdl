@@ -1,0 +1,117 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import {
+  INTERNAL_AUTH_HEADER,
+  INTERNAL_AUTH_ENV,
+  INTERNAL_AUTH_PREVIOUS_ENV,
+  internalAuthFailureResponse,
+  internalAuthPreviousToken,
+  internalAuthToken,
+  stripInternalAuthHeader,
+  verifyInternalAuthHeaders,
+  withInternalAuth,
+  withInternalAuthEntries,
+} from "../../shared/internal-auth.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
+import { assertJsonResponse } from "../helpers/response-json.js";
+
+const TOKEN = "test-internal-auth-token";
+const ENV = { [INTERNAL_AUTH_ENV]: TOKEN };
+
+test("internal auth token requires a non-empty configured string", () => {
+  assert.equal(internalAuthToken(ENV), TOKEN);
+  assert.equal(internalAuthPreviousToken(ENV), null);
+  assert.equal(internalAuthPreviousToken({ [INTERNAL_AUTH_PREVIOUS_ENV]: "old" }), "old");
+  assert.equal(internalAuthPreviousToken({ [INTERNAL_AUTH_PREVIOUS_ENV]: "" }), null);
+  assert.throws(() => internalAuthToken({}), /WDL_INTERNAL_AUTH_TOKEN must be configured/);
+  assert.throws(() => internalAuthToken({ [INTERNAL_AUTH_ENV]: "" }), /WDL_INTERNAL_AUTH_TOKEN must be configured/);
+  assert.throws(
+    () => internalAuthToken({ [INTERNAL_AUTH_ENV]: "tokén" }),
+    /WDL_INTERNAL_AUTH_TOKEN must be configured as a non-empty ASCII string/
+  );
+  assert.throws(
+    () => internalAuthPreviousToken({ [INTERNAL_AUTH_PREVIOUS_ENV]: "prévious" }),
+    /WDL_INTERNAL_AUTH_PREVIOUS_TOKEN must be configured as a non-empty ASCII string/
+  );
+});
+
+test("internal auth writer overwrites spoofed headers", () => {
+  const headers = withInternalAuth({ [INTERNAL_AUTH_HEADER]: "spoofed", "x-test": "1" }, ENV);
+  assert.equal(headers.get(INTERNAL_AUTH_HEADER), TOKEN);
+  assert.equal(headers.get("x-test"), "1");
+});
+
+test("internal auth entries writer avoids tenant-visible Headers and Array hooks", () => {
+  /** @type {string[]} */
+  const capturedAuthWrites = [];
+  const originalSet = Headers.prototype.set;
+  const originalPush = Array.prototype.push;
+  return withMockedProperty(Headers.prototype, "set", /** @this {Headers} */ function set(
+    /** @type {string} */ name,
+    /** @type {string} */ value
+  ) {
+    if (String(name).toLowerCase() === INTERNAL_AUTH_HEADER) capturedAuthWrites.push(String(value));
+    return originalSet.call(this, name, value);
+  }, async () => withMockedProperty(Array.prototype, "push", /** @this {unknown[]} */ function push(...items) {
+    for (const item of items) {
+      if (Array.isArray(item) && item.includes(TOKEN)) capturedAuthWrites.push(String(item));
+    }
+    return originalPush.apply(this, items);
+  }, async () => withMockedProperty(Object, "create", /** @type {typeof Object.create} */ (/** @type {unknown} */ (/** @param {...unknown} args */ function create(...args) {
+    throw new Error(`Object.create should not handle ${args.length} arguments in this helper`);
+  })), async () => {
+    const entries = withInternalAuthEntries(new Headers({
+      [INTERNAL_AUTH_HEADER]: "spoofed",
+      "x-test": "1",
+    }), ENV);
+    assert.equal(Object.getPrototypeOf(entries), null);
+    const headers = new Headers(entries);
+    assert.equal(headers.get(INTERNAL_AUTH_HEADER), TOKEN);
+    assert.equal(headers.get("x-test"), "1");
+    assert.deepEqual(capturedAuthWrites, []);
+  })));
+});
+
+test("internal auth verifier accepts current and optional previous tokens", () => {
+  assert.equal(verifyInternalAuthHeaders(new Headers({ [INTERNAL_AUTH_HEADER]: TOKEN }), ENV), true);
+  assert.equal(
+    verifyInternalAuthHeaders(
+      new Headers({ [INTERNAL_AUTH_HEADER]: "old-token" }),
+      { ...ENV, [INTERNAL_AUTH_PREVIOUS_ENV]: "old-token" }
+    ),
+    true
+  );
+  assert.equal(verifyInternalAuthHeaders(new Headers({ [INTERNAL_AUTH_HEADER]: "wrong" }), ENV), false);
+  assert.equal(
+    verifyInternalAuthHeaders(
+      new Headers({ [INTERNAL_AUTH_HEADER]: "wrong" }),
+      { ...ENV, [INTERNAL_AUTH_PREVIOUS_ENV]: "old-token" }
+    ),
+    false
+  );
+  assert.equal(verifyInternalAuthHeaders(new Headers(), ENV), false);
+  assert.equal(verifyInternalAuthHeaders(new Headers({ [INTERNAL_AUTH_HEADER]: TOKEN }), {}), false);
+  assert.equal(
+    verifyInternalAuthHeaders(
+      new Headers({ [INTERNAL_AUTH_HEADER]: "old-token" }),
+      { ...ENV, [INTERNAL_AUTH_PREVIOUS_ENV]: "prévious" }
+    ),
+    false
+  );
+});
+
+test("internal auth strip removes only the internal header", () => {
+  const headers = new Headers({ [INTERNAL_AUTH_HEADER]: TOKEN, "x-test": "1" });
+  stripInternalAuthHeader(headers);
+  assert.equal(headers.get(INTERNAL_AUTH_HEADER), null);
+  assert.equal(headers.get("x-test"), "1");
+});
+
+test("internal auth failure response has stable public shape", async () => {
+  const response = internalAuthFailureResponse();
+  await assertJsonResponse(response, 401, {
+    error: "internal_auth_failed",
+    message: "Internal authentication failed",
+  });
+});

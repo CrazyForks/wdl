@@ -1,0 +1,257 @@
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: user_runtime
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18081 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: user_runtime
+                preserve_external_request_id: true
+                upgrade_configs:
+                  - upgrade_type: websocket
+                route_config:
+                  name: user_runtime
+                  virtual_hosts:
+                    - name: user_runtime
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: user_runtime }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: system_runtime_loader
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18082 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: system_runtime_loader
+                preserve_external_request_id: true
+                upgrade_configs:
+                  - upgrade_type: websocket
+                route_config:
+                  name: system_runtime_loader
+                  virtual_hosts:
+                    - name: system_runtime_loader
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: system_runtime_loader }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: user_runtime_internal
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18088 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: user_runtime_internal
+                preserve_external_request_id: true
+                route_config:
+                  name: user_runtime_internal
+                  virtual_hosts:
+                    - name: user_runtime_internal
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: user_runtime_internal }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: system_runtime_internal
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18089 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: system_runtime_internal
+                preserve_external_request_id: true
+                route_config:
+                  name: system_runtime_internal
+                  virtual_hosts:
+                    - name: system_runtime_internal
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: system_runtime_internal }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: system_runtime_control
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18083 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: system_runtime_control
+                preserve_external_request_id: true
+                route_config:
+                  name: system_runtime_control
+                  virtual_hosts:
+                    - name: system_runtime_control
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: system_runtime_control }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: d1_router
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18787 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: d1_router
+                preserve_external_request_id: true
+                route_config:
+                  name: d1_router
+                  virtual_hosts:
+                    - name: d1_router
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: d1_router }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: do_router
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 18788 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: do_router
+                preserve_external_request_id: true
+                upgrade_configs:
+                  - upgrade_type: websocket
+                route_config:
+                  name: do_router
+                  virtual_hosts:
+                    - name: do_router
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: do_router }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: user_runtime
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: user_runtime
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: user-runtime, port_value: 8081 }
+
+    - name: system_runtime_loader
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: system_runtime_loader
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: system-runtime, port_value: 8081 }
+
+    - name: user_runtime_internal
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: user_runtime_internal
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: user-runtime, port_value: 8088 }
+
+    - name: system_runtime_internal
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: system_runtime_internal
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: system-runtime, port_value: 8088 }
+
+    - name: system_runtime_control
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: system_runtime_control
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: system-runtime, port_value: 8082 }
+
+    - name: d1_router
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: d1_router
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: d1-runtime, port_value: 8787 }
+
+    - name: do_router
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: do_router
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: do-runtime-router, port_value: 8788 }

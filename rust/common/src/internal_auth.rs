@@ -1,0 +1,138 @@
+use std::env;
+
+#[cfg(feature = "axum")]
+use axum::http::HeaderMap;
+use subtle::ConstantTimeEq;
+
+pub const INTERNAL_AUTH_HEADER: &str = "x-wdl-internal-auth";
+pub const INTERNAL_AUTH_ENV: &str = "WDL_INTERNAL_AUTH_TOKEN";
+pub const INTERNAL_AUTH_PREVIOUS_ENV: &str = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InternalAuthTokens {
+    pub current: String,
+    pub previous: Option<String>,
+}
+
+fn validate_internal_auth_token(name: &str, token: String) -> Result<String, String> {
+    if token.is_empty() || !token.is_ascii() {
+        return Err(format!(
+            "{name} must be configured as a non-empty ASCII string"
+        ));
+    }
+    Ok(token)
+}
+
+pub fn internal_auth_token_from_env() -> Result<String, String> {
+    let token = env::var(INTERNAL_AUTH_ENV)
+        .map_err(|_| format!("{INTERNAL_AUTH_ENV} must be configured"))?;
+    validate_internal_auth_token(INTERNAL_AUTH_ENV, token)
+}
+
+pub fn internal_auth_tokens_from_env() -> Result<InternalAuthTokens, String> {
+    let current = internal_auth_token_from_env()?;
+    let previous = match env::var(INTERNAL_AUTH_PREVIOUS_ENV) {
+        Ok(token) if token.is_empty() => None,
+        Ok(token) => Some(validate_internal_auth_token(
+            INTERNAL_AUTH_PREVIOUS_ENV,
+            token,
+        )?),
+        Err(_) => None,
+    };
+    Ok(InternalAuthTokens { current, previous })
+}
+
+pub fn internal_auth_matches(actual: Option<&str>, expected: &str) -> bool {
+    let Some(actual) = actual else {
+        return false;
+    };
+    if actual.is_empty() {
+        return false;
+    }
+    let actual = actual.as_bytes();
+    let expected = expected.as_bytes();
+    let max = actual.len().max(expected.len());
+    let mut equal = actual.len().ct_eq(&expected.len());
+    for i in 0..max {
+        let actual_byte = *actual.get(i).unwrap_or(&0);
+        let expected_byte = *expected.get(i).unwrap_or(&0);
+        equal &= actual_byte.ct_eq(&expected_byte);
+    }
+    bool::from(equal)
+}
+
+pub fn internal_auth_matches_any(actual: Option<&str>, expected: &InternalAuthTokens) -> bool {
+    internal_auth_matches(actual, expected.current.as_str())
+        || expected
+            .previous
+            .as_deref()
+            .is_some_and(|previous| internal_auth_matches(actual, previous))
+}
+
+#[cfg(feature = "axum")]
+pub fn internal_auth_header_value(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(INTERNAL_AUTH_HEADER)
+        .and_then(|value| value.to_str().ok())
+}
+
+#[cfg(feature = "axum")]
+pub fn internal_auth_headers_match(headers: &HeaderMap, expected: &InternalAuthTokens) -> bool {
+    internal_auth_matches_any(internal_auth_header_value(headers), expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_auth_matches_requires_exact_token() {
+        assert!(internal_auth_matches(Some("secret"), "secret"));
+        assert!(!internal_auth_matches(Some("secret"), "secreu"));
+        assert!(!internal_auth_matches(Some("secre"), "secret"));
+        assert!(!internal_auth_matches(Some("secret"), "secret2"));
+        assert!(!internal_auth_matches(Some(""), "secret"));
+        assert!(!internal_auth_matches(None, "secret"));
+    }
+
+    #[test]
+    fn internal_auth_matches_any_accepts_current_or_previous() {
+        let tokens = InternalAuthTokens {
+            current: "new".to_string(),
+            previous: Some("old".to_string()),
+        };
+        assert!(internal_auth_matches_any(Some("new"), &tokens));
+        assert!(internal_auth_matches_any(Some("old"), &tokens));
+        assert!(!internal_auth_matches_any(Some("wrong"), &tokens));
+        assert!(!internal_auth_matches_any(None, &tokens));
+    }
+
+    #[cfg(feature = "axum")]
+    #[test]
+    fn internal_auth_headers_match_accepts_current_or_previous_header() {
+        let tokens = InternalAuthTokens {
+            current: "new".to_string(),
+            previous: Some("old".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+
+        headers.insert(INTERNAL_AUTH_HEADER, "new".parse().unwrap());
+        assert!(internal_auth_headers_match(&headers, &tokens));
+
+        headers.insert(INTERNAL_AUTH_HEADER, "old".parse().unwrap());
+        assert!(internal_auth_headers_match(&headers, &tokens));
+
+        headers.insert(INTERNAL_AUTH_HEADER, "wrong".parse().unwrap());
+        assert!(!internal_auth_headers_match(&headers, &tokens));
+    }
+
+    #[test]
+    fn internal_auth_tokens_must_be_ascii() {
+        assert_eq!(
+            validate_internal_auth_token(INTERNAL_AUTH_ENV, "ascii-token".to_string()).unwrap(),
+            "ascii-token"
+        );
+        assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "".to_string()).is_err());
+        assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "tokén".to_string()).is_err());
+    }
+}

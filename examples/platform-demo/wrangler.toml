@@ -1,0 +1,15 @@
+name = "platform-demo"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+[[exports]]
+entrypoint = "Echo"
+as = "DEMO"
+required_caller_secrets = ["ALLOWED_KEY"]
+allowed_callers = ["*"]
+
+[[exports]]
+entrypoint = "Ops"
+as = "DEMO_OPS"
+required_caller_secrets = []
+allowed_callers = ["*"]

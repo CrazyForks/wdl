@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true
+  },
+  "include": [
+    "auth/**/*.js",
+    "control/**/*.js",
+    "shared/*.js",
+    "d1-runtime/**/*.js",
+    "do-runtime/**/*.js",
+    "runtime/**/*.js",
+    "gateway/**/*.js",
+    "system-workers/s3-cleanup/src/**/*.js",
+    "tests/**/*.js",
+    "tests/**/*.cjs",
+    "tests/**/*.mjs",
+    "scripts/**/*.js",
+    "scripts/**/*.mjs",
+    "types/**/*.d.ts"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "showcase",
+  "main": "src/index.js",
+  "compatibility_date": "2026-04-24",
+  "assets": { "directory": "./public" },
+  "kv_namespaces": [
+    { "binding": "DB", "id": "showcase" }
+  ],
+  "vars": {
+    "SITE_TITLE": "wdl showcase — guestbook"
+  }
+}

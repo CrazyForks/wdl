@@ -1,0 +1,4 @@
+name: WDL CodeQL
+
+paths-ignore:
+  - shared/vendor/**

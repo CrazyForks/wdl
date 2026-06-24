@@ -1,0 +1,12 @@
+pub(crate) const MAX_WORKFLOW_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_WORKFLOW_PARAMS_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_WORKFLOW_RESULT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_WORKFLOW_RUNTIME_RESPONSE_BYTES: usize = MAX_WORKFLOW_RESULT_BYTES + 16 * 1024;
+pub(crate) const MAX_WORKFLOW_EVENT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_WORKFLOW_EVENT_TYPE_BYTES: usize = 512;
+pub(crate) const MAX_WORKFLOW_INSTANCE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_WORKFLOW_STEP_NAME_BYTES: usize = 512;
+pub(crate) const MAX_WORKFLOW_STEP_CONFIG_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_CREATE_BATCH_SIZE: usize = 100;
+pub(crate) const READY_SHARDS: usize = crate::WORKFLOW_READY_SHARDS;
+pub(crate) const LIFECYCLE_BLOCKER_LIMIT: usize = 20;

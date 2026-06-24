@@ -1,0 +1,47 @@
+[
+  {
+    "id": "ascii-object-key-sort",
+    "rawJson": "{\"b\":2,\"a\":1}",
+    "jsExpected": "{\"a\":1,\"b\":2}",
+    "rustExpected": "{\"a\":1,\"b\":2}"
+  },
+  {
+    "id": "utf8-object-key-sort",
+    "rawJson": "{\"😀\":2,\"\":1}",
+    "jsExpected": "{\"\":1,\"😀\":2}",
+    "rustExpected": "{\"\":1,\"😀\":2}"
+  },
+  {
+    "id": "positive-large-exponent",
+    "rawJson": "{\"n\":1e21}",
+    "jsExpected": "{\"n\":1e+21}",
+    "rustExpected": "{\"n\":1e+21}"
+  },
+  {
+    "id": "positive-large-fractional-exponent",
+    "rawJson": "{\"n\":1.5e300}",
+    "jsExpected": "{\"n\":1.5e+300}",
+    "rustExpected": "{\"n\":1.5e+300}"
+  },
+  {
+    "id": "micro-decimal-known-divergence",
+    "rawJson": "{\"n\":0.000001}",
+    "jsExpected": "{\"n\":0.000001}",
+    "rustExpected": "{\"n\":1e-6}",
+    "knownDivergence": "V8 JSON.stringify keeps 1e-6 as fixed decimal while serde_json emits exponent form; replay backend correctness is Rust-vs-Rust and JS cache miss is advisory."
+  },
+  {
+    "id": "negative-zero-known-divergence",
+    "rawJson": "{\"n\":-0.0}",
+    "jsExpected": "{\"n\":0}",
+    "rustExpected": "{\"n\":-0.0}",
+    "knownDivergence": "V8 JSON.stringify normalizes negative zero to 0 while serde_json preserves the floating sign."
+  },
+  {
+    "id": "trailing-zero-known-divergence",
+    "rawJson": "{\"n\":1.0}",
+    "jsExpected": "{\"n\":1}",
+    "rustExpected": "{\"n\":1.0}",
+    "knownDivergence": "V8 JSON.stringify collapses integral floats while serde_json preserves the source floating shape."
+  }
+]

@@ -1,0 +1,47 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-assets-proxy-local-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: assets-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: assets-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-s3mock-assets-proxy
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: s3mock
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: s3mock
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: assets-proxy
+      ports:
+        - port: 9090

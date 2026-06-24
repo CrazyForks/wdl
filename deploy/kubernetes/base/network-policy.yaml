@@ -1,0 +1,284 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-user-runtime-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: user-runtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: user-runtime
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: 8081
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: system-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: scheduler
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: workflows
+      ports:
+        - port: 8088
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-system-runtime-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: system-runtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: system-runtime
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: 8081
+        - port: 8082
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: scheduler
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: workflows
+      ports:
+        - port: 8088
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-d1-runtime-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: d1-runtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: d1-runtime
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: user-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: system-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: do-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: d1-runtime
+      ports:
+        - port: 8787
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-do-runtime-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: do-runtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: do-runtime
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: user-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: system-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: workflows
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: do-runtime
+      ports:
+        - port: 8788
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workflows-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: workflows
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: workflows
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: user-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: system-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: scheduler
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: do-runtime
+      ports:
+        - port: 9120
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-valkey-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: valkey
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: valkey
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: gateway
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: user-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: system-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: do-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: d1-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: scheduler
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: workflows
+      ports:
+        - port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-s3mock-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: s3mock
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdl
+      app.kubernetes.io/component: s3mock
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: system-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: user-runtime
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wdl
+              app.kubernetes.io/component: do-runtime
+      ports:
+        - port: 9090

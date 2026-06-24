@@ -1,0 +1,7 @@
+name = "cron-sink"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "cron-smoketest"

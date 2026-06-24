@@ -1,0 +1,13 @@
+[
+  { "raw": "rid-123", "sanitized": "rid-123" },
+  { "raw": " first-id, second-id ", "sanitized": "first-id" },
+  { "raw": "", "sanitized": null },
+  { "raw": ",", "sanitized": null },
+  { "raw": "has space", "sanitized": null },
+  { "raw": "a\"b", "sanitized": null },
+  { "raw": "a\\b", "sanitized": null },
+  { "raw": "ok\nbad", "sanitized": null },
+  { "raw": "ok\u0085bad", "sanitized": null },
+  { "raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sanitized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  { "raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sanitized": null }
+]

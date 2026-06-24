@@ -1,0 +1,159 @@
+import {
+  applyModuleReplacements,
+  readRepositoryFile,
+  moduleDataUrl,
+  repositoryFileUrl,
+} from "./load-shared-module.js";
+import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
+
+/**
+ * @typedef {{
+ *   assertResponses: any[],
+ *   remembered: any[],
+ *   aborts: any[],
+ *   draining: boolean,
+ *   inFlight: number,
+ *   logs: any[],
+ *   gaugeSamples: any[],
+ *   assertCalls: number,
+ *   forgottenOwners: string[],
+ *   registryError?: unknown,
+ *   abortReject?: ((reason: unknown) => void),
+ * }} DoHostActorHarnessState
+ */
+/** @type {typeof globalThis & { __doActorTestState?: DoHostActorHarnessState }} */
+const doActorGlobal = globalThis;
+/** @type {DoHostActorHarnessState} */
+const DO_ACTOR_TEST_STATE = {
+  assertResponses: [],
+  remembered: [],
+  aborts: [],
+  draining: false,
+  inFlight: 0,
+  logs: [],
+  gaugeSamples: [],
+  assertCalls: 0,
+  forgottenOwners: [],
+};
+doActorGlobal.__doActorTestState = DO_ACTOR_TEST_STATE;
+
+const durableObjectStub = "class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }";
+
+const loadUrl = moduleDataUrl(`
+export function loadDoWorkerCode() {
+  throw new Error("loadDoWorkerCode should not be called");
+}
+`);
+
+const objectRegistryUrl = moduleDataUrl(`
+export function objectRegistryMember(invoke) {
+  return [invoke.className, invoke.objectName].join(":");
+}
+export async function rememberDoObject(env, invoke) {
+  if (globalThis.__doActorTestState.registryError) throw globalThis.__doActorTestState.registryError;
+  globalThis.__doActorTestState.remembered.push({ env, invoke });
+}
+`);
+
+const protocolUrl = moduleDataUrl(`
+export class DoRuntimeError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+export function buildFacetName(invoke) {
+  return [invoke.className, invoke.objectName].join(":");
+}
+export function buildAlarmRequest() { throw new Error("unexpected alarm request"); }
+export function buildForwardRequest() { throw new Error("unexpected forward request"); }
+export function doErrorResponse(err) {
+  return Response.json({ error: err?.code || "internal_error", message: err?.message || String(err) }, { status: err?.status || 500 });
+}
+export function normalizeDoConnectRequest() { throw new Error("unexpected connect normalize"); }
+export async function readLocalActorInvokeRequest() { throw new Error("unexpected actor request read"); }
+`);
+
+const ownerRegistryUrl = moduleDataUrl(`
+export async function assertCurrentOwner() {
+  globalThis.__doActorTestState.assertCalls += 1;
+  const next = globalThis.__doActorTestState.assertResponses.shift();
+  if (next instanceof Error) throw next;
+  if (!next) throw new Error("missing assertCurrentOwner response");
+  return await next;
+}
+export async function assertCurrentOwnerWithLeaseBudget() {
+  const owner = await assertCurrentOwner();
+  return {
+    owner,
+    leaseRemainingMs: Number(owner.leaseRemainingMs ?? (Number(owner.leaseExpiresAt ?? 0) - Date.now())),
+  };
+}
+export function ownerLeaseGuardMs(env) {
+  const raw = Number(env?.DO_OWNER_LEASE_GUARD_MS ?? 1000);
+  return Number.isFinite(raw) && raw >= 0 ? Math.trunc(raw) : 1000;
+}
+export function forgetOwnedScope(ownerKey) {
+  globalThis.__doActorTestState.forgottenOwners.push(ownerKey);
+}
+`);
+
+const stateUrl = moduleDataUrl(`
+export const SERVICE = "do-runtime";
+export function beginInFlightDispatch() {
+  if (globalThis.__doActorTestState.draining) return false;
+  globalThis.__doActorTestState.inFlight += 1;
+  return true;
+}
+export function endInFlightDispatch() {
+  if (globalThis.__doActorTestState.inFlight > 0) globalThis.__doActorTestState.inFlight -= 1;
+}
+export function setDraining(value = true) {
+  globalThis.__doActorTestState.draining = value === true;
+}
+export function log(level, event, fields = {}) {
+  globalThis.__doActorTestState.logs.push({ level, event, fields });
+}
+export const metrics = {
+  setGauge(name, labels, value) {
+    globalThis.__doActorTestState.gaugeSamples.push({ name, labels, value });
+  },
+};
+`);
+
+const source = applyModuleReplacements(readRepositoryFile("do-runtime/actor.js"), [
+  [/import \{ DurableObject \} from "cloudflare:workers";/g, durableObjectStub],
+  [/from "do-runtime-load";/g, `from ${JSON.stringify(loadUrl)};`],
+  [/from "do-runtime-object-registry";/g, `from ${JSON.stringify(objectRegistryUrl)};`],
+  [/from "do-runtime-protocol";/g, `from ${JSON.stringify(protocolUrl)};`],
+  [/from "do-runtime-owner-registry";/g, `from ${JSON.stringify(ownerRegistryUrl)};`],
+  [/from "do-runtime-state";/g, `from ${JSON.stringify(stateUrl)};`],
+  [/from "shared-errors";/g, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
+  [/from "shared-observability";/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};`],
+]);
+
+/** @returns {DoHostActorHarnessState} */
+export function doHostActorHarnessState() {
+  return DO_ACTOR_TEST_STATE;
+}
+
+export function resetDoHostActorHarness() {
+  const state = DO_ACTOR_TEST_STATE;
+  state.assertResponses = [];
+  state.remembered = [];
+  state.aborts = [];
+  state.draining = false;
+  state.inFlight = 0;
+  state.logs = [];
+  state.gaugeSamples = [];
+  state.assertCalls = 0;
+  state.forgottenOwners = [];
+  delete state.registryError;
+  delete state.abortReject;
+}
+
+/** @returns {Promise<any>} */
+export async function loadDoHostActor() {
+  return await import(moduleDataUrl(source));
+}

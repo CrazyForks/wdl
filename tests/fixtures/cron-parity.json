@@ -1,0 +1,39 @@
+[
+  {
+    "id": "every-five-utc",
+    "cron": "*/5 * * * *",
+    "timezone": "UTC",
+    "afterMs": 1776254400000,
+    "nextMs": 1776254700000
+  },
+  {
+    "id": "shanghai-business-hour",
+    "cron": "0 9 * * *",
+    "timezone": "Asia/Shanghai",
+    "afterMs": 1776211200000,
+    "nextMs": 1776214800000
+  },
+  {
+    "id": "dow-dom-or",
+    "cron": "0 0 1 * MON",
+    "timezone": "UTC",
+    "afterMs": 1780358400000,
+    "nextMs": 1780876800000
+  },
+  {
+    "id": "new-york-spring-forward",
+    "cron": "30 2 * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1772949600000,
+    "jsNextMs": 1772955000000,
+    "rustNextMs": 1772953200000,
+    "knownDivergence": "JavaScript croner schedules nonexistent fixed-time DST gap at 03:30 local; Rust croner follows Vixie/OCPS and fires at first valid post-gap minute."
+  },
+  {
+    "id": "new-york-fall-back",
+    "cron": "30 1 * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1793505600000,
+    "nextMs": 1793511000000
+  }
+]

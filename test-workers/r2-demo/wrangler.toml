@@ -1,0 +1,7 @@
+name = "r2-demo"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+[[r2_buckets]]
+binding = "B"
+bucket_name = "uploads"

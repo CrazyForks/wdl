@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-data
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: valkey
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: d1-data
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: d1-runtime
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: do-data
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: do-runtime
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 2Gi

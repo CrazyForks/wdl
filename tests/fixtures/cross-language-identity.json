@@ -1,0 +1,65 @@
+{
+  "tenantNs": [
+    { "value": "demo", "valid": true },
+    { "value": "a-b-1", "valid": true },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true },
+    { "value": "", "valid": false },
+    { "value": "-demo", "valid": false },
+    { "value": "demo-", "valid": false },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false },
+    { "value": "Demo", "valid": false },
+    { "value": "admin", "valid": false },
+    { "value": "__system__", "valid": false },
+    { "value": "bad_name", "valid": false }
+  ],
+  "routeNs": [
+    { "value": "demo", "valid": true },
+    { "value": "__system__", "valid": true },
+    { "value": "__platform__", "valid": false },
+    { "value": "__community__", "valid": false },
+    { "value": "admin", "valid": false }
+  ],
+  "runtimeLoadNs": [
+    { "value": "demo", "valid": true },
+    { "value": "__system__", "valid": true },
+    { "value": "__platform__", "valid": true },
+    { "value": "__community__", "valid": false },
+    { "value": "admin", "valid": false }
+  ],
+  "workerNames": [
+    { "value": "Worker", "valid": true },
+    { "value": "worker_1", "valid": true },
+    { "value": "worker-1", "valid": true },
+    { "value": "A", "valid": true },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true },
+    { "value": "", "valid": false },
+    { "value": "_worker", "valid": false },
+    { "value": "-worker", "valid": false },
+    { "value": "bad/name", "valid": false },
+    { "value": "bad.name", "valid": false },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false }
+  ],
+  "queueNames": [
+    { "value": "jobs", "valid": true },
+    { "value": "jobs-1", "valid": true },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true },
+    { "value": "", "valid": false },
+    { "value": "Jobs", "valid": false },
+    { "value": "-jobs", "valid": false },
+    { "value": "jobs_", "valid": false },
+    { "value": "jobs:tail", "valid": false },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false }
+  ],
+  "workflowInstanceIds": [
+    { "value": "inst-1", "valid": true },
+    { "value": "a_1", "valid": true },
+    { "value": "A", "valid": true },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true },
+    { "value": "", "valid": false },
+    { "value": "_bad", "valid": false },
+    { "value": "-bad", "valid": false },
+    { "value": "bad.name", "valid": false },
+    { "value": "bad:tail", "valid": false },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false }
+  ]
+}

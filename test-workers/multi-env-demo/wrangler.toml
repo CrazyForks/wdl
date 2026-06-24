@@ -1,0 +1,28 @@
+name = "multi-env-demo"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+route = "base.workers.example/*"
+
+[vars]
+BASE_ONLY = "top-level-only"
+SHARED = "top-level"
+
+[assets]
+directory = "./top-public"
+
+[env.staging]
+route = "staging.workers.example/*"
+
+[env.staging.vars]
+ENV_NAME = "staging"
+SHARED = "staging"
+
+[env.production]
+route = "production.workers.example/*"
+
+[env.production.vars]
+ENV_NAME = "production"
+SHARED = "production"
+
+[env.production.assets]
+directory = "./prod-public"

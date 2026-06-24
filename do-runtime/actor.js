@@ -1,0 +1,289 @@
+import { DurableObject } from "cloudflare:workers";
+import { loadDoWorkerCode } from "do-runtime-load";
+import { objectRegistryMember, rememberDoObject } from "do-runtime-object-registry";
+import {
+  buildAlarmRequest,
+  buildFacetName,
+  buildForwardRequest,
+  doErrorResponse,
+  DoRuntimeError,
+  normalizeDoConnectRequest,
+  readLocalActorInvokeRequest,
+} from "do-runtime-protocol";
+import {
+  assertCurrentOwner,
+  assertCurrentOwnerWithLeaseBudget,
+  forgetOwnedScope,
+  ownerLeaseGuardMs,
+} from "do-runtime-owner-registry";
+import {
+  beginInFlightDispatch,
+  endInFlightDispatch,
+  log,
+  metrics,
+  SERVICE,
+} from "do-runtime-state";
+import { errorMessage } from "shared-errors";
+import { formatError } from "shared-observability";
+
+/**
+ * @typedef {{ LOADER: { get(key: string, loader: () => Promise<unknown>): DoWorkerStub }, DO_TEST_HOOKS?: unknown }} DoEnv
+ * @typedef {{ getDurableObjectClass(className: string, options: { props: Record<string, unknown> }): DurableObjectClass }} DoWorkerStub
+ * @typedef {{ fetch(request: Request): Promise<Response> }} DoFacet
+ * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
+ * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
+ */
+
+export class WdlDoHostActor extends DurableObject {
+  /** @type {Map<string, DoWorkerStub>} */
+  workers;
+  /** @type {Set<string>} */
+  facetNames;
+  /** @type {number} */
+  facetHighWater;
+  /** @type {Set<string>} */
+  registeredObjectMembers;
+
+  /**
+   * @param {DurableObjectState} ctx
+   * @param {DoEnv} env
+   */
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.workers = new Map();
+    this.facetNames = new Set();
+    this.facetHighWater = 0;
+    this.registeredObjectMembers = new Set();
+  }
+
+  /**
+   * @param {DoInvoke} invoke
+   * @param {string | null} requestId
+   */
+  tenantWorker(invoke, requestId) {
+    const existing = this.workers.get(invoke.workerId);
+    if (existing) return existing;
+    const workerCode = "workerCode" in invoke ? invoke.workerCode : undefined;
+    const worker = this.env.LOADER.get(invoke.workerId, () => (
+      workerCode || loadDoWorkerCode(
+        this.env,
+        this.ctx,
+        /** @type {DoInvoke & { ns: string, worker: string, version: string, doStorageId: string }} */ (invoke),
+        requestId
+      )
+    ));
+    this.workers.set(invoke.workerId, worker);
+    return worker;
+  }
+
+  /** @param {DoInvoke} invoke */
+  rememberFacet(invoke) {
+    const facetName = buildFacetName(invoke);
+    const before = this.facetNames.size;
+    this.facetNames.add(facetName);
+    if (this.facetNames.size !== before) {
+      metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetNames.size);
+      if (this.facetNames.size > this.facetHighWater) {
+        this.facetHighWater = this.facetNames.size;
+        metrics.setGauge("do_host_actor_facet_high_water", { service: SERVICE }, this.facetHighWater);
+      }
+    }
+    return facetName;
+  }
+
+  /** @param {DoInvoke} invoke */
+  async rememberObject(invoke) {
+    if (!("doStorageId" in invoke) || typeof invoke.doStorageId !== "string") return;
+    const member = objectRegistryMember(invoke);
+    if (this.registeredObjectMembers.has(member)) return;
+    try {
+      await rememberDoObject(this.env, invoke);
+    } catch (err) {
+      const workerId = "workerId" in invoke ? invoke.workerId : "";
+      log("warn", "do_object_registry_remember_failed", {
+        member,
+        worker_id: workerId,
+        ...formatError(err),
+      });
+      return;
+    }
+    this.registeredObjectMembers.add(member);
+    metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
+  }
+
+  /** @param {Request} request */
+  async fetch(request) {
+    try {
+      const url = new URL(request.url);
+      if (url.pathname === "/connect") {
+        const invoke = /** @type {DoInvoke} */ (normalizeDoConnectRequest(request));
+        if (!("request" in invoke)) {
+          throw new Error("DO connect request did not normalize to a fetch invoke");
+        }
+        return await this.dispatchWithFence(invoke, async () => {
+          const requestId = request.headers.get("x-request-id") || null;
+          const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
+            props: invoke.props,
+          });
+          const facet = this.ctx.facets.get(this.rememberFacet(invoke), () => ({
+            class: cls,
+            id: invoke.objectName,
+          }));
+          return await facet.fetch(buildForwardRequest(invoke.request));
+        });
+      }
+      if (url.pathname === "/delete-storage") {
+        const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request, {
+          allowInlineWorkerCode: false,
+        }));
+        await assertCurrentOwner(this.env, invoke.owner);
+        const facetName = buildFacetName(invoke);
+        this.ctx.facets.delete(facetName);
+        this.facetNames.delete(facetName);
+        this.registeredObjectMembers.delete(objectRegistryMember(invoke));
+        metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetNames.size);
+        metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
+        return Response.json({ ok: true });
+      }
+      const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request, {
+        allowInlineWorkerCode: this.env.DO_TEST_HOOKS === "1",
+      }));
+      return await this.dispatchWithFence(invoke, async () => {
+        const requestId = request.headers.get("x-request-id") || null;
+        const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
+          props: invoke.props,
+        });
+        const facet = this.ctx.facets.get(this.rememberFacet(invoke), () => ({
+          class: cls,
+          id: invoke.objectName,
+        }));
+        if (invoke.kind === "alarm") {
+          return await facet.fetch(buildAlarmRequest(invoke.alarm));
+        }
+        if (invoke.kind === "rpc") {
+          return await dispatchRpc(facet, invoke.rpc);
+        }
+        return await facet.fetch(buildForwardRequest(invoke.request));
+      });
+    } catch (err) {
+      return doErrorResponse(err);
+    }
+  }
+
+  /**
+   * @param {DoInvoke} invoke
+   * @param {() => Promise<Response>} run
+   */
+  async dispatchWithFence(invoke, run) {
+    if (!beginInFlightDispatch()) {
+      throw new DoRuntimeError(503, "task_draining", "DO task is draining");
+    }
+    try {
+      const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
+      await this.rememberObject(invoke);
+      return await this.dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run);
+    } finally {
+      endInFlightDispatch();
+    }
+  }
+
+  /**
+   * @param {DoInvoke} invoke
+   * @param {DoOwner} owner
+   * @param {number} leaseRemainingMs
+   * @param {() => Promise<Response>} run
+   */
+  async dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run) {
+    const facetName = buildFacetName(invoke);
+    const guardMs = ownerLeaseGuardMs(this.env);
+    let done = false;
+    let timer = null;
+    let scheduleFailureReason = null;
+    const isDone = () => done;
+
+    /**
+     * @param {string} reason
+     * @param {unknown} [err]
+     */
+    const abortFacet = (reason, err = null) => {
+      if (isDone()) return;
+      forgetOwnedScope(owner.ownerKey);
+      log("error", "do_owner_lease_budget_exhausted", {
+        owner_key: owner.ownerKey,
+        owner_task_id: owner.taskId,
+        generation: owner.generation,
+        facet_name: facetName,
+        reason,
+        ...(err ? formatError(err) : {}),
+      });
+      this.ctx.facets.abort(facetName, new Error(`DO owner lease budget exhausted: ${reason}`));
+    };
+
+    /** @param {number} remainingMs */
+    const schedule = (remainingMs) => {
+      if (!Number.isFinite(remainingMs) || remainingMs <= 0 || remainingMs < guardMs) {
+        scheduleFailureReason = remainingMs <= 0 ? "expired" : "lease_guard";
+        abortFacet(scheduleFailureReason);
+        return false;
+      }
+      timer = setTimeout(async () => {
+        timer = null;
+        if (isDone()) return;
+        try {
+          const renewed = await assertCurrentOwnerWithLeaseBudget(this.env, owner, { renewNearExpiry: false });
+          if (isDone()) return;
+          schedule(renewed.leaseRemainingMs);
+        } catch (err) {
+          if (isDone()) return;
+          abortFacet("fence_failed", err);
+        }
+      }, Math.max(1, remainingMs - guardMs));
+      return true;
+    };
+
+    if (!schedule(leaseRemainingMs)) {
+      if (scheduleFailureReason === "lease_guard") {
+        throw new DoRuntimeError(503, "owner_lease_too_short", `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
+      }
+      throw new DoRuntimeError(503, "owner_lease_expired", `DO scope ${owner.ownerKey} owner lease has expired`);
+    }
+    try {
+      return await run();
+    } finally {
+      done = true;
+      if (timer) clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * @param {DoFacet} facet
+ * @param {{ method: string, args: unknown[] }} rpc
+ */
+async function dispatchRpc(facet, rpc) {
+  // Facets are workerd JSRPC stubs; reading a method returns a forwarder
+  // already bound to that stub, unlike ordinary unbound JavaScript methods.
+  const methods = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (facet));
+  const fn = methods[rpc.method];
+  if (typeof fn !== "function") {
+    return Response.json({
+      error: "do_rpc_method_not_found",
+      message: `Durable Object RPC method ${rpc.method} was not found`,
+    }, { status: 404 });
+  }
+  try {
+    return Response.json({ ok: true, result: await fn(...rpc.args) });
+  } catch (err) {
+    const errorObject = err && typeof err === "object" ? err : {};
+    // The stack captured from fn(...) is tenant method execution, not
+    // do-runtime framework internals, so it belongs on the tenant RPC boundary.
+    // Runtime failures still go through doErrorResponse(), which intentionally
+    // hides internal stack traces and infrastructure details.
+    return Response.json({
+      error: "do_rpc_error",
+      name: "name" in errorObject && typeof errorObject.name === "string" ? errorObject.name : "Error",
+      message: errorMessage(err),
+      ...("stack" in errorObject && typeof errorObject.stack === "string" && errorObject.stack ? { stack: errorObject.stack } : {}),
+    }, { status: 500 });
+  }
+}

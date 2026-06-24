@@ -1,0 +1,51 @@
+.codex
+.antigravitycli/
+node_modules/
+.deploy-dist/
+.wrangler/
+
+# Secrets — never commit
+.env
+.env.*
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+.integration-test-durations.json
+licenses/third-party/*.txt
+licenses/third-party/**/*.txt
+
+# Rust build artifacts
+target/
+/dist/**
+!/dist/
+!/dist/.gitkeep
+!/dist/workerd-configs/
+/dist/workerd-configs/**
+!/dist/workerd-configs/.gitkeep
+
+# npm workspaces keep the authoritative lockfile at the repo root.
+# control/package.json is committed for dependency metadata; a local
+# control/package-lock.json is churn from running npm inside that subdir.
+/control/package-lock.json
+
+# Worker projects are not npm packages we publish. Their sole dep is wrangler,
+# so per-worker lockfiles are local install churn.
+system-workers/*/package-lock.json
+test-workers/*/package-lock.json
+examples/*/package-lock.json
+
+# Terraform environment-specific inputs.
+terraform/**/terraform.tfvars
+terraform/**/backend*.hcl
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+*.tfplan
+*.tfplan.json

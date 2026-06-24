@@ -1,0 +1,29 @@
+replicaCount: 1
+
+image:
+  repository: registry.k8s.io/sig-storage/nfs-provisioner
+  tag: v4.0.8
+  pullPolicy: IfNotPresent
+
+persistence:
+  enabled: true
+  storageClass: standard
+  accessMode: ReadWriteOnce
+  size: 20Gi
+
+storageClass:
+  create: true
+  defaultClass: false
+  name: wdl-nfs-rwx
+  allowVolumeExpansion: true
+  reclaimPolicy: Delete
+  mountOptions:
+    - vers=3
+    - retrans=2
+    - timeo=30
+
+securityContext:
+  capabilities:
+    add:
+      - DAC_READ_SEARCH
+      - SYS_RESOURCE

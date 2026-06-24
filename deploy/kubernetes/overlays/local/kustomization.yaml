@@ -1,0 +1,63 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: wdl-local
+resources:
+  - namespace.yaml
+  - ../../base
+patches:
+  - path: rwx-storage-patch.yaml
+  - path: local-image-pull-policy-patch.yaml
+images:
+  - name: docker.io/getwdl/wdl-workerd
+    newName: wdl-workerd
+    newTag: dev
+  - name: docker.io/getwdl/wdl-rust
+    newName: wdl-rust
+    newTag: dev
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: wdl-config
+    literals:
+      - LOG_LEVEL=info
+      - PLATFORM_DOMAIN=workers.local
+      - ADMIN_HOST=admin.test
+      - REDIS_ADDR=redis:6379
+      - DATA_REDIS_ADDR=redis:6379
+      - DATA_REDIS_DB=1
+      - REDIS_URL=redis://redis:6379
+      - DATA_REDIS_URL=redis://redis:6379/1
+      - WORKFLOWS_REDIS_DB=2
+      - WORKFLOWS_PORT=9120
+      - REDIS_PROXY_PORT=7070
+      - ASSETS_CDN_BASE=http://localhost:30900/wdl-assets
+      - S3_ENDPOINT=http://s3mock:9090
+      - S3_BUCKET=wdl-assets
+      - S3_REGION=us-east-1
+      - R2_S3_ENDPOINT=http://s3mock:9090
+      - R2_S3_BUCKET=wdl-r2
+      - R2_S3_REGION=us-east-1
+      - D1_OWNER_TTL_SECONDS=120
+      - D1_PROBE_TIMEOUT_MS=500
+      - D1_QUERY_TIMEOUT_MS=30000
+      - D1_TEST_HOOKS=0
+      - DO_OWNER_TTL_SECONDS=120
+      - DO_RENEW_INTERVAL_MS=1000
+      - WORKFLOWS_TICK_INTERVAL_MS=500
+      - SCHEDULER_SWEEP_MS=3000
+      - QUEUE_PEL_REAP_MS=3000
+      - QUEUE_PEL_IDLE_MS=65000
+      - WEBSOCKET_RECONNECT_DELAYS_MS=0,100,250,500,1000,2000,5000
+      - WEBSOCKET_MAX_BUFFERED_MESSAGES=64
+secretGenerator:
+  - name: wdl-secrets
+    literals:
+      - BOOTSTRAP_TOKEN=local-dev-token
+      - WDL_INTERNAL_AUTH_TOKEN=local-internal-auth-token
+      - WDL_INTERNAL_AUTH_PREVIOUS_TOKEN=
+      - SECRET_ENVELOPE_LOCAL_KEY_B64=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      - SECRET_ENVELOPE_KID=local:k8s:secret-envelope:v1
+      - S3_ACCESS_KEY_ID=test
+      - S3_SECRET_ACCESS_KEY=test
+      - R2_S3_ACCESS_KEY_ID=test
+      - R2_S3_SECRET_ACCESS_KEY=test
