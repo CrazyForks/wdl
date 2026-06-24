@@ -47,6 +47,14 @@ environments replace those dependencies with managed or provisioned equivalents.
 service can run multiple replicas when the owning module's concurrency contract allows
 it; D1/DO require per-replica storage identity when scaled beyond one task.
 
+The production HA model is single-region and replica-oriented. WDL does not provide a
+global edge control plane or cross-region replication, but it does provide explicit
+recovery contracts inside one operator-owned region: stateless service families can be
+replicated behind service discovery, stateful owners are protected by Redis leases and
+generation fences, scheduler projections are repairable, and workflows progress is
+guarded by DB 2 leases and run tokens. A task or pod replacement should therefore be a
+recoverable event rather than a metadata mutation.
+
 Important sockets and ports:
 
 - Gateway public/admin ingress: `:8080`.
@@ -173,6 +181,13 @@ WDL prefers explicit fences over implicit ordering:
 - Workflows execution commits use generation/run-token fences while lifecycle commits
   rotate generation.
 - Queue and cron scheduler indexes are non-authoritative and repairable.
+
+Replica failover follows those same fences. Gateway/runtime replacement is stateless
+apart from local caches and loaded isolates. D1 failover is per physical database; DO
+failover is per owner scope. A new owner claims only after the previous lease is gone or
+released by drain, then advances the generation so stale owners fail later owner-side
+checks. Scheduler replicas may race to observe due work, but dispatch paths use Redis
+claiming or repairable projections rather than local process memory as authority.
 
 Transport failure and user-code failure are separate. Runtime handler errors should not
 become scheduler transport retries unless the transport contract says so.

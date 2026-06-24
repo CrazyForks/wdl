@@ -11,6 +11,10 @@ variable "platform_domain" { type = string }
 # the short-circuit by grammar alone. Same string is injected into
 # gateway as the ADMIN_HOST env var.
 variable "admin_host" { type = string }
+variable "site_host" {
+  type    = string
+  default = ""
+}
 
 variable "workerd_image" { type = string }
 variable "rust_image" { type = string }

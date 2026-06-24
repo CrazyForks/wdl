@@ -4,6 +4,11 @@ name_prefix = "wdl-test"
 platform_domain = "*.wdl.sh"
 admin_host     = "api.wdl.dev"
 
+# Canonical public site host that should reach the WDL gateway. Terraform also
+# covers www.<site_host>; WDL control still owns host declaration and route
+# pattern deployment.
+site_host = ""
+
 vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
 
 private_subnet_ids = [

@@ -82,6 +82,50 @@ resource "aws_lb_listener_rule" "gateway" {
   }
 }
 
+resource "aws_lb_listener_rule" "site" {
+  count = var.site_host != "" ? 1 : 0
+
+  listener_arn = var.alb_https_listener_arn
+  priority     = 4611
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.gateway.arn
+  }
+
+  condition {
+    host_header {
+      values = [var.site_host]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "site_www_redirect" {
+  count = var.site_host != "" ? 1 : 0
+
+  listener_arn = var.alb_https_listener_arn
+  priority     = 4610
+
+  action {
+    type = "redirect"
+
+    redirect {
+      host        = var.site_host
+      path        = "/#{path}"
+      port        = "443"
+      protocol    = "HTTPS"
+      query       = "#{query}"
+      status_code = "HTTP_301"
+    }
+  }
+
+  condition {
+    host_header {
+      values = ["www.${var.site_host}"]
+    }
+  }
+}
+
 module "gateway_service" {
   source = "../ecs-service"
 
@@ -111,5 +155,9 @@ module "gateway_service" {
   # entry — it resolves user-runtime/system-runtime via their client aliases.
   service_connect_namespace_arn = aws_service_discovery_http_namespace.this.arn
 
-  depends_on = [aws_lb_listener_rule.gateway]
+  depends_on = [
+    aws_lb_listener_rule.gateway,
+    aws_lb_listener_rule.site,
+    aws_lb_listener_rule.site_www_redirect,
+  ]
 }

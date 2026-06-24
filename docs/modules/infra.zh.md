@@ -25,6 +25,8 @@ Terraform 对应 AWS ECS-shaped deployment environment，由 developer/operator 
 
 Local compose 是开发便利环境，不是 production delivery contract。它用本地端口、Valkey、`s3mock` 和 Envoy mesh 启动同一组 service family；`d1-multi`、`do-multi` 等 profile 用于定向测试本地多副本行为。Production-shaped delivery path 是 Terraform 和 `deploy/kubernetes/` 下的 Kubernetes manifests。
 
+这些交付路径用于生产运行，不只是本地演示。它们保留 runtime module 依赖的 service boundary、私有 mesh 假设、image contract、health/metrics endpoint，以及 ownership/failover 规则。Operator 仍然需要选择具体容量、managed Redis/Valkey durability、S3-compatible storage、EFS 或等价 localDisk persistence、ingress protection 和区域级 backup/restore 策略。
+
 除 co-located sidecar 外，app service 有意保持一个可部署服务一个 container boundary：
 
 - user-runtime 和 system-runtime co-locate `redis-proxy`。
@@ -77,7 +79,9 @@ Stateful storage：
 
 - Scheduler 部署默认 1 个副本；当前 dispatch 路径具备多副本安全性，但 ECS rollout 仍使用 stop-before-start replacement，部署期间可能短暂停止调度。
 - Workflows 是独立 Rust service。
-- D1/DO 使用 owner lease 和本地 drain/renew。
+- Gateway、user-runtime 和 system-runtime 可以放在环境的 load balancing / service discovery 层后面水平扩展。本地 route cache、已加载 isolate 和 owner hint 都是优化，不是 authority。
+- D1/DO 使用 owner lease、monotonic generation fence 和本地 drain/renew。超过 1 个 task 时需要稳定的 per-replica storage identity，并确保 supervisor drain/renew 只走私有本地入口，不能通过 service alias 打到其他 replica。
+- 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - 跑 tenant workload 的 ECS EC2 capacity 必须阻断 task 访问 host IMDS。
 - Instance refresh / lifecycle hook 会让 Terraform rolling 变慢；修改 hook timeout 或 capacity policy 前应记录操作预期。
 

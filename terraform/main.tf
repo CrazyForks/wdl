@@ -23,6 +23,7 @@ module "compute" {
   alb_security_group_id  = var.alb_security_group_id
   platform_domain        = var.platform_domain
   admin_host             = var.admin_host
+  site_host              = var.site_host
 
   rust_image    = var.rust_image
   workerd_image = var.workerd_image

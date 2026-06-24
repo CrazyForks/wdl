@@ -76,6 +76,25 @@ variable "platform_domain" {
   }
 }
 
+variable "site_host" {
+  type        = string
+  default     = ""
+  description = "Optional exact canonical public site host that should terminate TLS on the ALB and forward to the WDL gateway, e.g. wdl.dev. The www host is derived automatically."
+  validation {
+    condition = (
+      var.site_host == "" || (
+        var.site_host == trimspace(var.site_host) &&
+        !startswith(var.site_host, "www.") &&
+        !startswith(var.site_host, "*.") &&
+        !strcontains(var.site_host, "://") &&
+        !strcontains(var.site_host, "/") &&
+        !strcontains(var.site_host, ":")
+      )
+    )
+    error_message = "site_host must be empty or an exact canonical host such as wdl.dev, without www prefix, wildcard, scheme, path, port, or surrounding whitespace."
+  }
+}
+
 variable "assets_cdn_domain" {
   type        = string
   default     = ""

@@ -39,8 +39,16 @@ output "manual_dns_records" {
       type  = "CNAME"
       value = aws_lb.this.dns_name
     }
+    site_host = local.site_host_enabled ? {
+      name   = var.site_host
+      target = aws_lb.this.dns_name
+    } : null
+    site_www_host = local.site_host_enabled ? {
+      name   = local.site_www_host
+      target = aws_lb.this.dns_name
+    } : null
   }
-  description = "External DNS records to create after the ALB exists."
+  description = "External DNS targets to create after the ALB exists. For apex site hosts such as wdl.dev, use the DNS provider's supported flattened/proxied target form."
 }
 
 output "alb_certificate_validation_records" {
@@ -61,6 +69,16 @@ output "assets_cdn_acm_certificate_arn" {
 output "assets_cdn_certificate_validation_records" {
   value = local.assets_cdn_enabled ? {
     for record in aws_acm_certificate.assets_cdn[0].domain_validation_options : record.domain_name => {
+      name  = record.resource_record_name
+      type  = record.resource_record_type
+      value = record.resource_record_value
+    }
+  } : {}
+}
+
+output "site_certificate_validation_records" {
+  value = local.site_host_enabled ? {
+    for record in aws_acm_certificate.site[0].domain_validation_options : record.domain_name => {
       name  = record.resource_record_name
       type  = record.resource_record_type
       value = record.resource_record_value

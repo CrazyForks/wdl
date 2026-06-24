@@ -8,7 +8,8 @@
 
 > Chinese version: [README.zh.md](README.zh.md)
 
-WDL is a self-hosted multi-tenant Workers platform built on stock Cloudflare workerd.
+WDL is a self-hosted multi-tenant Workers platform with multi-replica failover,
+built on stock Cloudflare workerd.
 It loads immutable Worker versions dynamically from Redis/Valkey through workerd's
 `workerLoader` API, then layers platform services around that runtime: control/auth,
 KV, R2, D1, Durable Objects, queues, cron, Workflows, ASSETS, service/platform
@@ -26,6 +27,8 @@ the platform extends well beyond dynamic loading.
   bindings, and platform bindings.
 - Secret-at-rest envelope encryption before values are written to Redis.
 - Live `wdl tail` over bounded Redis streams, structured logs, and Prometheus metrics.
+- Explicit failover semantics for D1/Durable Objects, plus multi-replica-safe dispatch
+  for runtime, scheduler, and Workflows.
 - Local Docker Compose stack plus production-shaped Terraform and Kubernetes delivery
   paths.
 
@@ -41,6 +44,14 @@ runtime contract; WDL expresses the platform through workerd configs, static sys
 workers, Rust services, Redis/Valkey state machines, and S3-compatible object storage.
 Operators get the Workers programming model while inheriting upstream workerd fixes
 instead of maintaining a runtime fork.
+
+WDL is also more than a demo stack. Its control plane, routing, stateful binding
+ownership, dispatch workers, observability, release images, and infrastructure paths are
+written as single-region production platform components. "Production-ready" here means
+the platform has explicit recovery contracts, private mesh boundaries, release gates,
+and deployable Terraform/Kubernetes shapes; operators still own capacity planning,
+managed Redis/Valkey, storage durability, ingress protection, and regional disaster
+recovery.
 
 ## What WDL Is Not
 
@@ -119,6 +130,25 @@ Valkey/Redis uses a deliberate logical split:
 S3-compatible storage backs ASSETS and R2. D1 and Durable Object SQLite files live on
 workerd `localDisk` storage. In production-shaped environments, those map to managed or
 provisioned storage; in local compose they map to volumes and `s3mock`.
+
+### High Availability And Failover
+
+WDL's HA model is single-region and service-replica based. Gateway, runtime pools,
+scheduler, workflows, D1 runtime, and DO runtime are independent service families, so
+operators can run multiple tasks or pods where the module's concurrency contract allows
+it. Tenant worker versions are immutable and are loaded by id, so replacing a runtime
+replica does not mutate routing state.
+
+Stateful bindings use ownership protocols instead of assuming that a service discovery
+target is the owner. D1 ownership is per physical database. Durable Object ownership is
+per owner scope. Both owner records carry task identity, lease expiry, and a monotonic
+generation fence, so stale replicas fail closed after a takeover. Supervisors drain local
+D1/DO owners during rollout, and ordinary task loss falls back to lease expiry and
+takeover by another replica. Scheduler projections are repairable, queues are
+at-least-once, cron/queue dispatch paths are multi-replica safe, and Workflows uses DB 2
+leases and generation/run-token fences for execution progress. Scheduler rollout can
+still create a short dispatch gap, and missed cron slots follow the documented
+best-effort cron semantics instead of being replayed.
 
 For the full architecture, see [docs/architecture.md](docs/architecture.md).
 
@@ -261,6 +291,12 @@ The delivery paths share the same service model and image contracts. Production
 deployments should keep Redis/Valkey private, keep runtime internal sockets private,
 and protect object storage, D1/DO localDisk storage, and secret-envelope root material
 as platform state.
+
+Production deployments should also run replica counts and rollout policies that match
+the service's ownership contract: stateless workerd pools can be scaled horizontally,
+scheduler dispatch is replica-safe but may pause briefly during rollout, and D1/DO
+require stable per-replica storage identity plus private supervisor drain/renew access
+before scaling beyond one task.
 
 ## Project Layout
 

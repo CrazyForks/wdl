@@ -36,6 +36,13 @@ an Envoy mesh for private service hops; profiles such as `d1-multi` and
 production-shaped delivery paths are Terraform and the Kubernetes manifests under
 `deploy/kubernetes/`.
 
+These paths are intended for production operation, not only local demonstration. That
+means they preserve the service boundaries, private mesh assumptions, image contracts,
+health/metrics endpoints, and ownership/failover rules that the runtime modules depend
+on. Operators still choose concrete capacity, managed Redis/Valkey durability,
+object storage, EFS or equivalent localDisk persistence, ingress protection, and
+regional backup/restore policy.
+
 The app services intentionally keep one container boundary per deployable service,
 except for co-located sidecars:
 
@@ -119,7 +126,15 @@ Stateful storage:
   multi-replica safe, but rollout can still pause scheduling because ECS uses
   stop-before-start replacement.
 - Workflows is a separate Rust service.
-- D1/DO use owner leases and local drain/renew.
+- Gateway, user-runtime, and system-runtime can be horizontally replicated behind the
+  environment's load balancing and service discovery layer. Local route caches, loaded
+  isolates, and owner hints are optimizations, not authority.
+- D1/DO use owner leases, monotonic generation fences, and local drain/renew. Scaling
+  them beyond one task requires stable per-replica storage identity and private local
+  supervisor access so drain/renew never targets another replica by service alias.
+- Ordinary D1/DO task loss falls back to lease expiry and takeover by another replica;
+  graceful rollout should prefer supervisor drain so ownership is released before the
+  child workerd process exits.
 - ECS EC2 capacity must block task access to host IMDS for tenant-running workloads.
 - Instance refresh / lifecycle hooks can make Terraform rolling slow; document
   operational expectations before changing hook timeout or capacity policy.

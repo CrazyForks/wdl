@@ -5,6 +5,11 @@ environment = "test"
 admin_host     = "api.wdl.dev"
 platform_domain = "*.wdl.sh"
 
+# Canonical public site host that should reach the WDL gateway. Terraform also
+# covers www.<site_host>; WDL control still owns host declaration and route
+# pattern deployment.
+site_host = ""
+
 # Optional assets CDN alias. Leave empty to skip the us-east-1 CloudFront cert.
 assets_cdn_domain = "assets.wdl.dev"
 

@@ -7,6 +7,8 @@ locals {
   public_subnets     = { for idx, cidr in var.public_subnet_cidrs : idx => cidr }
   private_subnets    = { for idx, cidr in var.private_subnet_cidrs : idx => cidr }
   assets_cdn_enabled = var.assets_cdn_domain != ""
+  site_host_enabled  = var.site_host != ""
+  site_www_host      = local.site_host_enabled ? "www.${var.site_host}" : ""
 }
 
 resource "aws_vpc" "this" {
@@ -177,6 +179,18 @@ resource "aws_acm_certificate" "assets_cdn" {
   }
 }
 
+resource "aws_acm_certificate" "site" {
+  count = local.site_host_enabled ? 1 : 0
+
+  domain_name               = var.site_host
+  subject_alternative_names = [local.site_www_host]
+  validation_method         = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_acm_certificate_validation" "alb" {
   count           = var.validate_certificates ? 1 : 0
   certificate_arn = aws_acm_certificate.alb.arn
@@ -187,6 +201,12 @@ resource "aws_acm_certificate_validation" "assets_cdn" {
   count    = var.validate_certificates && local.assets_cdn_enabled ? 1 : 0
 
   certificate_arn = aws_acm_certificate.assets_cdn[0].arn
+}
+
+resource "aws_acm_certificate_validation" "site" {
+  count = var.validate_certificates && local.site_host_enabled ? 1 : 0
+
+  certificate_arn = aws_acm_certificate.site[0].arn
 }
 
 resource "aws_lb_listener" "http" {
@@ -221,4 +241,11 @@ resource "aws_lb_listener" "https" {
       message_body = "{\"error\":\"not_found\"}"
     }
   }
+}
+
+resource "aws_lb_listener_certificate" "site" {
+  count = var.validate_certificates && local.site_host_enabled ? 1 : 0
+
+  listener_arn    = aws_lb_listener.https[0].arn
+  certificate_arn = aws_acm_certificate_validation.site[0].certificate_arn
 }
