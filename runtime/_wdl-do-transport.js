@@ -114,6 +114,50 @@ function byteLength(value) {
 }
 
 /**
+ * @param {Request} request
+ * @returns {Promise<Uint8Array>}
+ */
+async function readRequestBodyBytes(request) {
+  // This source is injected into loaded workers, so keep the bounded reader
+  // local instead of importing a helper that would add another facade module.
+  const contentLength = request.headers.get("content-length");
+  if (contentLength != null && contentLength !== "") {
+    const declared = Number(contentLength);
+    if (Number.isFinite(declared) && declared > MAX_DO_REQUEST_BODY_BYTES) {
+      throw new TypeError(`Durable Object fetch body exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
+    }
+  }
+  if (!request.body) return new Uint8Array();
+
+  const reader = request.body.getReader();
+  /** @type {Uint8Array[]} */
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_DO_REQUEST_BODY_BYTES) {
+        reader.cancel().catch(() => {});
+        throw new TypeError(`Durable Object fetch body exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+/**
  * @param {unknown} value
  * @param {string} field
  * @param {WeakSet<object>} [seen]
@@ -292,10 +336,7 @@ export async function requestSpec(request, requestId) {
   };
   let bodyBytes = null;
   if (method !== "GET" && method !== "HEAD") {
-    const body = new Uint8Array(await forwarded.arrayBuffer());
-    if (body.byteLength > MAX_DO_REQUEST_BODY_BYTES) {
-      throw new TypeError(`Durable Object fetch body exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
-    }
+    const body = await readRequestBodyBytes(forwarded);
     if (body.byteLength > 0) bodyBytes = body;
   }
   return { spec, bodyBytes };

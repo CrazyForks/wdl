@@ -61,6 +61,9 @@ the runtime/DO client protocol, not a generic admin JSON parser. Unknown interna
 exceptions are still downgraded to safe `internal_error` / `Internal error` messages.
 Storage delete-worker may return HTTP 207 with `{ ok:false, deleted, errors }` for a
 partial batch result; that is a result envelope, not a generic JSON error envelope.
+Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The facade
+rejects an oversized `Content-Length` before reading, and streamed bodies are read
+incrementally so the cap is enforced before buffering the full body.
 
 ## Redis / Storage Contracts
 

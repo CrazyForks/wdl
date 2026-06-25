@@ -6,6 +6,7 @@ import {
   clearDoOwnerHintsForTest,
   setDoOwnerHintMaxEntriesForTest,
 } from "../../runtime/do-client.js";
+import { requestSpec } from "../../runtime/_wdl-do-transport.js";
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
 import { doOwnerHintHeaders, doOwnerHintResponse } from "../helpers/do-owner-hint.js";
 import { makeRecordingFetch } from "../helpers/mock-fetch.js";
@@ -1007,6 +1008,98 @@ test("DurableObjectNamespace direct backend rejects oversized request bodies bef
     }),
     /Durable Object fetch body exceeds/
   );
+});
+
+test("DurableObjectNamespace direct backend rejects oversized declared request bodies before reading", async () => {
+  const backend = {
+    async fetch() {
+      throw new Error("backend should not be called");
+    },
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend });
+
+  await assert.rejects(
+    ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
+      method: "POST",
+      headers: { "content-length": String(1024 * 1024 + 1) },
+      body: "x",
+    }),
+    /Durable Object fetch body exceeds/
+  );
+});
+
+test("DO requestSpec rejects streaming bodies as soon as they cross the cap", async () => {
+  let pulls = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      if (pulls <= 2) {
+        controller.enqueue(new Uint8Array(600 * 1024));
+      } else {
+        return new Promise(() => {});
+      }
+    },
+  });
+  const request = new Request("https://demo.workers.example/send", /** @type {RequestInit} */ ({
+    method: "POST",
+    body,
+    duplex: "half",
+  }));
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+
+  try {
+    await assert.rejects(
+      Promise.race([
+        requestSpec(request, "rid-stream"),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("requestSpec kept reading the oversized stream")), 1000);
+        }),
+      ]),
+      /Durable Object fetch body exceeds/
+    );
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+});
+
+test("DO requestSpec rejects oversized streams without waiting for cancel", async () => {
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(1024 * 1024 + 1));
+    },
+    cancel() {
+      return new Promise(() => {});
+    },
+  });
+  const request = new Request("https://demo.workers.example/send", /** @type {RequestInit} */ ({
+    method: "POST",
+    body,
+    duplex: "half",
+  }));
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+
+  try {
+    await assert.rejects(
+      Promise.race([
+        requestSpec(request, "rid-cancel"),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("requestSpec waited for stream cancel")), 1000);
+        }),
+      ]),
+      /Durable Object fetch body exceeds/
+    );
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 });
 
 test("DurableObjectNamespace facade uses direct upgrade path for websockets", async () => {
