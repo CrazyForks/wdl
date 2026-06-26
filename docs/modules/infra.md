@@ -54,7 +54,9 @@ except for co-located sidecars:
 
 ## Interfaces
 
-- Public ingress through ALB/gateway.
+- Public ingress through ALB/gateway. Terraform-managed ALB ingress can terminate the
+  admin host, platform wildcard, canonical site host, and additional exact public
+  hosts on the same gateway service.
 - Admin-host ingress through gateway's `ADMIN_HOST` branch to system-runtime control.
 - Local Compose private service hops use `envoy/envoy.yaml` and the `*-local.capnp`
   workerd configs compiled into `dist/workerd-configs`.

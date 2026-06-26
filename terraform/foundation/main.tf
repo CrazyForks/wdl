@@ -9,6 +9,16 @@ locals {
   assets_cdn_enabled = var.assets_cdn_domain != ""
   site_host_enabled  = var.site_host != ""
   site_www_host      = local.site_host_enabled ? "www.${var.site_host}" : ""
+  public_alb_hosts = distinct(compact(concat(
+    [var.site_host, local.site_www_host],
+    var.additional_public_hosts,
+  )))
+  public_alb_hosts_enabled = length(local.public_alb_hosts) > 0
+  public_alb_certificate_sans = (
+    length(local.public_alb_hosts) > 1
+    ? slice(local.public_alb_hosts, 1, length(local.public_alb_hosts))
+    : []
+  )
 }
 
 resource "aws_vpc" "this" {
@@ -180,10 +190,10 @@ resource "aws_acm_certificate" "assets_cdn" {
 }
 
 resource "aws_acm_certificate" "site" {
-  count = local.site_host_enabled ? 1 : 0
+  count = local.public_alb_hosts_enabled ? 1 : 0
 
-  domain_name               = var.site_host
-  subject_alternative_names = [local.site_www_host]
+  domain_name               = local.public_alb_hosts[0]
+  subject_alternative_names = local.public_alb_certificate_sans
   validation_method         = "DNS"
 
   lifecycle {
@@ -204,7 +214,7 @@ resource "aws_acm_certificate_validation" "assets_cdn" {
 }
 
 resource "aws_acm_certificate_validation" "site" {
-  count = var.validate_certificates && local.site_host_enabled ? 1 : 0
+  count = var.validate_certificates && local.public_alb_hosts_enabled ? 1 : 0
 
   certificate_arn = aws_acm_certificate.site[0].arn
 }
@@ -244,8 +254,12 @@ resource "aws_lb_listener" "https" {
 }
 
 resource "aws_lb_listener_certificate" "site" {
-  count = var.validate_certificates && local.site_host_enabled ? 1 : 0
+  count = var.validate_certificates && local.public_alb_hosts_enabled ? 1 : 0
 
   listener_arn    = aws_lb_listener.https[0].arn
   certificate_arn = aws_acm_certificate_validation.site[0].certificate_arn
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }

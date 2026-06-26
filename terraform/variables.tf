@@ -74,6 +74,25 @@ variable "site_host" {
   }
 }
 
+variable "additional_public_hosts" {
+  type        = list(string)
+  default     = []
+  description = "Additional exact public hosts that should forward from the ALB to the WDL gateway, e.g. chat.wdl.dev."
+  validation {
+    condition = alltrue([
+      for host in var.additional_public_hosts : (
+        length(host) > 0 &&
+        host == trimspace(host) &&
+        !startswith(host, "*.") &&
+        !strcontains(host, "://") &&
+        !strcontains(host, "/") &&
+        !strcontains(host, ":")
+      )
+    ]) && length(var.additional_public_hosts) == length(distinct(var.additional_public_hosts))
+    error_message = "additional_public_hosts must contain unique exact hosts such as chat.wdl.dev, without wildcard, scheme, path, port, or surrounding whitespace."
+  }
+}
+
 variable "assets_cdn_domain" {
   type        = string
   default     = ""

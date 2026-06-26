@@ -47,6 +47,12 @@ output "manual_dns_records" {
       name   = local.site_www_host
       target = aws_lb.this.dns_name
     } : null
+    additional_public_hosts = {
+      for host in var.additional_public_hosts : host => {
+        name   = host
+        target = aws_lb.this.dns_name
+      }
+    }
   }
   description = "External DNS targets to create after the ALB exists. For apex site hosts such as wdl.dev, use the DNS provider's supported flattened/proxied target form."
 }
@@ -77,7 +83,7 @@ output "assets_cdn_certificate_validation_records" {
 }
 
 output "site_certificate_validation_records" {
-  value = local.site_host_enabled ? {
+  value = local.public_alb_hosts_enabled ? {
     for record in aws_acm_certificate.site[0].domain_validation_options : record.domain_name => {
       name  = record.resource_record_name
       type  = record.resource_record_type

@@ -15,15 +15,16 @@ module "data" {
 module "compute" {
   source = "./modules/compute"
 
-  name                   = local.name
-  region                 = var.region
-  vpc_id                 = var.vpc_id
-  private_subnet_ids     = var.private_subnet_ids
-  alb_https_listener_arn = var.alb_https_listener_arn
-  alb_security_group_id  = var.alb_security_group_id
-  platform_domain        = var.platform_domain
-  admin_host             = var.admin_host
-  site_host              = var.site_host
+  name                    = local.name
+  region                  = var.region
+  vpc_id                  = var.vpc_id
+  private_subnet_ids      = var.private_subnet_ids
+  alb_https_listener_arn  = var.alb_https_listener_arn
+  alb_security_group_id   = var.alb_security_group_id
+  platform_domain         = var.platform_domain
+  admin_host              = var.admin_host
+  site_host               = var.site_host
+  additional_public_hosts = var.additional_public_hosts
 
   rust_image    = var.rust_image
   workerd_image = var.workerd_image

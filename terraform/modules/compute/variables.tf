@@ -15,6 +15,10 @@ variable "site_host" {
   type    = string
   default = ""
 }
+variable "additional_public_hosts" {
+  type    = list(string)
+  default = []
+}
 
 variable "workerd_image" { type = string }
 variable "rust_image" { type = string }

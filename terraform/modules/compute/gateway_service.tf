@@ -126,6 +126,24 @@ resource "aws_lb_listener_rule" "site_www_redirect" {
   }
 }
 
+resource "aws_lb_listener_rule" "additional_public_hosts" {
+  count = length(var.additional_public_hosts) > 0 ? 1 : 0
+
+  listener_arn = var.alb_https_listener_arn
+  priority     = 4612
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.gateway.arn
+  }
+
+  condition {
+    host_header {
+      values = var.additional_public_hosts
+    }
+  }
+}
+
 module "gateway_service" {
   source = "../ecs-service"
 
@@ -159,5 +177,6 @@ module "gateway_service" {
     aws_lb_listener_rule.gateway,
     aws_lb_listener_rule.site,
     aws_lb_listener_rule.site_www_redirect,
+    aws_lb_listener_rule.additional_public_hosts,
   ]
 }

@@ -77,6 +77,7 @@ AWS_PROFILE=<profile> terraform -chdir=terraform/foundation apply \
   -var admin_host=api.wdl.dev \
   -var 'platform_domain=*.wdl.sh' \
   -var site_host=wdl.dev \
+  -var 'additional_public_hosts=["chat.wdl.dev"]' \
   -var assets_cdn_domain=assets.wdl.dev \
   -var validate_certificates=false
 ```
@@ -85,6 +86,7 @@ Add the printed CNAME records at your DNS provider:
 
 - ACM validation records for the regional ALB certificate.
 - Optional ACM validation record for the public `site_host`, such as `wdl.dev`.
+- Optional ACM validation records for each `additional_public_hosts` entry.
 - Optional ACM validation records for the us-east-1 assets CDN certificate.
 - `admin_host` CNAME to the ALB DNS name.
 - `platform_domain` wildcard CNAME to the ALB DNS name.
@@ -92,6 +94,9 @@ Add the printed CNAME records at your DNS provider:
   `wdl.dev`, use Cloudflare's supported flattened/proxied target form.
 - `www.<site_host>` to the same ALB DNS name. The ALB redirects it to `site_host`
   with HTTP 301.
+- Each `additional_public_hosts` entry to the same ALB DNS name. These hosts
+  terminate TLS on the shared regional site certificate and forward to the WDL
+  gateway.
 
 Then enable validation and apply again:
 
@@ -101,6 +106,7 @@ AWS_PROFILE=<profile> terraform -chdir=terraform/foundation apply \
   -var admin_host=api.wdl.dev \
   -var 'platform_domain=*.wdl.sh' \
   -var site_host=wdl.dev \
+  -var 'additional_public_hosts=["chat.wdl.dev"]' \
   -var assets_cdn_domain=assets.wdl.dev \
   -var validate_certificates=true
 ```
@@ -135,6 +141,7 @@ admin_host      = "api.wdl.dev"
 platform_domain = "*.wdl.sh"
 
 site_host = "wdl.dev"
+additional_public_hosts = ["chat.wdl.dev"]
 
 assets_cdn_domain              = ""
 assets_cdn_acm_certificate_arn = ""
@@ -151,9 +158,11 @@ AWS_PROFILE=<profile> terraform -chdir=terraform apply
 
 `site_host` configures ALB TLS for both the apex host and `www.<site_host>`, forwards
 the apex host to the WDL gateway target group, and redirects `www.<site_host>` to the
-apex host with HTTP 301. WDL host declaration, route ownership, and route pattern
-deployment still belong to the WDL control plane and CLI. Declare the apex host and
-deploy the site Worker through WDL after DNS reaches the gateway.
+apex host with HTTP 301. `additional_public_hosts` configures extra exact public
+hosts that share the regional site certificate and forward to the same gateway target
+group. WDL host declaration, route ownership, and route pattern deployment still
+belong to the WDL control plane and CLI. Declare each public host and deploy its
+Worker through WDL after DNS reaches the gateway.
 
 If the assets CDN is enabled, point the assets CDN host at the CloudFront
 distribution after the application apply:
