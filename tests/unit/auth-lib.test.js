@@ -547,16 +547,25 @@ test("validateIssueInput: bogus boundNsKind triggers invalid_role_config (defaul
 
 test("delegated issue templates are code-defined and render labels", () => {
   const templates = createDelegatedIssueTemplateMap();
-  const template = templates.get("wdl-chat-ns-pool");
-  assert.ok(template);
+  const chat = templates.get("wdl-chat-ns-pool");
+  const cli = templates.get("wdl-cli-integration");
+  assert.ok(chat);
+  assert.ok(cli);
   assert.deepEqual(
     DELEGATED_ISSUE_TEMPLATES.map((/** @type {{ id: string }} */ t) => t.id),
-    ["wdl-chat-ns-pool"]
+    ["wdl-chat-ns-pool", "wdl-cli-integration"]
   );
-  assert.equal(template.version, "1");
-  assert.equal(template.disabled, false);
-  assert.equal(renderDelegatedIssueLabel(template, "tmp-00112233"), "workshop-pool tmp-00112233");
-  assert.equal(resolveDelegatedIssueTemplate("wdl-chat-ns-pool", templates), template);
+  assert.equal(chat.version, "1");
+  assert.equal(chat.disabled, false);
+  assert.equal(renderDelegatedIssueLabel(chat, "tmp-00112233"), "workshop-pool tmp-00112233");
+  assert.equal(resolveDelegatedIssueTemplate("wdl-chat-ns-pool", templates), chat);
+  assert.equal(cli.version, "1");
+  assert.equal(cli.disabled, false);
+  assert.equal(cli.ttlSeconds, 60 * 60);
+  assert.equal(cli.activeQuota, 50);
+  assert.deepEqual(cli.nsGenerator, { prefix: "cli-it-", randomHexBytes: 4 });
+  assert.equal(renderDelegatedIssueLabel(cli, "cli-it-00112233"), "cli live integration cli-it-00112233");
+  assert.equal(resolveDelegatedIssueTemplate("wdl-cli-integration", templates), cli);
 });
 
 test("delegated issue template resolver rejects missing and disabled templates consistently", () => {

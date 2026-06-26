@@ -321,15 +321,18 @@ The more detailed ownership map lives in [docs/source-map.md](docs/source-map.md
 
 Project releases use signed annotated Git tags in the `wdl.YYYYMMDD.N` format, for
 example `wdl.20260531.1`. Before publishing Docker images, the release workflow
-validates that the tag matches the locked workerd package version, has release notes
-in `CHANGELOG.md`, points to the current repository default branch tip, and that the
-tag commit's `CI` workflow has completed successfully. The integration suite is part
-of that required CI run. Docker image tags use
+validates that the tag date matches the locked workerd package date, has release
+notes in `CHANGELOG.md`, points to the current repository default branch tip, and
+that the tag commit's `CI` workflow has completed successfully. The integration
+suite is part of that required CI run. The final `.N` is the WDL project release
+counter for that workerd date, so WDL patches can ship on the same bundled workerd.
+Docker image tags use
 `wdl.YYYYMMDD.<8-char-sha>` so an image tag names the exact released commit without
-repeating the Git tag's build counter. The date/build suffix tracks the bundled workerd
-date version, but the `wdl.` namespace is intentionally separate from Cloudflare's
-numeric package majors. Project release tags are independent of the CLI package
-version and independent of per-worker versions such as `v1` or `v2`.
+repeating the Git tag's release counter. The date suffix tracks the bundled workerd
+date version, but the `wdl.` namespace and project release counter are intentionally
+separate from Cloudflare's numeric package majors and patch counter. Project release
+tags are independent of the CLI package version and independent of per-worker versions
+such as `v1` or `v2`.
 
 ## License
 

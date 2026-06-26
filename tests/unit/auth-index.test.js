@@ -612,6 +612,32 @@ test("delegatedIssue: issuer token creates a bounded ns token from template", as
   assert.deepEqual(verify.principal, { kind: "ns", ns: result.ns });
 });
 
+test("delegatedIssue: CLI integration template creates a short-lived ns token", async () => {
+  const { auth } = await freshAuth();
+  const issuer = await auth.issue({
+    kind: "token-issuer",
+    issueTemplates: ["wdl-cli-integration"],
+    issuerTokenId: "bootstrap",
+  });
+
+  const result = await auth.delegatedIssue({
+    issuerTokenId: issuer.tokenId,
+    template: "wdl-cli-integration",
+  });
+
+  assert.equal(result.kind, "ns");
+  assert.match(result.ns, /^cli-it-[0-9a-f]{8}$/);
+  assert.equal(result.label, `cli live integration ${result.ns}`);
+  assert.equal(result.issueTemplate, "wdl-cli-integration");
+
+  const state = authMockState();
+  const record = state.hashes.get(`auth:token:${result.tokenId}`);
+  assert.equal(record.created_by, issuer.tokenId);
+  assert.equal(record.issue_template, "wdl-cli-integration");
+  assert.equal(record.issue_template_version, "1");
+  assert.equal(record.ns, result.ns);
+});
+
 test("delegatedIssue: rejects direct issue fields and disallowed templates", async () => {
   const { auth } = await freshAuth();
   const issuer = await auth.issue({

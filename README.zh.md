@@ -233,7 +233,7 @@ Integration runner 行为、sharding、artifacts 和 debug flags 见 [docs/testi
 
 ## Release Versioning
 
-项目发布使用 signed annotated Git tag，格式是 `wdl.YYYYMMDD.N`，例如 `wdl.20260531.1`。Release workflow 会在发布 Docker images 前校验 tag 匹配 locked workerd package version、`CHANGELOG.md` 存在对应 release notes、tag commit 指向当前仓库默认分支 tip，并且该 tag commit 的 `CI` workflow 已成功完成。Integration suite 是这次 required CI run 的一部分。Docker image tag 使用 `wdl.YYYYMMDD.<8-char-sha>`，让 image tag 指向准确发布 commit，同时不重复 Git tag 的 build counter。日期/build 后缀跟随 bundled workerd date version，但 `wdl.` namespace 有意和 Cloudflare 的 numeric package major 分开。项目 release tag 独立于 CLI package version，也独立于单个 worker 的 `v1` 或 `v2` 版本。
+项目发布使用 signed annotated Git tag，格式是 `wdl.YYYYMMDD.N`，例如 `wdl.20260531.1`。Release workflow 会在发布 Docker images 前校验 tag date 匹配 locked workerd package date、`CHANGELOG.md` 存在对应 release notes、tag commit 指向当前仓库默认分支 tip，并且该 tag commit 的 `CI` workflow 已成功完成。Integration suite 是这次 required CI run 的一部分。最后的 `.N` 是该 workerd date 下的 WDL project release counter，因此 WDL patch 可以在同一个 bundled workerd 上发布。Docker image tag 使用 `wdl.YYYYMMDD.<8-char-sha>`，让 image tag 指向准确发布 commit，同时不重复 Git tag 的 release counter。日期后缀跟随 bundled workerd date version，但 `wdl.` namespace 和 project release counter 有意和 Cloudflare 的 numeric package major / patch counter 分开。项目 release tag 独立于 CLI package version，也独立于单个 worker 的 `v1` 或 `v2` 版本。
 
 ## License
 

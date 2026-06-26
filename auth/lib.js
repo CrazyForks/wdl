@@ -154,6 +154,19 @@ export const DELEGATED_ISSUE_TEMPLATES = Object.freeze([
     version: "1",
     disabled: false,
   }),
+  Object.freeze({
+    id: "wdl-cli-integration",
+    targetKind: "ns",
+    nsGenerator: Object.freeze({
+      prefix: "cli-it-",
+      randomHexBytes: 4,
+    }),
+    labelTemplate: "cli live integration {ns}",
+    ttlSeconds: 60 * 60,
+    activeQuota: 50,
+    version: "1",
+    disabled: false,
+  }),
 ]);
 
 /** @param {string} value */
