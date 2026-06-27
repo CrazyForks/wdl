@@ -69,16 +69,17 @@ except for co-located sidecars:
   dispatch and workflows tick, while Valkey/Redis access uses its own connection
   configuration. Workflows delivers Durable Object alarms to do-runtime through
   `/internal/do/alarms/dispatch`.
-- GitHub release workflow publishes release images from `wdl.*` tag pushes and
-  can also run manually for validation or publish reruns.
+- GitHub release workflow publishes release images from `wdl.*` tag pushes,
+  validates `VERSION` and `CHANGELOG.md` against the tag, and can also run
+  manually for validation or publish reruns.
 - Terraform apply for Terraform-managed infrastructure.
 
 GitHub Actions is the pull-request and `main` validation gate for JavaScript,
 Rust, and hygiene checks. The Docker Compose integration suite needs Docker Hub
 and Build Cloud credentials, so it only runs on trusted pushes. The release
 workflow under `.github/workflows/` builds and publishes Docker Hub/GHCR images
-from `wdl.*` tag pushes; manual runs can
-validate or publish the same build path, and it is not a PR validation gate.
+from `wdl.*` tag pushes after checking `VERSION` and `CHANGELOG.md`; manual runs
+can validate or publish the same build path, and it is not a PR validation gate.
 
 Gateway and runtime use stable internal port contracts across environments:
 

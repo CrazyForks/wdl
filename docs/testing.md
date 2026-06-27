@@ -362,7 +362,8 @@ WDL uses separate validation and release workflows:
 - Docker Compose integration runs only on trusted push events because it needs
   Docker Hub and Build Cloud credentials.
 - GitHub release workflows build and publish release images from `wdl.*` tag
-  pushes; manual runs can validate or publish the same build path.
+  pushes; release tags must match `VERSION` and have matching `CHANGELOG.md`
+  notes, and manual runs can validate or publish the same build path.
 
 `.github/workflows/ci.yml` runs the integration suite only on trusted push events.
 The `integration` job `needs` the `node`, `rust`, `rust-supply-chain`, and

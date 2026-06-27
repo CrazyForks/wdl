@@ -321,12 +321,13 @@ The more detailed ownership map lives in [docs/source-map.md](docs/source-map.md
 
 Project releases use signed annotated Git tags in the `wdl.YYYYMMDD.N` format, for
 example `wdl.20260531.1`. Before publishing Docker images, the release workflow
-validates that the tag date matches the locked workerd package date, has release
-notes in `CHANGELOG.md`, points to the current repository default branch tip, and
-that the tag commit's `CI` workflow has completed successfully. The integration
-suite is part of that required CI run. The final `.N` is the WDL project release
-counter for that workerd date, so WDL patches can ship on the same bundled workerd.
-Docker image tags use
+validates that the tag matches the root `VERSION` file, the tag date matches the
+locked workerd package date, `CHANGELOG.md` has release notes for the tag, the
+tag points to the current repository default branch tip, and the tag commit's
+`CI` workflow has completed successfully. The integration suite is part of that
+required CI run. The final `.N` is the WDL project release counter for that
+workerd date, so WDL patches can ship on the same bundled workerd. Docker image
+tags use
 `wdl.YYYYMMDD.<8-char-sha>` so an image tag names the exact released commit without
 repeating the Git tag's release counter. The date suffix tracks the bundled workerd
 date version, but the `wdl.` namespace and project release counter are intentionally

@@ -206,7 +206,7 @@ WDL 使用分开的验证和 release workflow：
 
 - GitHub Actions 是 pull request 和 `main` 的验证 gate：JavaScript、Rust 和 hygiene checks 在 PR 和 push 上运行。
 - Docker Compose integration 只在 trusted push event 运行，因为它需要 Docker Hub 和 Build Cloud credential。
-- GitHub release workflow 从 `wdl.*` tag push build/push release image；manual run 可验证或发布同一条 build path。
+- GitHub release workflow 从 `wdl.*` tag push build/push release image；release tag 必须匹配 `VERSION` 并在 `CHANGELOG.md` 有对应 notes，manual run 可验证或发布同一条 build path。
 
 `.github/workflows/ci.yml` 只在 trusted push event 运行 integration 套件。`integration` job `needs` `node`、`rust`、`rust-supply-chain` 和 `ci-hygiene` job，因此 lint、typecheck、unit、Rust、dependency 或 hygiene 检查失败时不会浪费 Build Cloud 额度，也不会启动整套 stack。npm audit gate 检查本仓 lock 里的依赖；已发布 CLI 只在 integration job 里全局安装，不进入本仓 package lock。
 
