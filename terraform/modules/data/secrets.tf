@@ -1,4 +1,4 @@
-# aws4fetch signs with static keys (no provider chain), so control
+# The SigV4 signer uses static keys (no provider chain), so control
 # gets a dedicated IAM user scoped to PutObject. Key lands in ECS via
 # Secrets Manager JSON.
 resource "aws_iam_user" "control_s3" {

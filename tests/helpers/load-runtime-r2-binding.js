@@ -35,8 +35,8 @@ r2HostGlobal.__r2HostTestState = R2_HOST_TEST_STATE;
 const mod = await importRepositoryModule("runtime/bindings/r2.js", [
   [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
   [
-    /import \{ AwsClient \} from "aws4fetch";/,
-    `class AwsClient {
+    /import \{ SigV4Client \} from "@wdl-dev\/aws-sigv4";/,
+    `class SigV4Client {
        constructor(config) {
          globalThis.__r2HostTestState.awsClientConfigs.push(config);
        }

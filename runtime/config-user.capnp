@@ -100,7 +100,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "ns-pattern.js", esModule = embed "../shared/ns-pattern.js"),
     (name = "version.js", esModule = embed "../shared/version.js"),
     (name = "shared-d1-timeout", esModule = embed "../shared/d1-timeout.js"),
-    (name = "aws4fetch", esModule = embed "../shared/vendor/aws4fetch.js"),
+    (name = "@wdl-dev/aws-sigv4", esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
   # service_binding_extra_handlers exposes stub.queue()/scheduled() on

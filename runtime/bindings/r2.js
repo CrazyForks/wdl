@@ -1,11 +1,12 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { AwsClient } from "aws4fetch";
+import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { recordBindingOperation } from "runtime-metrics";
 import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { discardResponseBody } from "shared-respond";
 import {
   assertR2BufferSize,
   encodeS3KeyPath,
+  encodeS3Query,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
   r2PhysicalKey,
@@ -26,6 +27,9 @@ import { parseListObjects, xmlEscape, xmlUnescape } from "runtime-bindings-r2-xm
 const DELETE_OBJECTS_BATCH_SIZE = 1000;
 const LIST_INCLUDE_HEAD_CONCURRENCY = 16;
 const S3_CLIENT_CACHE_MAX_ENTRIES = 128;
+const S3_TRANSIENT_RETRIES = 10;
+const S3_RETRY_BASE_MS = 50;
+const S3_RETRY_MAX_MS = 5_000;
 const utf8Encoder = new TextEncoder();
 const s3Cache = new Map();
 const s3ByBucket = new WeakMap();
@@ -109,6 +113,47 @@ async function mapWithConcurrency(items, concurrency, fn) {
   return out;
 }
 
+/** @param {number} ms */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** @param {number} attempt */
+function s3RetryDelayMs(attempt) {
+  return Math.min(S3_RETRY_BASE_MS * 2 ** attempt, S3_RETRY_MAX_MS);
+}
+
+/** @param {Response} response */
+function isTransientS3Response(response) {
+  return response.status === 429 || response.status >= 500;
+}
+
+/**
+ * DeleteObjects is a POST, but deleting the same key set is safe to retry.
+ * Keep this scoped to S3 POST calls with known idempotent semantics.
+ * @param {{ fetch(url: string, init?: RequestInit): Promise<Response> }} client
+ * @param {string} url
+ * @param {RequestInit} init
+ */
+async function fetchRetryableS3Post(client, url, init) {
+  for (let attempt = 0; attempt <= S3_TRANSIENT_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await client.fetch(url, init);
+    } catch (err) {
+      if (attempt === S3_TRANSIENT_RETRIES) throw err;
+      await delay(Math.random() * s3RetryDelayMs(attempt));
+      continue;
+    }
+    if (attempt === S3_TRANSIENT_RETRIES || !isTransientS3Response(response)) {
+      return response;
+    }
+    await discardResponseBody(response);
+    await delay(Math.random() * s3RetryDelayMs(attempt));
+  }
+  throw new Error("unreachable S3 retry loop exit");
+}
+
 /** @param {R2BucketBinding} bucket */
 function serviceName(bucket) {
   return serviceNameFromEnv(bucket.env);
@@ -139,11 +184,12 @@ function s3ForBucket(bucket) {
     s3Cache.set(key, cached);
   } else {
     cached = {
-      client: new AwsClient({
+      client: new SigV4Client({
         accessKeyId: config.accessKeyId,
         secretAccessKey: config.secretAccessKey,
         service: "s3",
         region: config.region,
+        retries: S3_TRANSIENT_RETRIES,
       }),
       endpoint: config.endpoint,
       bucket: config.bucket,
@@ -210,7 +256,7 @@ async function deleteBatch(bucket, s3, keys, requestMeta = {}) {
   const headers = headersWithRequestId(requestMeta);
   headers.set("content-type", "application/xml");
   headers.set("x-amz-checksum-sha256", await sha256Base64(bodyBytes));
-  const res = await s3.client.fetch(`${s3.endpoint}/${s3.bucket}?delete`, {
+  const res = await fetchRetryableS3Post(s3.client, `${s3.endpoint}/${s3.bucket}?delete`, {
     method: "POST",
     headers,
     body,
@@ -356,16 +402,15 @@ export class R2Bucket extends WorkerEntrypoint {
       const prefix = r2PhysicalPrefix(bucket.ctx.props);
       const listPrefix = options.prefix ? normalizeR2ObjectKey(options.prefix) : "";
       const startAfter = options.startAfter ? normalizeR2ObjectKey(options.startAfter) : "";
-      const url = new URL(`${s3.endpoint}/${s3.bucket}`);
-      url.searchParams.set("list-type", "2");
-      url.searchParams.set("prefix", `${prefix}${listPrefix}`);
-      if (options.delimiter) url.searchParams.set("delimiter", options.delimiter);
-      if (options.cursor) url.searchParams.set("continuation-token", options.cursor);
-      if (startAfter) url.searchParams.set("start-after", `${prefix}${startAfter}`);
-      if (options.limit != null) {
-        url.searchParams.set("max-keys", String(normalizeR2ListLimit(options.limit)));
-      }
-      const res = await s3.client.fetch(url.toString(), {
+      const query = encodeS3Query({
+        "list-type": "2",
+        prefix: `${prefix}${listPrefix}`,
+        delimiter: options.delimiter,
+        "continuation-token": options.cursor,
+        "start-after": startAfter ? `${prefix}${startAfter}` : undefined,
+        "max-keys": options.limit == null ? undefined : String(normalizeR2ListLimit(options.limit)),
+      });
+      const res = await s3.client.fetch(`${s3.endpoint}/${s3.bucket}?${query}`, {
         method: "GET",
         headers: headersWithRequestId(requestMeta),
       });

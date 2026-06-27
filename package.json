@@ -31,7 +31,7 @@
     "test:integration:cli": "node scripts/run-cli-integration-tests.js",
     "test": "node scripts/run-parallel.js lint typecheck typecheck:strict && npm run test:unit",
     "test:all": "npm run test && npm run test:integration",
-    "build:vendor": "esbuild ./shared/vendor/.entry-croner.mjs --bundle --format=esm --platform=browser --target=es2025 --outfile=./shared/vendor/croner.js && esbuild ./shared/vendor/.entry-aws4fetch.mjs --bundle --format=esm --platform=browser --target=es2025 --banner:js='// @ts-nocheck' --outfile=./shared/vendor/aws4fetch.js",
+    "build:vendor": "esbuild ./shared/vendor/.entry-croner.mjs --bundle --format=esm --platform=browser --target=es2025 --outfile=./shared/vendor/croner.js && esbuild ./shared/vendor/.entry-aws-sigv4.mjs --bundle --format=esm --platform=browser --target=es2025 --banner:js='// @ts-nocheck' --outfile=./shared/vendor/aws-sigv4.js",
     "build:third-party-licenses": "node scripts/generate-third-party-license-bundles.mjs"
   },
   "devDependencies": {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { deletePrefix } from "../../system-workers/s3-cleanup/src/index.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 /** @param {Response[]} responses */
 function s3Mock(responses) {
@@ -48,6 +49,49 @@ test("deletePrefix follows truncated empty pages before marking cleanup done", a
   assert.equal(calls.length, 3);
   assert.equal(new URL(calls[1].url).searchParams.get("continuation-token"), "cursor&1");
   assert.equal(calls[2].init?.method, "POST");
+});
+
+test("deletePrefix retries transient DeleteObjects responses", async () => {
+  const { s3, calls } = s3Mock([
+    new Response([
+      "<ListBucketResult>",
+      "<IsTruncated>false</IsTruncated>",
+      "<Contents><Key>assets/demo/retry.txt</Key></Contents>",
+      "</ListBucketResult>",
+    ].join("")),
+    new Response("slow down", { status: 500 }),
+    new Response("<DeleteResult><Deleted><Key>assets/demo/retry.txt</Key></Deleted></DeleteResult>"),
+  ]);
+
+  const result = await deletePrefix(s3, "assets/demo/");
+
+  assert.deepEqual(result, { deletedCount: 1 });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[1].init?.method, "POST");
+  assert.equal(calls[2].init?.method, "POST");
+  assert.equal(calls[1].url, calls[2].url);
+});
+
+test("deletePrefix returns the last transient DeleteObjects response after retry exhaustion", async () => {
+  const { s3, calls } = s3Mock([
+    new Response([
+      "<ListBucketResult>",
+      "<IsTruncated>false</IsTruncated>",
+      "<Contents><Key>assets/demo/retry.txt</Key></Contents>",
+      "</ListBucketResult>",
+    ].join("")),
+    ...Array.from({ length: 11 }, () => new Response("still slow", { status: 429 })),
+  ]);
+
+  await withMockedProperty(Math, "random", () => 0, async () => {
+    await assert.rejects(
+      () => deletePrefix(s3, "assets/demo/"),
+      /s3 delete assets\/demo\/ → 429: still slow/
+    );
+  });
+
+  assert.equal(calls.length, 12);
+  assert.ok(calls.slice(1).every((call) => call.init?.method === "POST"));
 });
 
 test("deletePrefix retries truncated list responses without continuation tokens", async () => {

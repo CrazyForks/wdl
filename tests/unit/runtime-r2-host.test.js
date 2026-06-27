@@ -203,6 +203,61 @@ test("R2 host delete batches array deletes through S3 DeleteObjects", async () =
   }
 });
 
+test("R2 host retries transient S3 DeleteObjects responses", async () => {
+  /** @type {Array<{ url: string, init: any }>} */
+  const calls = [];
+  let attempt = 0;
+  const restore = installR2FetchMock(async (
+    /** @type {RequestInfo | URL} */ url,
+    /** @type {RequestInit} */ init
+  ) => {
+    calls.push({ url: String(url), init });
+    attempt += 1;
+    return attempt === 1
+      ? new Response("slow down", { status: 429 })
+      : new Response("<DeleteResult/>", { status: 200 });
+  });
+  try {
+    await makeR2Bucket().delete(["retry.txt"]);
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].init.method, "POST");
+    assert.equal(calls[1].init.method, "POST");
+    assert.equal(calls[0].url, calls[1].url);
+    assert.equal(
+      requestBodyString(calls[0].init, "first R2 delete request body"),
+      requestBodyString(calls[1].init, "second R2 delete request body")
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("R2 host DeleteObjects returns the last transient response after retry exhaustion", async () => {
+  /** @type {Array<{ url: string, init: any }>} */
+  const calls = [];
+  const restore = installR2FetchMock(async (
+    /** @type {RequestInfo | URL} */ url,
+    /** @type {RequestInit} */ init
+  ) => {
+    calls.push({ url: String(url), init });
+    return new Response("still slow", { status: 429 });
+  });
+  try {
+    await withMockedProperty(Math, "random", () => 0, async () => {
+      await assert.rejects(
+        () => makeR2Bucket().delete(["retry-exhausted.txt"]),
+        /R2 DELETE failed with 429/
+      );
+    });
+
+    assert.equal(calls.length, 11);
+    assert.ok(calls.every((call) => call.init.method === "POST"));
+  } finally {
+    restore();
+  }
+});
+
 test("R2 host delete([]) is an explicit no-op", async () => {
   /** @type {Array<{ url: string, init: any }>} */
   const calls = [];
@@ -405,11 +460,13 @@ test("R2 host list normalizes prefix and startAfter before S3 requests", async (
     response: new Response("<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>"),
   });
   try {
-    await makeR2Bucket().list({ prefix: "folder", startAfter: "folder/a.txt" });
+    await makeR2Bucket().list({ prefix: "folder name", startAfter: "folder name/a.txt" });
 
     const url = new URL(calls[0].url);
-    assert.equal(url.searchParams.get("prefix"), "r2/demo/uploads/folder");
-    assert.equal(url.searchParams.get("start-after"), "r2/demo/uploads/folder/a.txt");
+    assert.match(calls[0].url, /prefix=r2%2Fdemo%2Fuploads%2Ffolder%20name(?:&|$)/);
+    assert.match(calls[0].url, /start-after=r2%2Fdemo%2Fuploads%2Ffolder%20name%2Fa\.txt(?:&|$)/);
+    assert.equal(url.searchParams.get("prefix"), "r2/demo/uploads/folder name");
+    assert.equal(url.searchParams.get("start-after"), "r2/demo/uploads/folder name/a.txt");
     await assert.rejects(
       () => makeR2Bucket().list({ prefix: "../secret" }),
       /R2 key must not contain . or .. path segments/
@@ -530,6 +587,16 @@ test("R2 host S3 client cache evicts least-recently-used configs", async () => {
       await makeR2Bucket({ R2_S3_ACCESS_KEY_ID: "key-0" }).head("a.txt");
       assert.equal(R2_HOST_TEST_STATE.awsClientConfigs.length, 130);
     });
+  } finally {
+    restore();
+  }
+});
+
+test("R2 host S3 clients restore transient retry budget", async () => {
+  const restore = installR2FetchMock(async () => new Response(null, { status: 404 }));
+  try {
+    await makeR2Bucket({ R2_S3_ACCESS_KEY_ID: "retry-budget-key" }).head("a.txt");
+    assert.equal(R2_HOST_TEST_STATE.awsClientConfigs.at(-1).retries, 10);
   } finally {
     restore();
   }

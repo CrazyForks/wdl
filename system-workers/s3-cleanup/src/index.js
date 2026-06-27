@@ -4,13 +4,14 @@
 // D1 row exists; once persisted, S3/delete failures are represented in D1 and
 // cron owns replay, so the queue message must be acked instead of retrying.
 
-// Vendored aws4fetch — wrangler bundler inlines it from the shared/
+// Vendored aws-sigv4 — wrangler bundler inlines it from the shared/
 // copy so the worker doesn't need its own npm install.
-import { AwsClient } from "../../../shared/vendor/aws4fetch.js";
+import { SigV4Client } from "../../../shared/vendor/aws-sigv4.js";
 import {
   createLogLevelBinder,
   logStructured as emitStructuredLog,
 } from "../../../shared/observability.js";
+import { discardResponseBody } from "../../../shared/respond.js";
 import { errorMessage } from "../../../shared/errors.js";
 import { bytesToBase64 } from "../../../shared/base64.js";
 import {
@@ -34,6 +35,9 @@ const BACKOFF_BASE_MS = 2_000;
 const CRON_BATCH = 100;
 const MAX_LIST_PAGES = 1000;
 const PROCESSING_LEASE_MS = 30 * 60_000;
+const S3_TRANSIENT_RETRIES = 10;
+const S3_RETRY_BASE_MS = 50;
+const S3_RETRY_MAX_MS = 5_000;
 const DB_BINDING = "S3_CLEANUP_DB";
 const SERVICE = "s3-cleanup";
 const utf8Encoder = new TextEncoder();
@@ -43,13 +47,54 @@ const bindLogLevel = createLogLevelBinder();
  * @typedef {import("../../../shared/s3-cleanup-lifecycle.js").S3CleanupIntent} S3CleanupIntent
  * @typedef {Record<string, unknown> & { S3_ACCESS_KEY_ID: string, S3_SECRET_ACCESS_KEY: string, S3_ENDPOINT: string, S3_BUCKET: string, S3_REGION?: string, LOG_LEVEL?: unknown, S3_CLEANUP_DB: CleanupDb }} S3CleanupEnv
  * @typedef {{ prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<{ meta?: { changes?: number } }>, first(): Promise<Record<string, unknown> | null>, all(): Promise<{ results?: Record<string, unknown>[] }> } } }} CleanupDb
- * @typedef {{ aws: AwsClient, endpoint: string, bucket: string }} S3Client
+ * @typedef {{ aws: SigV4Client, endpoint: string, bucket: string }} S3Client
  * @typedef {{ id: string, source: Record<string, unknown> | null, prefixes: string[] | null, state: string, attempts: number, createdAt: number, updatedAt: number, nextAttemptAt: number | null, lastError: string | null }} CleanupTask
  */
 
 /** @param {number} attempts */
 function nextBackoffMs(attempts) {
   return Math.min(BACKOFF_BASE_MS * 2 ** (attempts - 1), BACKOFF_MAX_MS);
+}
+
+/** @param {number} ms */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** @param {number} attempt */
+function s3RetryDelayMs(attempt) {
+  return Math.min(S3_RETRY_BASE_MS * 2 ** attempt, S3_RETRY_MAX_MS);
+}
+
+/** @param {Response} response */
+function isTransientS3Response(response) {
+  return response.status === 429 || response.status >= 500;
+}
+
+/**
+ * DeleteObjects is a POST, but deleting the same key set is safe to retry.
+ * Keep this scoped to S3 POST calls with known idempotent semantics.
+ * @param {SigV4Client} client
+ * @param {string} url
+ * @param {RequestInit} init
+ */
+async function fetchRetryableS3Post(client, url, init) {
+  for (let attempt = 0; attempt <= S3_TRANSIENT_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await client.fetch(url, init);
+    } catch (err) {
+      if (attempt === S3_TRANSIENT_RETRIES) throw err;
+      await delay(Math.random() * s3RetryDelayMs(attempt));
+      continue;
+    }
+    if (attempt === S3_TRANSIENT_RETRIES || !isTransientS3Response(response)) {
+      return response;
+    }
+    await discardResponseBody(response);
+    await delay(Math.random() * s3RetryDelayMs(attempt));
+  }
+  throw new Error("unreachable S3 retry loop exit");
 }
 
 /**
@@ -88,18 +133,13 @@ function buildS3Client(env) {
     "S3_ENDPOINT", "S3_REGION", "S3_BUCKET",
     "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
   ]) requireEnv(env, key);
-  // aws4fetch destructures every option in its constructor; TS fails
-  // the signature check unless every field is passed explicitly.
   return {
-    aws: new AwsClient({
+    aws: new SigV4Client({
       accessKeyId: env.S3_ACCESS_KEY_ID,
       secretAccessKey: env.S3_SECRET_ACCESS_KEY,
-      sessionToken: undefined,
       service: "s3",
       region: env.S3_REGION,
-      cache: undefined,
-      retries: undefined,
-      initRetryMs: undefined,
+      retries: S3_TRANSIENT_RETRIES,
     }),
     endpoint: trimTrailingSlashes(env.S3_ENDPOINT),
     bucket: env.S3_BUCKET,
@@ -323,7 +363,7 @@ export async function deletePrefix(s3, prefix) {
       const sha = await crypto.subtle.digest("SHA-256", bodyBytes);
       const sha_b64 = bytesToBase64(new Uint8Array(sha));
       const delUrl = `${s3.endpoint}/${s3.bucket}?delete`;
-      const delRes = await s3.aws.fetch(delUrl, {
+      const delRes = await fetchRetryableS3Post(s3.aws, delUrl, {
         method: "POST",
         headers: {
           "content-type": "application/xml",

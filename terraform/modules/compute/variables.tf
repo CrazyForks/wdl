@@ -29,7 +29,7 @@ variable "valkey_security_group_id" { type = string }
 
 variable "assets_bucket" { type = string }
 variable "r2_bucket" { type = string }
-# JSON secret with access_key_id / secret_access_key — aws4fetch
+# JSON secret with access_key_id / secret_access_key — the SigV4 signer
 # signs with these. Created in module.data.
 variable "control_s3_secret_arn" { type = string }
 variable "runtime_r2_secret_arn" { type = string }

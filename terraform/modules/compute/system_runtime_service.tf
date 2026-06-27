@@ -10,7 +10,7 @@ resource "aws_ecs_task_definition" "system_runtime" {
   cpu                      = var.system_runtime_cpu
   memory                   = var.system_runtime_memory
   execution_role_arn       = aws_iam_role.exec.arn
-  # S3 writes use static IAM user creds via Secrets Manager (aws4fetch
+  # S3 writes use static IAM user creds via Secrets Manager (SigV4 signer
   # signs, no role assumption), so the default runtime_task role is fine.
   task_role_arn = aws_iam_role.runtime_task.arn
 
@@ -86,7 +86,7 @@ resource "aws_ecs_task_definition" "system_runtime" {
         { name = "PLATFORM_DOMAIN", value = local.platform_domain },
         { name = "S3_BUCKET", value = var.assets_bucket },
         { name = "S3_REGION", value = var.region },
-        # Pass the regional S3 endpoint explicitly so aws4fetch signs against
+        # Pass the regional S3 endpoint explicitly so SigV4 signs against
         # the same host that the S3-compatible client will contact.
         { name = "S3_ENDPOINT", value = local.aws_s3_endpoint },
       ], local.r2_s3_env)

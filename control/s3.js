@@ -1,7 +1,7 @@
 // PutObject-only S3 helper. Bucket creation is out-of-band (terraform
 // / s3mock initialBuckets) — keeps the S3 IAM surface minimal.
 
-import { AwsClient } from "aws4fetch";
+import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { encodeS3KeyPath } from "runtime-r2-utils";
 
 const TYPE_BY_EXT = {
@@ -27,9 +27,10 @@ const TYPE_BY_EXT = {
   ".wasm": "application/wasm",
   ".map": "application/json",
 };
+const S3_TRANSIENT_RETRIES = 10;
 
 /**
- * @typedef {{ client: AwsClient, endpoint: string, bucket: string }} S3Client
+ * @typedef {{ client: SigV4Client, endpoint: string, bucket: string }} S3Client
  */
 
 /** @param {string} filePath */
@@ -55,11 +56,12 @@ export function makeS3Client(env) {
   if ((!accessKeyId || !secretAccessKey) && !allowTestCredentials) {
     throw new Error("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are required when S3_ENDPOINT/S3_BUCKET are configured");
   }
-  const client = new AwsClient({
+  const client = new SigV4Client({
     accessKeyId: accessKeyId || "test",
     secretAccessKey: secretAccessKey || "test",
     service: "s3",
     region: env.S3_REGION || "us-east-1",
+    retries: S3_TRANSIENT_RETRIES,
   });
   return { client, endpoint: endpoint.replace(/\/+$/, ""), bucket };
 }

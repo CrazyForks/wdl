@@ -101,7 +101,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "ns-pattern.js", esModule = embed "../shared/ns-pattern.js"),
     (name = "version.js", esModule = embed "../shared/version.js"),
     (name = "shared-d1-timeout", esModule = embed "../shared/d1-timeout.js"),
-    (name = "aws4fetch", esModule = embed "../shared/vendor/aws4fetch.js"),
+    (name = "@wdl-dev/aws-sigv4",    esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
   # `experimental` lets this worker pass `allowExperimental: true` in WorkerCode
@@ -221,7 +221,7 @@ const controlWorker :Workerd.Worker = (
     (name = "runtime-r2-utils",      esModule = embed "r2-utils.js"),
     # Pre-bundled via `npm run build:vendor`; workerd embed can't walk node_modules.
     (name = "croner",                esModule = embed "../shared/vendor/croner.js"),
-    (name = "aws4fetch",             esModule = embed "../shared/vendor/aws4fetch.js"),
+    (name = "@wdl-dev/aws-sigv4",    esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
   compatibilityFlags = ["nodejs_compat"],

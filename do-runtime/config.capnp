@@ -112,7 +112,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "shared-internal-auth", esModule = embed "../shared/internal-auth.js"),
     (name = "ns-pattern.js", esModule = embed "../shared/ns-pattern.js"),
     (name = "version.js", esModule = embed "../shared/version.js"),
-    (name = "aws4fetch", esModule = embed "../shared/vendor/aws4fetch.js"),
+    (name = "@wdl-dev/aws-sigv4", esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
   compatibilityFlags = ["nodejs_compat", "experimental"],

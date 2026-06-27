@@ -9,14 +9,13 @@ registered trademarks of Cloudflare, Inc. WDL uses stock Cloudflare workerd as
 an upstream runtime component and documents compatibility with Cloudflare
 Workers programming surfaces.
 
-This distribution includes bundled JavaScript from these MIT-licensed
-packages:
+This distribution includes bundled JavaScript from these packages:
 
-- aws4fetch
-  Copyright 2018 Michael Hart (michael.hart.au@gmail.com)
-  Source: https://github.com/mhart/aws4fetch
+- @wdl-dev/aws-sigv4, Apache License, Version 2.0
+  Copyright 2026 Sean Consulting OÜ
+  Source: https://github.com/wdl-dev/aws-sigv4
 
-- croner
+- croner, MIT License
   Copyright (c) 2015-2021 Hexagon <github.com/Hexagon>
   Source: https://github.com/Hexagon/croner
 

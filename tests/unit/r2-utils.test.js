@@ -4,6 +4,7 @@ import {
   R2_OBJECT_MAX_BUFFER_BYTES,
   assertR2BufferSize,
   encodeS3KeyPath,
+  encodeS3Query,
   r2PhysicalKey,
   r2PhysicalPrefix,
   r2RangeAndSizeFromHeaders,
@@ -65,6 +66,18 @@ test("encodeS3KeyPath encodes key segments without URL path normalization", () =
   assert.equal(
     new URL(`http://s3.local/bucket/${encoded}`).pathname,
     "/bucket/assets/demo/site/v1/%252e%252e/%252e%252e/victim/app.js"
+  );
+});
+
+test("encodeS3Query keeps spaces as percent-encoded bytes", () => {
+  assert.equal(
+    encodeS3Query({
+      "list-type": "2",
+      prefix: "r2/demo/uploads/folder name",
+      delimiter: "/",
+      "continuation-token": "",
+    }),
+    "list-type=2&prefix=r2%2Fdemo%2Fuploads%2Ffolder%20name&delimiter=%2F"
   );
 });
 

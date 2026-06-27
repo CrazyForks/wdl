@@ -1,7 +1,8 @@
-import { AwsClient } from "aws4fetch";
+import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { discardResponseBody } from "shared-respond";
 import {
   encodeS3KeyPath,
+  encodeS3Query,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
   r2PhysicalKey,
@@ -12,9 +13,10 @@ import {
 import { collectXmlFields, listXmlTagValues, xmlTagValueIsTrue } from "shared-s3-xml";
 
 const DEFAULT_LIST_LIMIT = 1000;
+const S3_TRANSIENT_RETRIES = 10;
 
 /**
- * @typedef {{ client: AwsClient, endpoint: string, bucket: string }} R2Admin
+ * @typedef {{ client: SigV4Client, endpoint: string, bucket: string }} R2Admin
  * @typedef {{ ns: string, bucketName: string }} R2ObjectScope
  */
 
@@ -35,11 +37,12 @@ export function makeR2AdminClient(env) {
   const endpoint = env.R2_S3_ENDPOINT;
   const bucket = env.R2_S3_BUCKET;
   if (!endpoint || !bucket) return null;
-  const client = new AwsClient({
+  const client = new SigV4Client({
     accessKeyId: requireR2Env(env, "R2_S3_ACCESS_KEY_ID"),
     secretAccessKey: requireR2Env(env, "R2_S3_SECRET_ACCESS_KEY"),
     service: "s3",
     region: env.R2_S3_REGION || "us-east-1",
+    retries: S3_TRANSIENT_RETRIES,
   });
   return { client, endpoint: endpoint.replace(/\/+$/, ""), bucket };
 }
@@ -123,13 +126,14 @@ function parseBucketList(xml, ns) {
 
 /** @param {R2Admin} r2 @param {{ prefix: string, delimiter?: string, cursor?: string, limit?: unknown, requestId?: string }} options */
 async function listS3(r2, { prefix, delimiter, cursor, limit, requestId }) {
-  const url = new URL(`${r2.endpoint}/${r2.bucket}`);
-  url.searchParams.set("list-type", "2");
-  url.searchParams.set("prefix", prefix);
-  if (delimiter) url.searchParams.set("delimiter", delimiter);
-  if (cursor) url.searchParams.set("continuation-token", cursor);
-  url.searchParams.set("max-keys", String(limitFrom(limit)));
-  const res = await r2.client.fetch(url.toString(), {
+  const query = encodeS3Query({
+    "list-type": "2",
+    prefix,
+    delimiter,
+    "continuation-token": cursor,
+    "max-keys": String(limitFrom(limit)),
+  });
+  const res = await r2.client.fetch(`${r2.endpoint}/${r2.bucket}?${query}`, {
     method: "GET",
     headers: requestHeaders(requestId),
   });

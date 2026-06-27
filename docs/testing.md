@@ -217,7 +217,7 @@ Prefer the narrow helper that matches the response or fixture source:
   stub when the handler under test follows the shared control entrypoint
   shape.
   `load-runtime-r2-binding.js` owns the `runtime/bindings/r2.js` host binding
-  module graph, including AwsClient/fetch recording hooks. Extend that loader
+  module graph, including SigV4Client/fetch recording hooks. Extend that loader
   for additional R2 host tests instead of copying the replacement graph back
   into a test file. `load-auth-index.js` owns auth entrypoint mock state
   accessors; tests use `authMockState(...)`, `authLogs(...)`, and

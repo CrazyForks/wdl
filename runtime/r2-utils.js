@@ -74,6 +74,24 @@ export function encodeS3KeyPath(key) {
   return String(key).split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }
 
+/** @param {unknown} value */
+function encodeS3QueryComponent(value) {
+  return encodeURIComponent(String(value)).replace(/[!'()*]/g, (ch) =>
+    `%${ch.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+}
+
+/**
+ * @param {Record<string, unknown>} params
+ * @returns {string}
+ */
+export function encodeS3Query(params) {
+  return Object.entries(params)
+    .filter(([, value]) => value != null && value !== "")
+    .map(([key, value]) => `${encodeS3QueryComponent(key)}=${encodeS3QueryComponent(value)}`)
+    .join("&");
+}
+
 /**
  * @param {unknown} size
  * @param {string} operation

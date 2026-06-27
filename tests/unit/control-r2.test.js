@@ -8,8 +8,8 @@ import {
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 
-const AWS4FETCH_STUB_URL = moduleDataUrl(`
-export class AwsClient {
+const AWS_SIGV4_STUB_URL = moduleDataUrl(`
+export class SigV4Client {
   constructor(config) { this.config = config; }
 }
 `);
@@ -17,8 +17,9 @@ export class AwsClient {
 const {
   listR2Buckets,
   listR2Objects,
+  makeR2AdminClient,
 } = await importRepositoryModule("control/r2.js", importSpecifierReplacements({
-  "aws4fetch": AWS4FETCH_STUB_URL,
+  "@wdl-dev/aws-sigv4": AWS_SIGV4_STUB_URL,
   "runtime-r2-utils": repositoryFileUrl("runtime/r2-utils.js"),
   "shared-s3-xml": repositoryFileUrl("shared/s3-xml.js"),
   "shared-respond": repositoryFileUrl("shared/respond.js"),
@@ -60,9 +61,10 @@ test("control R2 object list accepts namespaced S3 list XML", async () => {
     "</aws:ListBucketResult>",
   ].join("")));
 
-  const result = await listR2Objects({ r2, ns: "demo", bucketName: "uploads", prefix: "a" });
+  const result = await listR2Objects({ r2, ns: "demo", bucketName: "uploads", prefix: "folder name" });
 
-  assert.equal(new URL(calls[0].url).searchParams.get("prefix"), "r2/demo/uploads/a");
+  assert.match(calls[0].url, /prefix=r2%2Fdemo%2Fuploads%2Ffolder%20name(?:&|$)/);
+  assert.equal(new URL(calls[0].url).searchParams.get("prefix"), "r2/demo/uploads/folder name");
   assert.equal(result.truncated, true);
   assert.equal(result.cursor, "cursor-1");
   assert.deepEqual(result.delimitedPrefixes, ["folder/"]);
@@ -99,4 +101,16 @@ test("control R2 object list rejects non-canonical prefixes", async () => {
     () => listR2Objects({ r2, ns: "demo", bucketName: "uploads", prefix: "../secret" }),
     /path segments/
   );
+});
+
+test("control R2 admin client restores S3 transient retry budget", () => {
+  const r2 = makeR2AdminClient({
+    R2_S3_ENDPOINT: "http://s3.test",
+    R2_S3_BUCKET: "wdl-r2",
+    R2_S3_ACCESS_KEY_ID: "test",
+    R2_S3_SECRET_ACCESS_KEY: "test",
+  });
+
+  assert.ok(r2);
+  assert.equal(r2.client.config.retries, 10);
 });
