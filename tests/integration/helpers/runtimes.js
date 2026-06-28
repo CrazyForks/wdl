@@ -1,4 +1,4 @@
-import { composeProfileUp, composeUp, composeUpNoBuildFlag } from "./compose.js";
+import { composeProfileUp, composeUp } from "./compose.js";
 import { sh } from "./cli.js";
 
 export function stopD1MultiRuntimes() {
@@ -21,13 +21,19 @@ export function ensureD1SingleRuntime() {
 /** @param {{ ownerLeaseGuardMs?: number }} [options] */
 export function recreateD1MultiRuntimes({ ownerLeaseGuardMs } = {}) {
   sh("docker compose stop d1-runtime", { stdio: "pipe" });
-  return composeProfileUp("d1-multi", "--force-recreate --wait d1-runtime-a d1-runtime-b d1-runtime-c", {
+  const opts = {
     stdio: "pipe",
     env: {
       ...process.env,
       ...(ownerLeaseGuardMs == null ? {} : { D1_OWNER_LEASE_GUARD_MS: String(ownerLeaseGuardMs) }),
     },
-  });
+  };
+  // The three D1 runtimes intentionally share one localDisk volume in these
+  // tests; recreate them one at a time so workerd does not race metadata
+  // initialization across fresh processes.
+  composeProfileUp("d1-multi", "--force-recreate --wait d1-runtime-a", opts);
+  composeProfileUp("d1-multi", "--force-recreate --wait d1-runtime-b", opts);
+  return composeProfileUp("d1-multi", "--force-recreate --wait d1-runtime-c", opts);
 }
 
 export function stopDoMultiRuntimes() {
@@ -54,20 +60,19 @@ export function ensureDoSingleRuntime() {
  */
 export function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, renewStartDelayMs, renewIntervalMs } = {}) {
   sh("docker compose stop do-runtime", { stdio: "pipe" });
-  return sh(
-    "COMPOSE_PROFILES=do-multi docker compose up -d"
-      + `${composeUpNoBuildFlag()} --force-recreate --wait do-runtime-a do-runtime-b do-runtime-c`,
-    {
-      stdio: "pipe",
-      env: {
-        ...process.env,
-        ...(ownerTtlSeconds == null ? {} : { DO_OWNER_TTL_SECONDS: String(ownerTtlSeconds) }),
-        ...(ownerLeaseGuardMs == null ? {} : { DO_OWNER_LEASE_GUARD_MS: String(ownerLeaseGuardMs) }),
-        ...(renewStartDelayMs == null ? {} : { DO_RENEW_START_DELAY_MS: String(renewStartDelayMs) }),
-        ...(renewIntervalMs == null ? {} : { DO_RENEW_INTERVAL_MS: String(renewIntervalMs) }),
-      },
-    }
-  );
+  const opts = {
+    stdio: "pipe",
+    env: {
+      ...process.env,
+      ...(ownerTtlSeconds == null ? {} : { DO_OWNER_TTL_SECONDS: String(ownerTtlSeconds) }),
+      ...(ownerLeaseGuardMs == null ? {} : { DO_OWNER_LEASE_GUARD_MS: String(ownerLeaseGuardMs) }),
+      ...(renewStartDelayMs == null ? {} : { DO_RENEW_START_DELAY_MS: String(renewStartDelayMs) }),
+      ...(renewIntervalMs == null ? {} : { DO_RENEW_INTERVAL_MS: String(renewIntervalMs) }),
+    },
+  };
+  composeProfileUp("do-multi", "--force-recreate --wait do-runtime-a", opts);
+  composeProfileUp("do-multi", "--force-recreate --wait do-runtime-b", opts);
+  return composeProfileUp("do-multi", "--force-recreate --wait do-runtime-c", opts);
 }
 
 /**

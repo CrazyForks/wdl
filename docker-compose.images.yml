@@ -32,6 +32,9 @@ services:
   d1-runtime-b:
     image: docker.io/getwdl/wdl-workerd:latest
     pull_policy: always
+  d1-runtime-c:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
   do-runtime:
     image: docker.io/getwdl/wdl-workerd:latest
     pull_policy: always
@@ -39,5 +42,8 @@ services:
     image: docker.io/getwdl/wdl-workerd:latest
     pull_policy: always
   do-runtime-b:
+    image: docker.io/getwdl/wdl-workerd:latest
+    pull_policy: always
+  do-runtime-c:
     image: docker.io/getwdl/wdl-workerd:latest
     pull_policy: always
