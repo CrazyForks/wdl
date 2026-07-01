@@ -31,6 +31,9 @@ resource "aws_ecs_task_definition" "workflows" {
       { name = "CONTROL_REDIS_URL", value = "redis://${local.redis_addr}" },
       { name = "WORKFLOWS_REDIS_DB", value = "2" },
       { name = "WORKFLOWS_PORT", value = "9120" },
+      # Long tool steps (e.g. a full deploy) can exceed the 60s code default and
+      # get re-dispatched mid-step; give a dispatch one turn's headroom.
+      { name = "WORKFLOWS_DISPATCH_TIMEOUT_MS", value = "120000" },
       { name = "RUNTIME_HOST", value = "user-runtime" },
       { name = "RUNTIME_PORT", value = "8088" },
       { name = "SYSTEM_RUNTIME_HOST", value = "system-runtime" },

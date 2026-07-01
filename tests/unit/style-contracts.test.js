@@ -1600,7 +1600,7 @@ test("Valkey 9 is the local and Terraform baseline when HFE commands are used", 
 
   assert.match(tail, /\.hSetEx\(/, "tail activation depends on Valkey hash field expiration");
   assert.match(compose, /image: valkey\/valkey:9\b/);
-  assert.match(valkeyTf, /engine_version = "9\.0"/);
+  assert.match(valkeyTf, /engine_version = "9\.1"/);
   assert.match(valkeyTf, /parameter_group_name = "default\.valkey9"/);
 });
 

@@ -93,8 +93,11 @@ Key concepts:
 - Workflow payloads are JSON data under explicit byte caps. Large application data
   should live in R2/S3/D1/KV and be referenced from workflow payloads.
 - DB 2 keys for one instance share the `{ns:workflowKey:instanceId}` hash tag, but
-  workflow state also uses global ready/due/retention keys. Current deployments require
-  single-node Valkey rather than Redis Cluster.
+  workflow state also uses global ready/due/retention keys. Current deployments therefore
+  require a single non-cluster Valkey shard (`num_node_groups = 1`) rather than Redis
+  Cluster; a primary/replica pair for HA is fine because replication does not shard the
+  keyspace, but multiple shards would split the un-hash-tagged global keys and fail with
+  CROSSSLOT.
 - Internal Durable Object alarm jobs also live in DB 2 under
   `wf:internal:do-alarm:*`. They are Workflows-owned backend jobs, not tenant workflow
   instances, and are reachable only through internal do-runtime/workflows endpoints.
