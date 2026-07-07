@@ -227,6 +227,26 @@ test("shared primitive owners stay canonical", () => {
   assert.deepEqual(offenders, [], `shared primitive owners must stay canonical:\n${offenders.join("\n")}`);
 });
 
+test("secret Redis key construction uses the shared JS owner", () => {
+  const allowed = new Set(["shared/secret-keys.js"]);
+  const offenders = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    if (allowed.has(file)) continue;
+    const source = withoutLineComments(readRepoFile(file));
+    if (
+      /[`"']secrets:/.test(source) ||
+      /\[\s*["']secrets["'][^\]]*\]\.join\(\s*["']:["']\s*\)/.test(source)
+    ) {
+      offenders.push(file);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `production JS must use shared/secret-keys.js for inline secret Redis key construction:\n${offenders.join("\n")}`
+  );
+});
+
 test("do-runtime worker-name grammar matches shared control grammar", () => {
   assert.equal(
     extractRegex("do-runtime/protocol/wire-grammar.js", "WORKER_NAME_RE"),
@@ -327,11 +347,21 @@ test("route/version registry keys go through shared/version.js helpers", () => {
   assert.deepEqual(offenders, [], `route/version key literals must use shared helpers:\n${offenders.join("\n")}`);
 });
 
+test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
+  const js = readRepoFile("shared/secret-keys.js");
+  const rust = readRepoFile("rust/redis-proxy/src/runtime.rs");
+
+  assert.match(js, /return `secrets:\$\{ns\}`/);
+  assert.match(js, /return `secrets:\$\{ns\}:\$\{worker\}`/);
+  assert.match(rust, /format!\("secrets:\{\}", q\.ns\)/);
+  assert.match(rust, /format!\("secrets:\{\}:\{\}", q\.ns, q\.worker\)/);
+});
+
 test("test bundleKey stubs stay production-faithful", () => {
   const offenders = [];
   const bundleKeyStubBodies = (/** @type {string} */ source) => {
     const bodies = [];
-    for (const match of source.matchAll(/export function bundleKey\(/g)) {
+    for (const match of source.matchAll(/export function bundleKey\(|const bundleKey\s*=/g)) {
       const start = match.index ?? 0;
       const nextExport = source.indexOf("\nexport function ", start + 1);
       const nextConst = source.indexOf("\nconst ", start + 1);
@@ -1443,7 +1473,14 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   const integrationCompose = withoutLineComments(readRepoFile("tests/integration/helpers/compose.js"));
   const compileConfigs = withoutLineComments(readRepoFile("scripts/compile-workerd-configs.js"));
   const supervisorConfig = readRepoFile("rust/supervisor/src/config.rs");
+  const supervisorLib = readRepoFile("rust/supervisor/src/lib.rs");
   const dockerfileWorkerd = withoutLineComments(readRepoFile("Dockerfile.workerd"));
+  const kubeGateway = withoutLineComments(readRepoFile("deploy/kubernetes/base/gateway.yaml"));
+  const kubeSystemRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/system-runtime.yaml"));
+  const kubeUserRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/user-runtime.yaml"));
+  const terraformGatewayService = withoutLineComments(readRepoFile("terraform/modules/compute/gateway_service.tf"));
+  const terraformRuntimeService = withoutLineComments(readRepoFile("terraform/modules/compute/runtime_service.tf"));
+  const terraformSystemRuntimeService = withoutLineComments(readRepoFile("terraform/modules/compute/system_runtime_service.tf"));
   const packageJson = withoutLineComments(readRepoFile("package.json"));
 
   // Local/integration should mirror production Service Connect for HTTP
@@ -1501,7 +1538,41 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   for (const tier of ["gateway-local", "user-runtime-local", "system-runtime-local"]) {
     assert.match(
       compose,
-      new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin.*--experimental`),
+      new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin`),
+    );
+  }
+  // workerd 2026-07-01 still gates workerLoader bindings on the process-level
+  // --experimental switch. Keep it only on workerLoader-owning processes, not
+  // on gateway or D1 and not as a Worker compatibility flag.
+  for (const tier of ["user-runtime-local", "system-runtime-local"]) {
+    assert.match(
+      compose,
+      new RegExp(`workerd-configs/${RegExp.escape(tier)}\\.bin", "--experimental"`),
+    );
+  }
+  assert.doesNotMatch(compose, /gateway-local\.bin", "--experimental"/);
+  assert.match(kubeUserRuntime, /user-runtime\.bin[\s\S]*?- --experimental/);
+  assert.match(kubeSystemRuntime, /system-runtime\.bin[\s\S]*?- --experimental/);
+  assert.doesNotMatch(kubeGateway, /--experimental/);
+  assert.match(terraformRuntimeService, /user-runtime\.bin", "--experimental"/);
+  assert.match(terraformSystemRuntimeService, /system-runtime\.bin", "--experimental"/);
+  assert.doesNotMatch(terraformGatewayService, /--experimental/);
+  assert.match(supervisorLib, /workerd_args\(D1_COMPILED_CONFIG, false\)/);
+  assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
+  assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
+  for (const file of [
+    "runtime/config-user.capnp",
+    "runtime/config-user-local.capnp",
+    "runtime/config-system.capnp",
+    "runtime/config-system-local.capnp",
+    "do-runtime/config.capnp",
+    "do-runtime/config-local.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.doesNotMatch(
+      source,
+      /compatibilityFlags\s*=\s*\[[^\]]*"experimental"/,
+      `${file} must not re-add the tenant experimental compatibility flag`
     );
   }
   // The supervisor config owns the local/production .bin choice; only it
@@ -1555,6 +1626,19 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   assert.ok((envoy.match(/preserve_external_request_id: true/g) || []).length >= 5);
 });
 
+test("S3 query encoding stays aligned between shared and injected runtime helpers", () => {
+  const extract = (/** @type {string} */ file) => {
+    const source = readRepoFile(file);
+    const match = source.match(
+      /function encodeS3QueryComponent[\s\S]*?export function encodeS3Query\(params\) \{[\s\S]*?\n\}/
+    );
+    assert.ok(match, `${file} must expose encodeS3Query next to encodeS3QueryComponent`);
+    return match[0].replace(JSDOC_BLOCK_RE, "").replace(/\s+/g, " ").trim();
+  };
+
+  assert.equal(extract("shared/s3-query.js"), extract("runtime/r2-utils.js"));
+});
+
 test("tenant worker egress stays public-only at the workerd boundary", () => {
   const user = withoutLineComments(readRepoFile("runtime/config-user.capnp"));
   const userLocal = withoutLineComments(readRepoFile("runtime/config-user-local.capnp"));
@@ -1598,7 +1682,8 @@ test("Valkey 9 is the local and Terraform baseline when HFE commands are used", 
   const valkeyTf = withoutLineComments(readRepoFile("terraform/modules/data/valkey.tf"));
   const tail = withoutLineComments(readRepoFile("control/handlers/logs-tail.js"));
 
-  assert.match(tail, /\.hSetEx\(/, "tail activation depends on Valkey hash field expiration");
+  assert.match(tail, /\.hGetEx\(/, "tail activation refreshes active fields with Valkey HGETEX");
+  assert.match(tail, /\.hSetEx\(/, "tail activation creates active fields with Valkey HSETEX");
   assert.match(compose, /image: valkey\/valkey:9\b/);
   assert.match(valkeyTf, /engine_version = "9\.1"/);
   assert.match(valkeyTf, /parameter_group_name = "default\.valkey9"/);
@@ -1859,12 +1944,195 @@ test("Terraform gates DO test hooks like D1 test hooks", () => {
   assert.match(doService, /!var\.do_test_hooks_enabled \|\| can\(regex\("\(\^\|-\)test\(\$\|-\)", var\.name\)\)/);
 });
 
-test("EC2 capacity hosts block awsvpc task access to host IMDS", () => {
-  const terraformCapacity = readRepoFile("terraform/modules/compute/ec2_capacity.tf");
+test("D1 and DO workerd containers keep explicit memory ceilings", () => {
+  const rootVars = readRepoFile("terraform/variables.tf");
+  const moduleVars = readRepoFile("terraform/modules/compute/variables.tf");
+  const main = readRepoFile("terraform/main.tf");
+  const locals = readRepoFile("terraform/modules/compute/locals.tf");
+  const d1Service = readRepoFile("terraform/modules/compute/d1_runtime_service.tf");
+  const doService = readRepoFile("terraform/modules/compute/do_runtime_service.tf");
+  const d1Kube = readRepoFile("deploy/kubernetes/base/d1-runtime.yaml");
+  const doKube = readRepoFile("deploy/kubernetes/base/do-runtime.yaml");
 
-  assert.match(terraformCapacity, /http_tokens\s+=\s+"required"/);
-  assert.match(terraformCapacity, /http_put_response_hop_limit\s+=\s+1/);
-  assert.match(terraformCapacity, /ECS_AWSVPC_BLOCK_IMDS=true/);
+  for (const name of ["d1_runtime_container_memory", "do_runtime_container_memory"]) {
+    assert.match(rootVars, new RegExp(`variable "${name}"`));
+    assert.match(moduleVars, new RegExp(`variable "${name}"`));
+    assert.match(main, new RegExp(`${name}\\s+=\\s+var\\.${name}`));
+  }
+  assert.match(
+    locals,
+    /stateful_runtime_memory_headroom\s+=\s+128/
+  );
+  assert.match(
+    locals,
+    /d1_runtime_container_memory\s+=\s+coalesce\(\s*var\.d1_runtime_container_memory,\s*var\.runtime_memory - local\.stateful_runtime_memory_headroom,\s*\)/
+  );
+  assert.match(d1Service, /memory\s+=\s+local\.d1_runtime_container_memory/);
+  assert.match(
+    d1Service,
+    /local\.d1_runtime_container_memory > 0 &&\s*local\.d1_runtime_container_memory <= var\.runtime_memory - local\.stateful_runtime_memory_headroom/
+  );
+  assert.match(locals, /redis_proxy_memory_reservation\s+=\s+64/);
+  assert.match(locals, /do_runtime_container_memory\s+=\s+coalesce\(\s*var\.do_runtime_container_memory,\s*var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom,\s*\)/);
+  assert.match(doService, /memoryReservation\s+=\s+local\.redis_proxy_memory_reservation/);
+  assert.match(doService, /memory\s+=\s+local\.do_runtime_container_memory/);
+  assert.match(doService, /local\.do_runtime_container_memory > 0 &&\s*local\.do_runtime_container_memory <= var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom/);
+  assert.match(doService, /redis-proxy sidecar/);
+  assert.match(d1Kube, /name: d1-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
+  assert.match(doKube, /name: do-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
+});
+
+test("Terraform ECS services use Fargate-only launch contracts", () => {
+  const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
+  const locals = readRepoFile("terraform/modules/compute/locals.tf");
+  const rootVars = readRepoFile("terraform/variables.tf");
+  const variableBlock = (/** @type {string} */ name) => {
+    const start = rootVars.indexOf(`variable "${name}" {`);
+    assert.notEqual(start, -1, `missing Terraform variable ${name}`);
+    const next = rootVars.indexOf('\nvariable "', start + 1);
+    return rootVars.slice(start, next === -1 ? rootVars.length : next);
+  };
+  const variableDefault = (/** @type {string} */ name) => {
+    const match = variableBlock(name).match(/default\s+=\s+([0-9]+)/);
+    assert.ok(match, `missing numeric Terraform default for ${name}`);
+    return Number(match[1]);
+  };
+
+  assert.match(cluster, /name\s+=\s+"containerInsights"\s+value\s+=\s+"enhanced"/);
+  // Keep in sync with the AWS ECS Fargate task-size table.
+  const validFargateCpuValues = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+  const fargateMemoryByCpu = new Map([
+    [256, new Set([512, 1024, 2048])],
+    [512, new Set([1024, 2048, 3072, 4096])],
+    [1024, new Set([2048, 3072, 4096, 5120, 6144, 7168, 8192])],
+    [2048, new Set(Array.from({ length: 13 }, (_, i) => 4096 + i * 1024))],
+    [4096, new Set(Array.from({ length: 23 }, (_, i) => 8192 + i * 1024))],
+    [8192, new Set(Array.from({ length: 12 }, (_, i) => 16384 + i * 4096))],
+    [16384, new Set(Array.from({ length: 12 }, (_, i) => 32768 + i * 8192))],
+    [32768, new Set([61440, 122880, 249856])],
+  ]);
+  const cpuListPattern = validFargateCpuValues.join(", ");
+  const assertFargateVariableValidation = (/** @type {string} */ service) => {
+    const cpuBlock = variableBlock(`${service}_cpu`);
+    const memoryBlock = variableBlock(`${service}_memory`);
+    assert.match(
+      cpuBlock,
+      new RegExp(`contains\\(\\[${cpuListPattern}\\], var\\.${service}_cpu\\)`),
+      `${service}_cpu must validate the full Fargate CPU set`
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 256 && contains\\(\\[512, 1024, 2048\\], var\\.${service}_memory\\)`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 512 && contains\\(\\[1024, 2048, 3072, 4096\\], var\\.${service}_memory\\)`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 1024 && contains\\(\\[2048, 3072, 4096, 5120, 6144, 7168, 8192\\], var\\.${service}_memory\\)`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 2048 && var\\.${service}_memory >= 4096 && var\\.${service}_memory <= 16384 && var\\.${service}_memory % 1024 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 4096 && var\\.${service}_memory >= 8192 && var\\.${service}_memory <= 30720 && var\\.${service}_memory % 1024 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 8192 && var\\.${service}_memory >= 16384 && var\\.${service}_memory <= 61440 && var\\.${service}_memory % 4096 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 16384 && var\\.${service}_memory >= 32768 && var\\.${service}_memory <= 122880 && var\\.${service}_memory % 8192 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 32768 && contains\\(\\[61440, 122880, 249856\\], var\\.${service}_memory\\)`)
+    );
+  };
+  const assertCapacityProviderDependency = (
+    /** @type {string} */ source,
+    /** @type {string} */ file
+  ) => {
+    assert.match(
+      source,
+      /depends_on\s+=\s+\[[\s\S]*aws_ecs_cluster_capacity_providers\.this/,
+      `${file} service must depend on Fargate capacity-provider association`
+    );
+  };
+
+  assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
+  assert.doesNotMatch(cluster, /default_capacity_provider_strategy/);
+  assert.match(locals, /fargate_stateless_capacity_provider_strategies\s+=\s+\[/);
+  assert.match(locals, /fargate_ondemand_capacity_provider_strategies\s+=\s+\[/);
+  assert.match(
+    locals,
+    /zero_downtime_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/
+  );
+  assert.match(
+    locals,
+    /stop_before_start_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+0\s*\}/
+  );
+  assert.match(
+    locals,
+    /sequential_replacement_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+50\s*\}/
+  );
+  assert.match(rootVars, /variable "spot_weight" \{[\s\S]*?condition\s+=\s+var\.spot_weight > 0/);
+  assert.match(rootVars, /variable "od_weight" \{[\s\S]*?condition\s+=\s+var\.od_weight > 0/);
+  for (const service of ["gateway", "system_runtime", "runtime", "scheduler", "workflows"]) {
+    const cpu = variableDefault(`${service}_cpu`);
+    const memory = variableDefault(`${service}_memory`);
+    assert.ok(fargateMemoryByCpu.get(cpu)?.has(memory), `${service} default ${cpu}/${memory} must be a valid Fargate CPU/memory pair`);
+    assertFargateVariableValidation(service);
+  }
+
+  for (const file of [
+    "terraform/modules/compute/gateway_service.tf",
+    "terraform/modules/compute/runtime_service.tf",
+    "terraform/modules/compute/system_runtime_service.tf",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, file);
+    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
+    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
+
+  for (const file of [
+    "terraform/modules/compute/d1_runtime_service.tf",
+    "terraform/modules/compute/do_runtime_service.tf",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, file);
+    assert.match(source, /deployment\s+=\s+local\.sequential_replacement_deployment/);
+    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
+
+  for (const file of [
+    "terraform/modules/compute/scheduler_service.tf",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, file);
+    assert.match(source, /deployment\s+=\s+local\.stop_before_start_deployment/);
+    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
+
+  {
+    const source = readRepoFile("terraform/modules/compute/workflows_service.tf");
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, "terraform/modules/compute/workflows_service.tf");
+    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
+    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
 });
 
 test("DO RPC JSON-data validators stay aligned across client and server", () => {

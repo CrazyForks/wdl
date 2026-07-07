@@ -184,6 +184,20 @@ test("RedisClient.hMGet returns decoded values and null misses", async () => {
   assert.ok(socket._reader.released, "per-call reader lock released after command");
 });
 
+test("RedisClient.hGetEx refreshes hash field TTLs while reading values", async () => {
+  const socket = makeFakeSocket([bytes("*3\r\n$1\r\na\r\n$-1\r\n$1\r\nc\r\n")]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const values = await client.hGetEx("h", 30, ["a", "b", "c"]);
+
+  assert.deepEqual(values, ["a", null, "c"]);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*9\r\n$6\r\nHGETEX\r\n$1\r\nh\r\n$2\r\nEX\r\n$2\r\n30\r\n$6\r\nFIELDS\r\n$1\r\n3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
+  );
+  assert.ok(socket._reader.released, "per-call reader lock released after command");
+});
+
 test("RedisSession.open fails explicitly after close", async () => {
   const socket = makeFakeSocket([]);
   const { connect } = scriptedConnect(socket);
@@ -532,6 +546,54 @@ test("RedisSession selects configured DB on its held socket", async () => {
   assert.equal(decode(socket._writes[1]), "*3\r\n$4\r\nHGET\r\n$1\r\nk\r\n$1\r\nf\r\n");
 });
 
+test("RedisSession reports resources while SELECT is still pending", async () => {
+  let releaseSelect = () => {};
+  const writer = {
+    /** @param {Uint8Array} _buf */
+    async write(_buf) {},
+    close() { writer.closed = true; },
+    /** @type {boolean} */
+    closed: false,
+  };
+  const reader = {
+    read() {
+      return new Promise((resolve, reject) => {
+        releaseSelect = () => {
+          if (reader.released) {
+            reject(new Error("reader released"));
+          } else {
+            resolve({ done: false, value: bytes("+OK\r\n") });
+          }
+        };
+      });
+    },
+    releaseLock() { reader.released = true; },
+    /** @type {boolean} */
+    released: false,
+  };
+  const socket = {
+    writable: { getWriter: () => writer },
+    readable: { getReader: () => reader },
+    close() { socket.closed = true; },
+    /** @type {boolean} */
+    closed: false,
+  };
+  const { connect } = scriptedConnect(socket);
+  const session = new RedisSession("x", { connect, db: 1 });
+
+  assert.equal(session.hasOpenResources(), false);
+  const openPromise = session.open();
+  assert.equal(session.hasOpenResources(), true);
+  await Promise.resolve();
+  await session.close();
+  assert.equal(session.hasOpenResources(), false);
+  assert.equal(writer.closed, true);
+  assert.equal(reader.released, true);
+  assert.equal(socket.closed, true);
+  releaseSelect();
+  await assert.rejects(openPromise, /reader released/);
+});
+
 test("RedisClient.set supports Valkey IFEQ and delIfEq", async () => {
   const socketA = makeFakeSocket([bytes("+OK\r\n")]);
   const socketB = makeFakeSocket([bytes(":1\r\n")]);
@@ -616,7 +678,9 @@ test("RedisSession.close is idempotent and blocks further commands", async () =>
   // close() twice and assert the post-close command throws.
   const s = new RedisSession("x", { connect });
   await s.open();
+  assert.equal(s.hasOpenResources(), true);
   await s.close();
+  assert.equal(s.hasOpenResources(), false);
   await s.close(); // idempotent — no throw
   await assert.rejects(() => s.get("k"), /session closed/);
 });

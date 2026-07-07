@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBase64Json } from "../helpers/json-payload.js";
-import {
+import { runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
+
+const {
   toBytes,
   bundleToWorkerCode,
   buildAssetUrl,
@@ -13,7 +15,7 @@ import {
   normalizeQueueDelaySeconds,
   normalizeQueuedDispatchBody,
   normalizeScheduledDispatchBody,
-} from "../../runtime/lib.js";
+} = await import(runtimeLibModuleDataUrl());
 
 const enc = new TextEncoder();
 
@@ -241,7 +243,7 @@ function mkBundle(meta, files) {
   return out;
 }
 
-test("bundleToWorkerCode: module + data + wasm + json + text + cjs + py", () => {
+test("bundleToWorkerCode: module + data + wasm + json + text + cjs", () => {
   const meta = {
     mainModule: "worker.js",
     modules: {
@@ -251,7 +253,6 @@ test("bundleToWorkerCode: module + data + wasm + json + text + cjs + py", () => 
       "config.json": { type: "json" },
       "readme.txt": { type: "text" },
       "commonjs.cjs": { type: "cjs" },
-      "mod.py": { type: "py" },
     },
   };
   const code = bundleToWorkerCode(
@@ -262,7 +263,6 @@ test("bundleToWorkerCode: module + data + wasm + json + text + cjs + py", () => 
       "config.json": enc.encode('{"k":1}'),
       "readme.txt": enc.encode("hello"),
       "commonjs.cjs": enc.encode("module.exports = 1"),
-      "mod.py": enc.encode("x = 1"),
     })
   );
   assert.equal(code.mainModule, "worker.js");
@@ -273,13 +273,23 @@ test("bundleToWorkerCode: module + data + wasm + json + text + cjs + py", () => 
   const jsonModule = /** @type {{ json: unknown }} */ (code.modules["config.json"]);
   const textModule = /** @type {{ text: string }} */ (code.modules["readme.txt"]);
   const cjsModule = /** @type {{ cjs: string }} */ (code.modules["commonjs.cjs"]);
-  const pyModule = /** @type {{ py: string }} */ (code.modules["mod.py"]);
   assert.deepEqual(Array.from(dataModule.data), [1, 2]);
   assert.deepEqual(Array.from(wasmModule.wasm), [0, 97, 115, 109]);
   assert.deepEqual(jsonModule.json, { k: 1 });
   assert.equal(textModule.text, "hello");
   assert.equal(cjsModule.cjs, "module.exports = 1");
-  assert.equal(pyModule.py, "x = 1");
+});
+
+test("bundleToWorkerCode: py modules fail closed with WDL error", () => {
+  assert.throws(
+    () => bundleToWorkerCode(
+      mkBundle(
+        { mainModule: "worker.js", modules: { "worker.js": { type: "module" }, "mod.py": { type: "py" } } },
+        { "worker.js": enc.encode("export default {}"), "mod.py": enc.encode("x = 1") }
+      )
+    ),
+    /Module "mod\.py": Python Workers modules are not supported by WDL/
+  );
 });
 
 test("bundleToWorkerCode: uses meta.compatibilityDate when set", () => {
@@ -310,7 +320,7 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "experimental", "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "enhanced_error_serialization"]);
   assert.deepEqual(/** @type {any} */ (code.meta.bindings), { KV: { type: "kv", id: "x" } });
   assert.deepEqual(code.meta.vars, { G: "hi" });
   assert.ok(Object.isFrozen(code.meta), "meta must be frozen");
@@ -327,7 +337,7 @@ test("bundleToWorkerCode: default compatibilityDate does not inject defaulted pl
     )
   );
   assert.equal(code.compatibilityDate, "2026-04-24");
-  assert.deepEqual(code.compatibilityFlags, ["experimental"]);
+  assert.deepEqual(code.compatibilityFlags, []);
 });
 
 test("bundleToWorkerCode: old compatibilityDate absent flags → floor only", () => {
@@ -341,7 +351,7 @@ test("bundleToWorkerCode: old compatibilityDate absent flags → floor only", ()
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["experimental", "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization"]);
 });
 
 test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup", () => {
@@ -356,7 +366,7 @@ test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup",
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat", "experimental"]);
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat"]);
 });
 
 test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibilityFlags in bundle bytes", () => {
@@ -385,6 +395,22 @@ test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibil
       )
     ),
     /entries must be non-empty strings/
+  );
+});
+
+test("bundleToWorkerCode: experimental workerd compatibility flags fail closed", () => {
+  assert.throws(
+    () => bundleToWorkerCode(
+      mkBundle(
+        {
+          mainModule: "w.js",
+          compatibilityFlags: ["nodejs_compat", "unsafe_module"],
+          modules: { "w.js": { type: "module" } },
+        },
+        { "w.js": enc.encode("x") }
+      )
+    ),
+    /meta\.compatibilityFlags contains experimental workerd flag "unsafe_module"/
   );
 });
 

@@ -1,6 +1,6 @@
 resource "aws_ecs_task_definition" "d1_runtime" {
   family                   = "${var.name}-d1-runtime"
-  requires_compatibilities = ["EC2"]
+  requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.runtime_cpu
   memory                   = var.runtime_memory
@@ -27,6 +27,7 @@ resource "aws_ecs_task_definition" "d1_runtime" {
     image      = var.workerd_image
     essential  = true
     entryPoint = ["d1-supervisor"]
+    memory     = local.d1_runtime_container_memory
 
     portMappings = [{
       name          = "d1-http"
@@ -74,6 +75,16 @@ resource "aws_ecs_task_definition" "d1_runtime" {
   }])
 
   lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition = (
+        local.d1_runtime_container_memory > 0 &&
+        local.d1_runtime_container_memory <= var.runtime_memory - local.stateful_runtime_memory_headroom
+      )
+      error_message = "d1_runtime_container_memory must be positive and leave task-level memory headroom."
+    }
+
     precondition {
       condition     = !var.d1_test_hooks_enabled || can(regex("(^|-)test($|-)", var.name))
       error_message = "d1_test_hooks_enabled may only be enabled for test-named compute stacks."
@@ -93,11 +104,7 @@ module "d1_runtime_service" {
 
   availability_zone_rebalancing = "DISABLED"
 
-  capacity_provider_strategies = [
-    { capacity_provider = aws_ecs_capacity_provider.ec2.name, weight = 1 },
-  ]
-
-  placement_strategies = local.ec2_placement_strategies
+  capacity_provider_strategies = local.fargate_ondemand_capacity_provider_strategies
 
   subnet_ids         = var.private_subnet_ids
   security_group_ids = [aws_security_group.runtime.id]
@@ -110,5 +117,8 @@ module "d1_runtime_service" {
     client_aliases              = [{ port = 8787, dns_name = "d1-runtime" }]
   }]
 
-  depends_on = [aws_efs_mount_target.d1_storage]
+  depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
+    aws_efs_mount_target.d1_storage,
+  ]
 }

@@ -76,12 +76,23 @@ export class RedisSession {
     return this;
   }
 
+  hasOpenResources() {
+    return !this._closed && Boolean(this.socket || this.writer || this.reader || this.parser);
+  }
+
   async close() {
     if (this._closed) return;
     this._closed = true;
-    try { this.writer?.close(); } catch { /* already closed */ }
-    try { this.reader?.releaseLock(); } catch { /* already released */ }
-    try { this.socket?.close?.(); } catch { /* already closed */ }
+    const writer = this.writer;
+    const reader = this.reader;
+    const socket = this.socket;
+    this.writer = null;
+    this.reader = null;
+    this.parser = null;
+    this.socket = null;
+    try { writer?.close(); } catch { /* already closed */ }
+    try { reader?.releaseLock(); } catch { /* already released */ }
+    try { socket?.close?.(); } catch { /* already closed */ }
   }
 
   /** @param {RedisCommandEvent} event */

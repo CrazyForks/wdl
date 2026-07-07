@@ -1,6 +1,6 @@
 resource "aws_ecs_task_definition" "do_runtime" {
   family                   = "${var.name}-do-runtime"
-  requires_compatibilities = ["EC2"]
+  requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.runtime_cpu
   memory                   = var.runtime_memory
@@ -24,11 +24,12 @@ resource "aws_ecs_task_definition" "do_runtime" {
 
   container_definitions = jsonencode([
     {
-      name        = "redis-proxy"
-      image       = var.rust_image
-      essential   = true
-      command     = ["/redis-proxy"]
-      stopTimeout = 20
+      name              = "redis-proxy"
+      image             = var.rust_image
+      essential         = true
+      command           = ["/redis-proxy"]
+      memoryReservation = local.redis_proxy_memory_reservation
+      stopTimeout       = 20
 
       environment = local.redis_proxy_env
 
@@ -50,6 +51,7 @@ resource "aws_ecs_task_definition" "do_runtime" {
       image      = var.workerd_image
       essential  = true
       entryPoint = ["do-supervisor"]
+      memory     = local.do_runtime_container_memory
 
       dependsOn = [{
         containerName = "redis-proxy"
@@ -104,6 +106,16 @@ resource "aws_ecs_task_definition" "do_runtime" {
   ])
 
   lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition = (
+        local.do_runtime_container_memory > 0 &&
+        local.do_runtime_container_memory <= var.runtime_memory - local.redis_proxy_memory_reservation - local.stateful_runtime_memory_headroom
+      )
+      error_message = "do_runtime_container_memory must leave task-level memory reservation for the redis-proxy sidecar and additional task headroom."
+    }
+
     precondition {
       condition     = !var.do_test_hooks_enabled || can(regex("(^|-)test($|-)", var.name))
       error_message = "do_test_hooks_enabled may only be enabled for test-named compute stacks."
@@ -123,11 +135,7 @@ module "do_runtime_service" {
 
   availability_zone_rebalancing = "DISABLED"
 
-  capacity_provider_strategies = [
-    { capacity_provider = aws_ecs_capacity_provider.ec2.name, weight = 1 },
-  ]
-
-  placement_strategies = local.ec2_placement_strategies
+  capacity_provider_strategies = local.fargate_ondemand_capacity_provider_strategies
 
   subnet_ids         = var.private_subnet_ids
   security_group_ids = [aws_security_group.runtime.id]
@@ -140,5 +148,8 @@ module "do_runtime_service" {
     client_aliases              = [{ port = 8788, dns_name = "do-runtime" }]
   }]
 
-  depends_on = [aws_efs_mount_target.do_storage]
+  depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
+    aws_efs_mount_target.do_storage,
+  ]
 }

@@ -33,6 +33,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "do-runtime-alarm-shim-source", esModule = embed "alarm-shim-source.js"),
     (name = "do-runtime-http", esModule = embed "http.js"),
     (name = "do-runtime-load", esModule = embed "load.js"),
+    (name = "do-runtime-load-code-budget", esModule = embed "load-code-budget.js"),
     (name = "do-runtime-object-registry", esModule = embed "object-registry.js"),
     (name = "do-runtime-owner-client", esModule = embed "owner-client.js"),
     (name = "do-runtime-owner-registry", esModule = embed "owner-registry.js"),
@@ -46,6 +47,8 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "runtime-lib", esModule = embed "../runtime/lib.js"),
     (name = "runtime-load", esModule = embed "../runtime/load.js"),
     (name = "runtime-load-env-build", esModule = embed "../runtime/load/env-build.js"),
+    (name = "runtime-load-code-budget", esModule = embed "../runtime/load/code-budget.js"),
+    (name = "runtime-load-injection-sources", esModule = embed "../runtime/load/injection-sources.js"),
     (name = "runtime-load-module-rewrite", esModule = embed "../runtime/load/module-rewrite.js"),
     (name = "runtime-load-wrapper-generate", esModule = embed "../runtime/load/wrapper-generate.js"),
     (name = "runtime-bindings-proxy", esModule = embed "../runtime/bindings/proxy.js"),
@@ -90,6 +93,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "shared-version", esModule = embed "../shared/version.js"),
     (name = "shared-d1-timeout", esModule = embed "../shared/d1-timeout.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-observability", esModule = embed "../shared/observability.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-owner-forwarder", esModule = embed "../shared/owner-forwarder.js"),
@@ -115,7 +119,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "@wdl-dev/aws-sigv4", esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
-  compatibilityFlags = ["nodejs_compat", "experimental"],
+  compatibilityFlags = ["nodejs_compat"],
   globalOutbound = "internal-network",
   # The do-runtime host actor owns many user DO facets behind one stable
   # storage shard. Keep it resident so short idle gaps do not force workerd to

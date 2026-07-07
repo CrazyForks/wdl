@@ -45,7 +45,7 @@ Worker lifecycle:
 |---|---|---|
 | `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, and secret-only workers. |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | Lists retained versions and active status. |
-| `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata. |
+| `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata. Python modules and upstream experimental compatibility flags are rejected before commit. |
 | `POST` | `/ns/<ns>/worker/<name>/promote` | Promotes `{"version":"vN"}` through the WATCH/MULTI routing path. Host declaration failures are 403; live pattern conflicts are 409; exhausted transaction contention is 503. |
 | `DELETE` | `/ns/<ns>/worker/<name>/versions/<version>` | Deletes one retained non-active version after active-route, service-ref, lifecycle, and delete-lock blockers pass. Referrer redaction is principal-aware. |
 | `POST` | `/ns/<ns>/worker/<name>/delete` | Whole-worker delete. `?dry_run=1` returns computed impact and blockers without writing. Redaction matches single-version delete. |
@@ -78,17 +78,33 @@ Control lifecycle operations are split so each critical transition has one autho
 - Deploy parses the supported Wrangler/JSONC shape, validates bindings and routes,
   allocates the next immutable version through `worker:<ns>:<worker>:next_version`,
   writes bundle metadata/modules/assets, then enters the same promote path used by
-  explicit promotion.
+  explicit promotion. Before allocation, deploy estimates final WorkerCode under
+  workerd's 64 MiB limit, including runtime/do-runtime-injected wrapper/client modules
+  and workflow import rewrites. The watched commit path is the authoritative code-budget
+  and headroomed `workerLoader` env-budget check after version allocation and metadata
+  materialization, such as resolved D1 database ids and workflow keys, before writing
+  the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
   cron/queue projections, lifecycle indexes, and invalidation publications as one
   reviewed transition.
-- Secret update/delete modifies the secret store and then bumps the active worker
-  through `bumpActiveAndPromote()` when an active route exists. Secret PUT validates the
-  plaintext size and shape, encrypts it into a `WDL-ENC:` envelope before the Redis
-  mutation/WATCH retry loop, and reuses the same envelope across retries. Runtime
+- Secret update/delete stages the secret-store mutation inside
+  `bumpActiveAndPromote()` when an active route exists, so the budget check, secret
+  hash write, bundle copy, and route flip share one WATCH/MULTI transaction. If no
+  active route exists, retained versions are budget-checked before the direct secret
+  hash write; only secret-only workers with no retained versions defer their first
+  load-time budget check to deploy. Secret PUT validates the plaintext size and shape,
+  encrypts it into a `WDL-ENC:` envelope before the Redis mutation/WATCH retry loop,
+  and reuses the same envelope across retries. Runtime
   therefore sees a new immutable version id instead of mutable in-place secret changes.
+  Secret DELETE removes the target field from the env estimate before decrypting the
+  remaining secret hashes, so deleting the corrupt target can still succeed. Any corrupt
+  remaining namespace or worker secret fails closed; direct Redis repair is not a
+  supported consistency path. Namespace-secret mutations WATCH the retained
+  worker/version metadata they need to re-estimate before commit; if concurrent metadata
+  changes keep invalidating that view, control returns
+  `namespace_secret_mutation_contention`.
 - Version delete and whole-worker delete are fail-closed. They collect blockers from
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
@@ -250,6 +266,19 @@ Auth-specific contract:
 - Control 5xx responses use generic/safe messages. Internal exception text, auth Redis
   diagnostics, backend messages, and provider errors belong in logs unless the endpoint
   explicitly owns a diagnostic response field.
+- Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
+  WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
+  `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected
+  modules and generated workflow keys, exceeds workerd's 64 MiB dynamic code limit.
+  Deploy and secret mutations return `worker_env_too_large` when the estimated
+  `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
+  `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
+  `max_env_bytes`, `upstream_max_env_bytes`, and `headroom_bytes`. Deploy-time
+  per-version checks also include `version`. Secret mutations that re-estimate an
+  existing version also include `source_version` and `estimated_version`.
+  `source_version` identifies the stored version to inspect, delete, or redeploy;
+  `estimated_version` is the tag used for budget sizing; on worker-secret bump paths
+  it is the exact allocated bump version.
 - Control never calls gateway directly. It writes Redis and publishes invalidation
   messages.
 - Control encrypts secret PUT values before entering Redis mutation loops.
@@ -257,6 +286,13 @@ Auth-specific contract:
   fallback.
 - Worker delete commits Redis lifecycle state first; async S3 cleanup enqueue is
   best-effort and returns warning if it fails.
+- The `s3-cleanup` system worker persists cleanup tasks in D1. Cron replay owns retries
+  after the row exists, uses minute-scale exponential backoff capped at 30 minutes for
+  S3 failures, and checkpoints large prefix cleanup after each S3 List/Delete page so
+  normal pagination progress does not consume failure attempts or restart from the
+  beginning after a scheduler timeout. Each run processes one page, so very large
+  prefixes drain across multiple cron or queue dispatches instead of holding one
+  scheduler dispatch open for minutes.
 - Workflow lifecycle blockers are checked through workflows and fail closed on service
   errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503

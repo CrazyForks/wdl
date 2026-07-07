@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   freshRepositoryModuleDataUrl,
+  importSpecifierReplacements,
   moduleDataUrl,
   readRepositoryFile,
   repositoryFileUrl,
@@ -17,6 +18,8 @@ const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_QUEUE_KEYS_URL = repositoryFileUrl("shared/queue-keys.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_ROUTE_PROJECTION_URL = repositoryFileUrl("shared/route-projection.js");
+const SHARED_WORKERD_COMPAT_FLAGS_URL = repositoryFileUrl("shared/workerd-compat-flags.js");
 
 /**
  * Compile the control/* module graph against shared/* deps. Returns URLs so
@@ -34,7 +37,7 @@ export async function compileControlGraph(opts = {}) {
     [/from "croner"/g, `from ${JSON.stringify(cronerUrl)}`],
   ]);
 
-  // Dependency order: lib → (bindings, topology, lifecycle-indexes) → bundle.
+  // Dependency order: lib → (bindings, topology, indexes, routing helpers) → bundle.
   const libUrl = freshRepositoryModuleDataUrl("control/lib.js", [
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
@@ -60,22 +63,41 @@ export async function compileControlGraph(opts = {}) {
     [/from "shared-queue-keys"/g, `from ${JSON.stringify(SHARED_QUEUE_KEYS_URL)}`],
   ]);
 
+  const cronIndexUrl = freshRepositoryModuleDataUrl("control/cron-index.js", [
+    [/from "shared-cron-time"/g, `from ${JSON.stringify(sharedCronTimeUrl)}`],
+  ]);
+
+  const routePlanUrl = freshRepositoryModuleDataUrl("control/routing/route-plan.js", [
+    [/from "shared-route-projection"/g, `from ${JSON.stringify(SHARED_ROUTE_PROJECTION_URL)}`],
+  ]);
+
   const packageJsonSourceUrl = moduleDataUrl(
     `export default ${JSON.stringify(readRepositoryFile("package.json"))};`
   );
   const bundleUrl = freshRepositoryModuleDataUrl("control/bundle.js", [
-    [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
+    ...importSpecifierReplacements({
+      "shared-ns-pattern": SHARED_NS_URL,
+      "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
+    }),
     [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
     [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],
   ]);
 
   return {
+    sharedNsUrl: SHARED_NS_URL,
     sharedAuthRolesUrl,
     sharedAuthRoles,
+    sharedQueueKeysUrl: SHARED_QUEUE_KEYS_URL,
+    sharedVersionUrl: SHARED_VERSION_URL,
+    sharedErrorsUrl: SHARED_ERRORS_URL,
+    sharedRouteProjectionUrl: SHARED_ROUTE_PROJECTION_URL,
+    sharedCronTimeUrl,
     libUrl,
     bindingsUrl,
     topologyUrl,
     lifecycleIndexesUrl,
+    cronIndexUrl,
+    routePlanUrl,
     bundleUrl,
   };
 }

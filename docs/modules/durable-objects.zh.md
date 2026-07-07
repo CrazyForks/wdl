@@ -59,6 +59,8 @@ Ownership 按 shard 划分：
 
 Alarm state 存在 object SQLite。Workflows 接收 do-runtime 的 set/delete 请求，并为每个 pending row 保存一个 internal job。Row token 用于 fence 用户驱动 delete 和 stale backend delivery；Workflows run token 在 DB 2 内 fence dispatch retry 和 completion。
 
+workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespace 下的 object name。`ctx.storage.deleteAll()` 也会大小写不敏感地跳过这些名字，因此 0617 以前可能创建出的 `_CF_*` 这类大小写变体不会让 cleanup 失败。这些 legacy reserved-name object 对 tenant SQL 仍不可访问，应视为升级遗留物，而不是应用表。
+
 `getAlarm()` 会做 alarm-scoped read repair：如果 SQLite 中有 pending alarm row，但 Workflows DB 2 due index 缺失，它会幂等重写 backend due index，而不会给普通 DO fetch 增加 Redis IO。Active/retained alarm 保留调度时的 worker version；旧 version 删除后，只有 `doStorageId` 仍匹配时 alarm dispatch 才 retarget 到当前 active version。逻辑 worker 已消失或指向不同 `doStorageId` 时，alarm 会自清理。
 
 ## Ownership / 并发 / 失败语义
@@ -87,6 +89,8 @@ Owner resolution 是单写入协议：
 6. Supervisor 通过 `127.0.0.1:8788` renew 本地 owned scopes；`/internal/do/probe` 暴露 task 和 owner state 供诊断。Drain 停止新 ownership，并等待最多 `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS`（默认 `8000`）让 host-actor dispatch 完成，然后释放匹配 generation。Drain 成功后，`do-supervisor` 会直接 kill workerd，而不是依赖 workerd 在 SIGTERM 后的 graceful window；后者会让 listener 处于 half-dead 状态，制造 takeover 504 窗口。Drain timeout 时返回 503 并保留 lease，让 failover 等正常 lease expiry。In-flight handler 还有 lease-budget watchdog：它会在 expiry 前 `DO_OWNER_LEASE_GUARD_MS` 重新检查 ownership；如果 renewal 停止或 ownership 移动，会 forget 受影响 owner scope 并 abort 受影响 facet；它不会把整个 task 标记为 draining。
 
 Generation key 不是 cache，而是 fence。即使过期 Redis owner record 消失、另一 task 重新 claim 同一 scope，stale owner 后续 owner-side check 也会 fail closed。它阻止 stale owner 开始新的受保护 dispatch，或通过 lease-budget recheck；它不是已经运行中的 SQLite commit 的物理 fence。
+
+Terraform 除了 Fargate task memory limit，还会给 do-runtime workerd container 设置显式 memory hard limit，并为同 task 的 redis-proxy sidecar 保留内存。这是 container failure boundary，不是 per-storage-call memory interrupt。
 
 ## 安全边界
 

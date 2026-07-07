@@ -26,7 +26,7 @@
 | `runtime/runtime.js` | Service-name binding、loaded-worker registry、sibling eviction、logger、metrics 和 request-scope setup。 |
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers 和 bounded metric aggregation。 |
 | `runtime/dispatch.js` 和 `runtime/dispatch/*` | Fetch、scheduled、queue、workflow dispatch、workflow step facade、replay cache 和 deterministic workflow JSON helpers。 |
-| `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation 和 hidden binding stripping。 |
+| `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation、runtime 注入源码 ownership 和 hidden binding stripping。 |
 | `runtime/bindings/` | KV、D1、R2、Durable Objects、ASSETS、service 和 queue 的 host-side binding adapters。 |
 | `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/env-build.js` | Workflow binding materialization、backend client、dispatch facade、replay cache 和 step semantics。 |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture 和 `wdl tail` 的 activation-gated append path。 |
@@ -40,6 +40,8 @@
 | `control/topology.js` | Deploy metadata 中 routes、patterns、cron、queue consumer 和 workflow declaration parsing。 |
 | `control/routing.js`、`control/routing/route-plan.js` | Promote、secret bump/promote、host reconcile WATCH/MULTI loops，以及纯 route/pattern planning helpers。 |
 | `control/lifecycle-indexes.js` | Worker lifecycle、cron、queue consumer 和 referrer indexes 的 Redis mutation helpers。 |
+| `control/env-budget.js` | Deploy 和 secret mutation guard 使用的 workerd `workerLoader` env size 控制面估算。 |
+| `control/worker-code-budget.js` | Deploy guard 使用的最终 WorkerCode size 控制面估算，复用 runtime 与 do-runtime wrapper/module injection 规则。 |
 | `control/d1-*` | D1 control metadata、store、lifecycle、migration 和 d1-runtime client modules。 |
 | `control/r2.js` | 面向配置的 S3-compatible store 的 control-plane R2 bucket/object API client。 |
 | `control/s3.js` | S3-compatible ASSETS upload helper。 |
@@ -55,18 +57,20 @@
 | `shared/auth-roles.js` | Role table、principal validation、reserved namespace policy 和 auth action capabilities。 |
 | `shared/auth-token.js` | Control 和 auth 共用的 `x-admin-token` sanitizer。 |
 | `shared/internal-auth.js` | JS caller 和 receiver 共用的 internal mesh auth header / token helpers。 |
-| `shared/secret-envelope.js` | Secret envelope encryption/decryption、canonical base64/JSON handling 和 AAD binding helpers。 |
+| `shared/secret-envelope.js`、`shared/secret-keys.js` | Secret envelope encryption/decryption、canonical base64/JSON handling、AAD binding helpers 和 secret Redis key construction。 |
 | `shared/hex.js`、`shared/random-id.js`、`shared/errors.js` | byte-to-hex rendering、random hex ids 和 string-only error message extraction 的无依赖小 primitive。 |
 | `shared/observability.js` | JS tiers 的 structured logger、metrics registry、request-id helpers 和 log-level handling。 |
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
 | `shared/bounded-body.js` | 共享 bounded request body byte/text readers；各 tier 自己把 limit error 映射为对应 HTTP error contract。 |
 | `shared/ns-pattern.js` | Namespace、worker、binding、queue、KV id、module path、reserved object-key 和 reserved namespace grammars。 |
 | `shared/version.js` | Worker version formatting 和 bundle key helpers。 |
+| `shared/workerd-compat-flags.js` | 上游 workerd experimental compatibility enable flags 的 pinned mirror，用于在 cold-load 前拒绝 tenant metadata。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire 和 SQL splitting utilities。 |
 | `shared/fnv1a32.js` | Runtime-side shard 和 slot hashing 共用的 JavaScript FNV-1a helpers。 |
-| `shared/s3-xml.js` | Control R2 和 runtime R2 路径共用的 S3 XML parsing helpers。 |
+| `shared/s3-query.js` | s3-cleanup system worker 使用的 S3 query encoder；runtime R2 在 `runtime/r2-utils.js` 保留同一套 standalone helper，因为该文件会作为 worker source 注入。 |
+| `shared/s3-xml.js` | Control R2、runtime R2 和 system cleanup 路径共用的 S3 XML parsing helpers。 |
 | `shared/worker-id.js` | Gateway、runtime、DO runtime 和 tests 共用的 `x-worker-id` formatting、parsing 和 runtime-load identity grammar。 |
 | `shared/cron-time.js` | Control 侧 cron parsing 和 slot-alignment helpers；scheduler advancement 使用 Rust `croner`。 |
 | `shared/vendor/` | `npm run build:vendor` 重新生成的预打包第三方依赖。 |
@@ -99,6 +103,7 @@
 | `examples/` | 手工 demo 和 reference projects。测试不应悄悄依赖它们，除非 fixture 明确迁入 `test-workers/`。 |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner。 |
 | `scripts/compile-workerd-configs.js` | 把 workerd Cap'n Proto configs 编译成 `dist/workerd-configs/*.bin`。 |
+| `scripts/extract-workerd-experimental-compat-flags.mjs` | pin bump flag 提取脚本。 |
 
 ## Infrastructure
 

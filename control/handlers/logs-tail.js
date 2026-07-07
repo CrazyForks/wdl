@@ -1,7 +1,7 @@
 // SSE handler for `wdl tail`. Pull-based ReadableStream + pre-registered
-// ctx.waitUntil(cancelPromise) so the cancel callback fires reliably on
-// HTTP client disconnect. Push-style intervals have historically failed to
-// propagate disconnect cleanup reliably here.
+// ctx.waitUntil(cancelPromise) keeps cleanup outside the cancel callback.
+// workerd >= 2026-06-19 no longer reliably calls cancel() on client
+// disconnect, so max-session and idle-pull cleanup use independent watchdogs.
 
 import { RedisSession, redisDbFromEnv } from "shared-redis";
 import { envValueOr } from "shared-env";
@@ -20,6 +20,8 @@ const TAIL_ACTIVATION_TTL_SECONDS = 30;
 const TAIL_ACTIVATION_MAX_ENTRIES = 10_000;
 const XREAD_BLOCK_MS = 10_000;
 const SSE_KEEPALIVE_MS = 5_000;
+const LOG_TAIL_IDLE_PULL_GRACE_FACTOR = 3;
+const LOG_TAIL_IDLE_PULL_MS = SSE_KEEPALIVE_MS * LOG_TAIL_IDLE_PULL_GRACE_FACTOR;
 export const LOG_TAIL_MAX_SESSION_MS_DEFAULT = 15 * 60 * 1000;
 const MAX_WORKERS_PER_TAIL_SESSION = 50;
 const JSON_FIELD_BYTES = [0x6a, 0x73, 0x6f, 0x6e]; // "json"
@@ -43,9 +45,8 @@ const SSE_HEADERS = {
  * @typedef {{
  *   exists(key: string): Promise<number>,
  *   xRange(key: string, start: string, end: string, countKeyword: string, count: string): Promise<Array<[Uint8Array, Uint8Array[]]>>,
- *   hExists(key: string, field: string): Promise<boolean>,
  *   hLen(key: string): Promise<number>,
- *   hMGet(key: string, fields: string[]): Promise<Array<Uint8Array | string | null | undefined>>,
+ *   hGetEx(key: string, ttlSeconds: number, fields: string[]): Promise<Array<Uint8Array | string | null | undefined>>,
  *   hSetEx(key: string, ttlSeconds: number, fields: Record<string, string>): Promise<unknown>,
  * }} TailRedis
  * @typedef {{ xRead(...args: string[]): Promise<unknown> }} TailSession
@@ -170,42 +171,22 @@ function findJsonField(fields) {
 
 /**
  * @param {TailRedis} redis
- * @param {string} key
- */
-async function activateTailWorker(redis, key) {
-  if (!(await redis.hExists(TAIL_ACTIVATION_CHANNEL, key))) {
-    const count = await redis.hLen(TAIL_ACTIVATION_CHANNEL);
-    if (count >= TAIL_ACTIVATION_MAX_ENTRIES) return false;
-  }
-  await redis.hSetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, { [key]: "1" });
-  return true;
-}
-
-/**
- * @param {TailRedis} redis
  * @param {string[]} keys
  */
 export async function activateTailWorkers(redis, keys) {
-  if (keys.length === 1) {
-    await activateTailWorker(redis, keys[0]);
-    return;
-  }
-  const active = await redis.hMGet(TAIL_ACTIVATION_CHANNEL, keys);
+  if (keys.length === 0) return;
+  const active = await redis.hGetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, keys);
   const missing = [];
-  /** @type {Record<string, string>} */
-  const fields = {};
   for (let i = 0; i < keys.length; i++) {
-    if (active[i] == null) {
-      missing.push(keys[i]);
-    } else {
-      fields[keys[i]] = "1";
-    }
+    if (active[i] == null) missing.push(keys[i]);
   }
   let allowedMissing = missing;
   if (missing.length > 0) {
     const count = await redis.hLen(TAIL_ACTIVATION_CHANNEL);
     allowedMissing = missing.slice(0, Math.max(0, TAIL_ACTIVATION_MAX_ENTRIES - count));
   }
+  /** @type {Record<string, string>} */
+  const fields = {};
   for (const key of allowedMissing) fields[key] = "1";
   if (Object.keys(fields).length > 0) {
     await redis.hSetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, fields);
@@ -360,22 +341,110 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     db: redisDbFromEnv(env, "DATA_REDIS_DB"),
   });
   let sessionOpen = false;
+  /** @type {Promise<void> | null} */
+  let sessionClosePromise = null;
   let cancelled = false;
+  /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
+  let streamController = null;
+  let lastPullAtMs = Date.now();
   const { promise: cancelPromise, resolve: resolveCancel } =
     /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
+
+  async function closeSessionIfOpen() {
+    if (!sessionOpen && !session.hasOpenResources()) return;
+    sessionClosePromise ??= (async () => {
+      try {
+        await session.close();
+      } catch (err) {
+        log("warn", "tail_session_close_failed", {
+          request_id: requestId, namespace: ns,
+          error_message: errMessage(err),
+        });
+      }
+    })();
+    await sessionClosePromise;
+  }
+
+  /**
+   * @param {ReadableStreamDefaultController<Uint8Array> | null} controller
+   * @param {{ code: string, message: string, logEvent: string, logFields: Record<string, unknown> }} warning
+   */
+  function closeWithWarning(controller, warning) {
+    if (cancelled) return;
+    cancelled = true;
+    log("info", warning.logEvent, warning.logFields);
+    if (controller) {
+      try {
+        controller.enqueue(utf8Encoder.encode(sseEvent({
+          event: "tail_warning",
+          data: JSON.stringify({
+            event: "tail_warning",
+            code: warning.code,
+            message: warning.message,
+          }),
+        })));
+      } catch {}
+      try { controller.close(); } catch {}
+    }
+    resolveCancel();
+  }
+
+  /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
+  function expireSession(controller) {
+    closeWithWarning(controller, {
+      code: "session_expired",
+      message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
+      logEvent: "tail_session_expired",
+      logFields: {
+        request_id: requestId, namespace: ns, worker_count: workers.length,
+        max_session_ms: maxSessionMs,
+      },
+    });
+  }
+
+  /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
+  function idleSession(controller) {
+    closeWithWarning(controller, {
+      code: "session_idle",
+      message: "Tail session stopped receiving client reads; reconnecting closes the abandoned session.",
+      logEvent: "tail_session_idle",
+      logFields: {
+        request_id: requestId, namespace: ns, worker_count: workers.length,
+        idle_pull_ms: Date.now() - lastPullAtMs,
+        idle_limit_ms: LOG_TAIL_IDLE_PULL_MS,
+      },
+    });
+  }
+
+  const expiryTimer = setTimeout(() => expireSession(streamController), maxSessionMs);
+  if (typeof expiryTimer === "object" && typeof expiryTimer.unref === "function") {
+    expiryTimer.unref();
+  }
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let idleTimer = null;
+  function scheduleIdleWatchdog() {
+    const delayMs = Math.max(1, LOG_TAIL_IDLE_PULL_MS - (Date.now() - lastPullAtMs));
+    idleTimer = setTimeout(() => {
+      if (cancelled) return;
+      if (Date.now() - lastPullAtMs >= LOG_TAIL_IDLE_PULL_MS) {
+        idleSession(streamController);
+        return;
+      }
+      scheduleIdleWatchdog();
+    }, delayMs);
+    if (typeof idleTimer === "object" && typeof idleTimer.unref === "function") {
+      idleTimer.unref();
+    }
+  }
+  scheduleIdleWatchdog();
 
   // Pre-register cleanup. Per CLAUDE.md gotcha: scheduling waitUntil from
   // inside cancel races IoContext teardown — cancel only resolves the
   // promise, the actual close happens here.
   ctx.waitUntil(cancelPromise.then(async () => {
-    try {
-      if (sessionOpen) await session.close();
-    } catch (err) {
-      log("warn", "tail_session_close_failed", {
-        request_id: requestId, namespace: ns,
-        error_message: errMessage(err),
-      });
-    }
+    clearTimeout(expiryTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    await closeSessionIfOpen();
     log("info", "tail_session_close", {
       request_id: requestId, namespace: ns, worker_count: workers.length,
     });
@@ -392,8 +461,16 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   let openNoticeSent = false;
 
   const stream = new ReadableStream({
+    start(controller) {
+      streamController = controller;
+    },
     async pull(controller) {
-      if (cancelled) return;
+      streamController = controller;
+      lastPullAtMs = Date.now();
+      if (cancelled) {
+        try { controller.close(); } catch {}
+        return;
+      }
       try {
         if (!bootstrapped) {
           // Open BEFORE flipping bootstrapped so a session.open() throw
@@ -401,26 +478,17 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           // it and fail on the first Redis stream read.
           await session.open();
           sessionOpen = true;
+          if (cancelled) {
+            await closeSessionIfOpen();
+            try { controller.close(); } catch {}
+            return;
+          }
           bootstrapped = true;
         }
 
         const remainingMs = maxSessionMs - (Date.now() - sessionStartedAtMs);
         if (remainingMs <= 0) {
-          log("info", "tail_session_expired", {
-            request_id: requestId, namespace: ns, worker_count: workers.length,
-            max_session_ms: maxSessionMs,
-          });
-          controller.enqueue(utf8Encoder.encode(sseEvent({
-            event: "tail_warning",
-            data: JSON.stringify({
-              event: "tail_warning",
-              code: "session_expired",
-              message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
-            }),
-          })));
-          cancelled = true;
-          resolveCancel();
-          controller.close();
+          expireSession(controller);
           return;
         }
 
@@ -458,6 +526,10 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           session,
           Math.min(XREAD_BLOCK_MS, SSE_KEEPALIVE_MS, remainingMs),
         );
+        if (cancelled) {
+          try { controller.close(); } catch {}
+          return;
+        }
 
         if (!batch) {
           // Timed out with no events → SSE comment so intermediaries know
@@ -477,6 +549,10 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           })));
         }
       } catch (err) {
+        if (cancelled) {
+          try { controller.close(); } catch {}
+          return;
+        }
         log("error", "tail_pull_failed", {
           request_id: requestId, namespace: ns,
           error_message: errMessage(err),

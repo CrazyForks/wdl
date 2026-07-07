@@ -138,9 +138,18 @@ Stateful storage:
 - Ordinary D1/DO task loss falls back to lease expiry and takeover by another replica;
   graceful rollout should prefer supervisor drain so ownership is released before the
   child workerd process exits.
-- ECS EC2 capacity must block task access to host IMDS for tenant-running workloads.
-- Instance refresh / lifecycle hooks can make Terraform rolling slow; document
-  operational expectations before changing hook timeout or capacity policy.
+- Terraform runs this application stack's services on ECS Fargate. Capacity policy
+  changes should document which services can use `FARGATE_SPOT`; stateful runtimes and
+  singleton control loops should stay on on-demand Fargate unless their interruption
+  semantics are re-reviewed.
+- In addition to the Fargate task memory limit, D1 and DO workerd containers set
+  explicit container memory hard limits. DO also reserves memory for its local
+  redis-proxy sidecar.
+- Terraform Fargate services should use rolling replacement where the service can
+  tolerate overlapping capacity. D1/DO use sequential replacement, while scheduler
+  remains stop-before-start as a singleton control loop. D1/DO and scheduler disable
+  Availability Zone rebalancing so replacement follows their explicit deployment
+  strategy.
 
 ## Security Boundaries
 
@@ -149,10 +158,9 @@ Stateful storage:
 - Runtime internal `:8088`, d1-runtime `:8787`, do-runtime `:8788`, workflows `:9120`,
   and Redis are private mesh services. Private service calls also require
   `x-wdl-internal-auth` with the shared `WDL_INTERNAL_AUTH_TOKEN`.
-- EC2 host instance profiles must not be reachable from awsvpc task containers.
-- Tenant-running runtime tasks still share EC2 capacity with platform services, so IMDS
-  blocking and workerd public-only outbound bindings are part of the deployment
-  contract. ECS Exec should be enabled only where operator access is intended.
+- Tenant-running runtime tasks use least-privilege ECS task roles, public-only workerd
+  outbound bindings, and private mesh security groups as their cloud credential and
+  network boundary. ECS Exec should be enabled only where operator access is intended.
 
 ## Observability
 
@@ -160,7 +168,11 @@ Stateful storage:
 - Gateway, user-runtime, system-runtime, d1-runtime, do-runtime, scheduler, workflows,
   and redis-proxy expose Prometheus metrics where configured; endpoint paths differ by
   service and are listed in `log-tail-observability.md`.
-- CloudWatch/EFK ingestion is deployment-configured.
+- Terraform enables ECS Container Insights with enhanced observability by default. That
+  is AWS infrastructure telemetry for cluster, service, task, and container health and
+  utilization. It is separate from WDL's own Prometheus metrics and bounded-label
+  logging contracts.
+- CloudWatch/EFK log ingestion beyond the Terraform defaults is deployment-configured.
 
 ## Deployment / Rollout Notes
 
@@ -196,7 +208,7 @@ operations unless explicitly debugging.
 - Operator-driven checks: Terraform plan review and Kubernetes manifest review.
 - `npm run test:integration`
 - `tests/unit/style-contracts.test.js`: local compose Envoy mesh shape, D1/DO
-  test-hook IaC gates, and EC2 IMDS blocking.
+  test-hook IaC gates, and Fargate-only Terraform launch contracts.
 - Smoke tests against the target deployed environment after rolling.
 
 ## Known Constraints And Non-Goals

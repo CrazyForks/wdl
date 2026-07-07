@@ -11,11 +11,13 @@ import { formatError, logStructured } from "shared-observability";
 import { withInternalAuth } from "shared-internal-auth";
 import { discardResponseBody } from "shared-respond";
 import { DO_ALARM_SHIM_SOURCE } from "do-runtime-alarm-shim-source";
+import {
+  DO_RUNTIME_RESERVED_MODULE,
+  doRuntimeInjectedModuleSources,
+} from "do-runtime-load-code-budget";
 
 const REDIS_PROXY_LOAD_TIMEOUT_MS = 5000;
 const REDIS_PROXY_LOAD_RETRIES = 3;
-const DO_RUNTIME_RESERVED_MODULE = "_wdl-do-runtime-wrapper.js";
-const DO_ALARM_SHIM_MODULE = "_wdl-do-alarm-shim.js";
 const NATIVE_DELETE_ALL_DELETES_ALARM_FLAG = "delete_all_deletes_alarm";
 const NATIVE_DELETE_ALL_PRESERVES_ALARM_FLAG = "delete_all_preserves_alarm";
 
@@ -27,8 +29,8 @@ const NATIVE_DELETE_ALL_PRESERVES_ALARM_FLAG = "delete_all_preserves_alarm";
  * @typedef {Record<string, unknown> & { doStorageId?: unknown, className?: unknown }} RuntimeBindingSpec
  * @typedef {{ exports: Record<string, (options: { props: Record<string, unknown> }) => unknown> & { KV(options: { props: Record<string, unknown> }): unknown, Assets(options: { props: Record<string, unknown> }): unknown, QueueProducer(options: { props: Record<string, unknown> }): unknown, D1Database(options: { props: Record<string, unknown> }): unknown, R2Bucket(options: { props: Record<string, unknown> }): unknown, ServiceBinding(options: { props: Record<string, unknown> }): unknown, DurableObjectNamespace(options: { props: Record<string, unknown> }): unknown, DoAlarmBinding(options: { props: Record<string, unknown> }): unknown, InternalAuthBackend(options: { props: Record<string, unknown> }): unknown } }} DoRuntimeContext
  * @typedef {{ name: string, spec: RuntimeBindingSpec }} DoBindingInput
- * @typedef {string | { cjs: string } | { py: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
- * @typedef {{ mainModule: string, modules: Record<string, WorkerModuleValue>, compatibilityFlags?: string[], compatibilityDate?: string, allowExperimental?: boolean, env?: Record<string, unknown>, globalOutbound?: unknown }} WorkerCode
+ * @typedef {string | { cjs: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
+ * @typedef {{ mainModule: string, modules: Record<string, WorkerModuleValue>, compatibilityFlags?: string[], compatibilityDate?: string, env?: Record<string, unknown>, globalOutbound?: unknown }} WorkerCode
  */
 
 /** @param {DoEnv} env */
@@ -134,53 +136,19 @@ export async function loadViaProxy(env, invoke, requestId = null) {
   throw lastErr;
 }
 
-/** @param {WorkerMeta} meta */
-function doClassNames(meta) {
-  /** @type {Set<string>} */
-  const out = new Set();
-  for (const spec of Object.values(meta.bindings || {})) {
-    if (spec?.type === "do" && typeof spec.className === "string" && spec.className) {
-      out.add(spec.className);
-    }
-  }
-  return [...out];
-}
-
-/**
- * @param {string} userMainSpecifier
- * @param {string[]} classNames
- */
-function generateDoRuntimeWrapperModule(userMainSpecifier, classNames) {
-  const userMain = JSON.stringify(`./${userMainSpecifier}`);
-  const alarmShim = JSON.stringify(`./${DO_ALARM_SHIM_MODULE}`);
-  const wrappedClasses = classNames.map((name) => `
-export class ${name} extends wrapDurableObjectClass(user.${name}, ${JSON.stringify(name)}) {}
-`).join("");
-  return `
-import * as user from ${userMain};
-export * from ${userMain};
-
-import { wrapDurableObjectClass } from ${alarmShim};
-
-${wrappedClasses}
-`;
-}
-
 /**
  * @param {WorkerCode} workerCode
  * @param {WorkerMeta} meta
  */
 function wrapWorkerCodeForDoRuntime(workerCode, meta) {
-  const classNames = doClassNames(meta);
-  if (!classNames.length) return workerCode;
   const originalMain = workerCode.mainModule;
-  const reserved = [DO_RUNTIME_RESERVED_MODULE, DO_ALARM_SHIM_MODULE];
-  const collision = reserved.find((name) => workerCode.modules[name]);
+  const injections = doRuntimeInjectedModuleSources(originalMain, meta, DO_ALARM_SHIM_SOURCE);
+  if (!injections.length) return workerCode;
+  const collision = injections.find(([moduleName]) => Object.hasOwn(workerCode.modules, moduleName));
   if (collision) {
-    throw new DoRuntimeError(400, "reserved_module_name", `do-runtime requires reserved module name ${collision}`);
+    throw new DoRuntimeError(400, "reserved_module_name", `do-runtime requires reserved module name ${collision[0]}`);
   }
-  workerCode.modules[DO_ALARM_SHIM_MODULE] = DO_ALARM_SHIM_SOURCE;
-  workerCode.modules[DO_RUNTIME_RESERVED_MODULE] = generateDoRuntimeWrapperModule(originalMain, classNames);
+  for (const [moduleName, source] of injections) workerCode.modules[moduleName] = source;
   workerCode.mainModule = DO_RUNTIME_RESERVED_MODULE;
   return workerCode;
 }
@@ -256,7 +224,6 @@ export async function loadDoWorkerCode(env, ctx, invoke, requestId = null) {
     const { meta, ...codeBase } = bundleToWorkerCode(loaded.bundle);
     const workerCode = {
       ...codeBase,
-      allowExperimental: true,
       env: buildDoEnv(
         meta,
         loaded.ns_secrets,

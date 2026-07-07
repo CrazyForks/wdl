@@ -82,7 +82,11 @@ services. Runtime therefore treats bindings as adapters:
   decrypts `WDL-ENC:` values; tenant-facing `env` shape stays unchanged. Env
   materialization merges in fixed precedence: bundle vars, then namespace secrets, then
   worker secrets. A worker-level secret with the same name wins over a namespace-level
-  secret, which wins over a var.
+  secret, which wins over a var. Control enforces a headroomed estimate of workerd's
+  `workerLoader` serialized env budget during deploys and secret mutations. That
+  estimate includes user vars/secrets plus runtime-injected binding/workflow env values,
+  including required caller secret copies in platform/service binding props, so an
+  over-large env fails in the control plane instead of during runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
   services. The hidden backend Fetchers stay in runtime and are removed before tenant
   code observes `env`.
@@ -179,6 +183,9 @@ Data-plane bindings use their own storage:
 
 Runtime must treat Redis bundle metadata as control-authored, but still revalidates
 reserved runtime entrypoint and binding names when materializing older stored metadata.
+It also fails closed if older metadata contains Python module entries or upstream
+experimental compatibility flags, because those would otherwise reach workerd as
+opaque cold-load failures under the current stock binary.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -230,11 +237,40 @@ when a matching active tail session exists.
   binding shape changes.
 - Runtime must roll before scheduler/workflows if they depend on a new `:8088` internal
   path or dispatch body.
-- workerd upgrades can change experimental surfaces; runtime currently enables
-  `experimental` because `abortIsolate()` is required for isolate eviction.
-- `experimental` is broader than `abortIsolate()`. Tenants inherit every experimental
-  workerd surface enabled by that flag, so workerd upgrades require review of the
-  exposed surface, not only the loader/abort path.
+- Runtime does not enable workerd's broad `experimental` flag for loaded workers.
+  Historical-version eviction still injects `__WdlAbort__`, but `abortIsolate()` is
+  available without that flag in the bundled workerd baseline.
+- Removing the broad loaded-worker `experimental` flag intentionally removes access to
+  non-GA experimental-only tenant surfaces, such as irrevocable long-term stub storage.
+  Do not re-enable it as a compatibility workaround without an explicit feature design.
+- Control rejects upstream `$experimental` compatibility enable flags at deploy, and
+  runtime rejects retained metadata that still contains them. Disable-style flags such
+  as `no_*` are not part of that mirror unless upstream marks the enable flag itself
+  experimental.
+- Python Workers modules are not supported. Control rejects new `py` module manifests,
+  and runtime/do-runtime reject retained metadata that contains them instead of letting
+  workerd fail later with a mixed JS/Python bundle error.
+- The runtime workerd processes still run with process-level `--experimental` because
+  upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
+  Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
+  WorkerCode unless another upstream API explicitly requires it.
+- Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
+  env at 1 MiB. Control estimates final WorkerCode before version allocation and again
+  after commit metadata materialization, including runtime/do-runtime-injected
+  wrapper/client modules, workflow import rewrites, and generated workflow keys. Vars,
+  namespace/worker secrets, and runtime-injected binding/workflow env values are checked
+  against a headroomed `workerLoader` env budget in watched commit and secret-mutation
+  paths. Deploy and namespace-secret mutations use the version they can load; worker
+  secret mutations also recheck the forced bump inside the WATCH/COPY transaction so
+  the allocated bump version is covered before routing flips. The estimate starts from
+  JSON bytes and adds V8 two-byte string overhead for non-Latin-1 strings, so mixed
+  ASCII plus CJK or emoji secrets do not slip past control and fail later at cold-load.
+- In current stock workerd, a client disconnect during an async `ReadableStream`
+  response body may not call the stream source's `cancel()` callback. Tenant streaming
+  and SSE workers should use their own heartbeat, timeout, or application close path
+  instead of relying on disconnect-driven `cancel()` as the only resource cleanup hook.
+- workerd upgrades can still change default or compatibility-flagged runtime
+  surfaces; review the exposed surface, not only the loader/abort path.
 
 ## Tests That Protect This Module
 

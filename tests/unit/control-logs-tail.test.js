@@ -1,10 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { importRepositoryModuleFresh } from "../helpers/load-shared-module.js";
-import { delay } from "../helpers/timing.js";
+import { delay, waitUntil } from "../helpers/timing.js";
 
-function loadLogsTailHandler() {
-  return importRepositoryModuleFresh("control/handlers/logs-tail.js", [
+/** @param {{ keepaliveMs?: number }} [options] */
+function loadLogsTailHandler(options = {}) {
+  /** @type {Array<[RegExp | string, string]>} */
+  const replacements = [];
+  if (options.keepaliveMs) {
+    replacements.push([/const SSE_KEEPALIVE_MS = 5_000;/, `const SSE_KEEPALIVE_MS = ${options.keepaliveMs};`]);
+  }
+  replacements.push(
     [
       /import \{ envValueOr \} from "shared-env";/,
       "const envValueOr = (value, fallback) => value == null || value === '' ? fallback : value;",
@@ -20,9 +26,19 @@ function loadLogsTailHandler() {
           this.publishCalls = [];
           this.closed = false;
         }
-        async open() { this.opened = true; }
+        async open() {
+          this.openStarted = true;
+          this.socket = {};
+          this.openPromise = (async () => {
+            const state = /** @type {any} */ (globalThis).__tailState;
+            if (state.openBlocker) await state.openBlocker;
+            this.opened = true;
+          })();
+          await this.openPromise;
+        }
         async publish(channel, payload) { this.publishCalls.push([channel, payload]); }
         async xRead(...args) { this.xReadCalls.push(args); return null; }
+        hasOpenResources() { return Boolean(this.socket); }
         async close() { this.closed = true; }
       }
       const redisDbFromEnv = (env, name) => Number(env?.[name] || 0);`,
@@ -51,7 +67,8 @@ function loadLogsTailHandler() {
        const requireControlLog = () => state.log;
        const controlTailRedis = () => state.dataRedis || state.redis;`,
     ],
-  ]);
+  );
+  return importRepositoryModuleFresh("control/handlers/logs-tail.js", replacements);
 }
 
 function resetTailState() {
@@ -61,17 +78,16 @@ function resetTailState() {
     dataRedis: {
       /** @type {Array<[string, number, Record<string, string>]>} */
       hSetExCalls: [],
-      /** @type {Array<[string, string[]]>} */
-      hMGetCalls: [],
+      /** @type {Array<[string, number, string[]]>} */
+      hGetExCalls: [],
       /** @type {string[]} */
       hLenCalls: [],
       /** @type {Map<string, string>} */
       activeFields: new Map(),
       hLenValue: 0,
-      async hExists() { return false; },
-      /** @param {string} key @param {string[]} fields */
-      async hMGet(key, fields) {
-        this.hMGetCalls.push([key, fields]);
+      /** @param {string} key @param {number} ttlSeconds @param {string[]} fields */
+      async hGetEx(key, ttlSeconds, fields) {
+        this.hGetExCalls.push([key, ttlSeconds, fields]);
         return fields.map((field) => this.activeFields.get(field) ?? null);
       },
       /** @param {string} key */
@@ -85,6 +101,7 @@ function resetTailState() {
       },
     },
     logs: [],
+    openBlocker: null,
     log: (/** @type {string} */ level, /** @type {string} */ event, /** @type {any} */ data) => {
       /** @type {any} */ (globalThis).__tailState.logs.push({ level, event, data });
     },
@@ -192,6 +209,161 @@ test("logs tail closes after the max session lifetime so reconnect reauthorizes"
   assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
 });
 
+test("logs tail max-session watchdog closes even without stream cancel", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "50" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-watchdog",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  assert.match((await readText(reader)).text, /tail-open/);
+  await delay(80);
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
+  await reader.cancel().catch(() => {});
+});
+
+test("logs tail idle-pull watchdog closes abandoned streams before max-session", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler({ keepaliveMs: 5 });
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "1000" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-idle",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  assert.match((await readText(reader)).text, /tail-open/);
+  await waitUntil("tail idle watchdog to close session", () =>
+    /** @type {any} */ (globalThis).__tailSessions[0]?.closed === true, {
+      timeoutMs: 500, intervalMs: 5,
+    });
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_idle"));
+  await reader.cancel().catch(() => {});
+});
+
+test("logs tail idle-pull watchdog closes before the first client read", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler({ keepaliveMs: 5 });
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "1000" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-idle-before-read",
+  });
+
+  assert.equal(response.status, 200);
+  await Promise.all(waitUntilPromises);
+
+  const reader = response.body.getReader();
+  /** @type {{ done?: boolean, text: string }} */
+  let warning = { done: false, text: "" };
+  for (let i = 0; i < 5 && !warning.text.includes("session_idle"); i += 1) {
+    warning = await readText(reader);
+  }
+  assert.match(warning.text, /session_idle/);
+  assert.equal((await readText(reader)).done, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_idle"));
+});
+
+test("logs tail closes session if watchdog fires while Redis open is pending", async () => {
+  resetTailState();
+  const state = /** @type {any} */ (globalThis).__tailState;
+  let releaseOpen = () => {};
+  state.openBlocker = new Promise((resolve) => {
+    releaseOpen = () => resolve(undefined);
+  });
+
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "30" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-open-race",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const pendingRead = readText(reader);
+  const session = /** @type {any} */ (globalThis).__tailSessions[0];
+  await waitUntil("tail Redis open to start", () => session.openStarted === true, {
+    timeoutMs: 500, intervalMs: 5,
+  });
+  await delay(50);
+  releaseOpen();
+  await session.openPromise;
+  await Promise.all(waitUntilPromises);
+  await waitUntil("tail Redis session to close", () => session.closed === true, {
+    timeoutMs: 500, intervalMs: 5,
+  });
+
+  assert.equal(session.opened, true);
+  assert.equal(session.closed, true);
+  assert.match((await pendingRead).text, /session_expired/);
+  await reader.cancel().catch(() => {});
+});
+
+test("logs tail max-session watchdog closes a socket while Redis open is pending", async () => {
+  resetTailState();
+  const state = /** @type {any} */ (globalThis).__tailState;
+  let releaseOpen = () => {};
+  state.openBlocker = new Promise((resolve) => {
+    releaseOpen = () => resolve(undefined);
+  });
+
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "30" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-open-socket-race",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const pendingRead = readText(reader);
+  const session = /** @type {any} */ (globalThis).__tailSessions[0];
+  await waitUntil("tail Redis open to assign socket", () => session.socket, {
+    timeoutMs: 500, intervalMs: 5,
+  });
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(session.closed, true);
+  releaseOpen();
+  await session.openPromise;
+  assert.match((await pendingRead).text, /session_expired/);
+  await reader.cancel().catch(() => {});
+});
+
 test("logs tail emits idle keepalives below common proxy idle timeouts", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler();
@@ -265,6 +437,9 @@ test("logs tail writes activation through the data Redis client", async () => {
   await reader.cancel();
   await Promise.all(waitUntilPromises);
 
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hGetExCalls, [
+    ["logs:tail:active", 30, ["demo:foo"]],
+  ]);
   assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
     ["logs:tail:active", 30, { "demo:foo": "1" }],
   ]);
@@ -295,12 +470,12 @@ test("logs tail batches multi-worker activation while preserving the active cap"
   await reader.cancel();
   await Promise.all(waitUntilPromises);
 
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hMGetCalls, [
-    ["logs:tail:active", ["demo:bar", "demo:baz", "demo:foo"]],
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hGetExCalls, [
+    ["logs:tail:active", 30, ["demo:bar", "demo:baz", "demo:foo"]],
   ]);
   assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hLenCalls, ["logs:tail:active"]);
   assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
-    ["logs:tail:active", 30, { "demo:bar": "1", "demo:baz": "1" }],
+    ["logs:tail:active", 30, { "demo:baz": "1" }],
   ]);
 });
 

@@ -1,5 +1,6 @@
-// Pure helpers for the runtime worker. No bare-specifier imports so this
-// file can be loaded both as a workerd embedded module and by node --test.
+// Pure helpers for the runtime worker.
+
+import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 
 const BASE64_CHUNK_SIZE = 0x8000;
 const utf8Encoder = new TextEncoder();
@@ -122,9 +123,6 @@ function deepFreeze(obj) {
 const DEFAULT_COMPATIBILITY_DATE = "2026-04-24";
 const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
 const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
-// Gate for the __WdlAbort__ shim's abortIsolate import. Paired with
-// `allowExperimental: true` on the WorkerCode.
-const EXPERIMENTAL_FLAG = "experimental";
 const ROUTE_NS_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|__system__)$/;
 const RESERVED_TENANT_NS = new Set(["admin"]);
 const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
@@ -133,10 +131,9 @@ const VERSION_RE = /^v[1-9][0-9]*$/;
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
 // where workerd made it the default; newer dates reject the explicit flag.
-// `experimental` is unconditional — it is the gate for our eviction shim.
 /** @param {string} compatibilityDate */
 function platformFloorCompatFlags(compatibilityDate) {
-  const out = [EXPERIMENTAL_FLAG];
+  const out = [];
   if (compatibilityDate < ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE) {
     out.push(ENHANCED_ERROR_SERIALIZATION_FLAG);
   }
@@ -145,7 +142,7 @@ function platformFloorCompatFlags(compatibilityDate) {
 
 // Throws on non-array / non-string elements rather than silently coercing
 // to []. Control validates this shape at deploy ingress (see
-// control/lib.js#validateCompatibilityFlags), so a throw here only fires
+// control/bundle.js#validateCompatibilityFlags), so a throw here only fires
 // if Redis bytes got corrupted or were written out-of-band — a failure
 // loud enough to surface in cold-load logs, not one that silently drops
 // the user's flag list and leaves only the platform floor.
@@ -162,6 +159,11 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
     if (typeof f !== "string" || f === "") {
       throw new Error(
         `meta.compatibilityFlags entries must be non-empty strings, got ${JSON.stringify(f)}`
+      );
+    }
+    if (isWorkerdExperimentalCompatFlag(f)) {
+      throw new Error(
+        `meta.compatibilityFlags contains experimental workerd flag ${JSON.stringify(f)}, which WDL does not support for tenant workers`
       );
     }
     out.push(f);
@@ -187,14 +189,13 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
  *   exports?: { entrypoint?: unknown }[] | null,
  *   [key: string]: unknown,
  * }} WorkerBundleMeta
- * @typedef {string | { cjs: string } | { py: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
+ * @typedef {string | { cjs: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
  */
 
 /** @type {[string, (bytes: Uint8Array) => WorkerModuleValue][]} */
 const moduleDecoderEntries = [
   ["module", (bytes) => utf8Decoder.decode(bytes)],
   ["cjs", (bytes) => ({ cjs: utf8Decoder.decode(bytes) })],
-  ["py", (bytes) => ({ py: utf8Decoder.decode(bytes) })],
   ["text", (bytes) => ({ text: utf8Decoder.decode(bytes) })],
   ["json", (bytes) => ({ json: JSON.parse(utf8Decoder.decode(bytes)) })],
   ["wasm", (bytes) => ({ wasm: bytes })],
@@ -227,6 +228,9 @@ export function bundleToWorkerCode(hash) {
   for (const [path, info] of Object.entries(meta.modules)) {
     const bytes = hash[path];
     if (!bytes) throw new Error(`Bundle missing module "${path}"`);
+    if (info.type === "py") {
+      throw new Error(`Module "${path}": Python Workers modules are not supported by WDL`);
+    }
     const decoder = typeof info.type === "string" ? moduleDecoders.get(info.type) : undefined;
     if (!decoder) throw new Error(`Module "${path}": unknown type "${info.type}"`);
     modules[path] = decoder(bytes);

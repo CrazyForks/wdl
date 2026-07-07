@@ -4,7 +4,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  importRepositoryModule,
   importSpecifierReplacements,
+  moduleDataUrl,
   readRepositoryModuleSource,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
@@ -13,13 +15,35 @@ import { withMockedProperty } from "../helpers/mock-global.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
+import {
+  STUB_RUNTIME_INJECTION_SOURCES,
+  stubRuntimeInjectionSourcesUrl,
+} from "../helpers/runtime-injection-sources.js";
 import { makeTempDir, removeTempDir, withTempDir } from "../helpers/temp-dir.js";
 
 const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_WORKER_ID_URL = repositoryFileUrl("shared/worker-id.js");
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const SHARED_SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const SHARED_REDIS_URL = moduleDataUrl(`
+export class WatchError extends Error {
+  constructor(message = "watched key changed") {
+    super(message);
+    this.name = "WatchError";
+  }
+}
+`);
 const FETCH_STUB = { fetch() {} };
+const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
+  "shared-secret-envelope": SHARED_SECRET_ENVELOPE_URL,
+  "shared-errors": SHARED_ERRORS_URL,
+  "shared-version": SHARED_VERSION_URL,
+  "shared-redis": SHARED_REDIS_URL,
+}));
+const RUNTIME_LOAD_INJECTION_SOURCES_URL = stubRuntimeInjectionSourcesUrl();
 const src = readRepositoryModuleSource("runtime/load.js", [
   [
     /const REDIS_PROXY_LOAD_TIMEOUT_MS = 8000;/,
@@ -45,56 +69,12 @@ const src = readRepositoryModuleSource("runtime/load.js", [
     "shared-respond": SHARED_RESPOND_URL,
   }),
   [
-    /import D1_CLIENT_SOURCE from "runtime-d1-client-source";/,
-    'const D1_CLIENT_SOURCE = "const state = new WeakMap(); export class D1Database { constructor(stub) { state.set(this, { stub }); } }";'
+    /from "runtime-load-code-budget";/,
+    'from "./load/code-budget.js";'
   ],
   [
-    /import D1_DATA_FIELD_SOURCE from "runtime-d1-data-field-source";/,
-    'const D1_DATA_FIELD_SOURCE = "export function setDataField(target, key, value) { target[key] = value; }";'
-  ],
-  [
-    /import D1_PARAMS_SOURCE from "runtime-d1-params-source";/,
-    'const D1_PARAMS_SOURCE = "export function normalizeD1Param(value) { return value; }";'
-  ],
-  [
-    /import SQL_SPLITTER_SOURCE from "runtime-sql-splitter-source";/,
-    'const SQL_SPLITTER_SOURCE = "export function splitSqlStatements(sql) { return [{ sql, params: [] }]; }";'
-  ],
-  [
-    /import D1_TRANSPORT_SOURCE from "runtime-d1-transport-source";/,
-    'const D1_TRANSPORT_SOURCE = "import { setDataField } from \\"shared-d1-data-field\\"; export function decodeD1Transport(value) { setDataField({}, \\"ok\\", value); return value; }";'
-  ],
-  [
-    /import R2_CLIENT_SOURCE from "runtime-r2-client-source";/,
-    'const R2_CLIENT_SOURCE = "const state = new WeakMap(); export class R2Bucket { constructor(stub) { state.set(this, { stub }); } }";'
-  ],
-  [
-    /import R2_UTILS_SOURCE from "runtime-r2-utils-source";/,
-    'const R2_UTILS_SOURCE = "export const R2_OBJECT_MAX_BUFFER_BYTES = 26214400;";'
-  ],
-  [
-    /import DO_CLIENT_SOURCE from "runtime-do-client-source";/,
-    'const DO_CLIENT_SOURCE = "export class DurableObjectNamespace { constructor(stub) { this.stub = stub; } }";'
-  ],
-  [
-    /import DO_TRANSPORT_SOURCE from "runtime-do-transport-source";/,
-    'const DO_TRANSPORT_SOURCE = "export function requestSpec() {}";'
-  ],
-  [
-    /import OWNER_ENDPOINT_SOURCE from "runtime-owner-endpoint-source";/,
-    'const OWNER_ENDPOINT_SOURCE = "export function validOwnerEndpointForService() { return true; }";'
-  ],
-  [
-    /import OWNER_HINT_CACHE_SOURCE from "runtime-owner-hint-cache-source";/,
-    'const OWNER_HINT_CACHE_SOURCE = "export function createOwnerHintCache() { return {}; }";'
-  ],
-  [
-    /import REQUEST_ID_SOURCE from "runtime-request-id-source";/,
-    'const REQUEST_ID_SOURCE = "export function requestIdFromOptions() { return null; }";'
-  ],
-  [
-    /import WORKFLOWS_CLIENT_SOURCE from "runtime-workflows-client-source";/,
-    'const WORKFLOWS_CLIENT_SOURCE = "export class Workflow { constructor(metadata) { this.metadata = metadata; } }";'
+    /from "runtime-load-injection-sources";/,
+    `from ${JSON.stringify(RUNTIME_LOAD_INJECTION_SOURCES_URL)};`
   ],
   [
     /from "runtime-load-module-rewrite";/,
@@ -118,10 +98,12 @@ const ENV_BUILD_SOURCE = readRepositoryModuleSource("runtime/load/env-build.js",
 }));
 mkdirSync(LOAD_TEST_SUBMODULE_DIR, { recursive: true });
 writeFileSync(path.join(LOAD_TEST_RUNTIME_DIR, "load.js"), src);
-for (const name of ["env-build.js", "module-rewrite.js", "wrapper-generate.js"]) {
+for (const name of ["env-build.js", "code-budget.js", "module-rewrite.js", "wrapper-generate.js"]) {
   const moduleSource = name === "env-build.js"
     ? ENV_BUILD_SOURCE
     : readRepositoryModuleSource(`runtime/load/${name}`, importSpecifierReplacements({
+      "runtime-load-module-rewrite": pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "module-rewrite.js")).href,
+      "runtime-load-wrapper-generate": pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "wrapper-generate.js")).href,
       "shared-ns-pattern": SHARED_NS_PATTERN_URL,
     }));
   writeFileSync(
@@ -132,6 +114,7 @@ for (const name of ["env-build.js", "module-rewrite.js", "wrapper-generate.js"])
 after(() => removeTempDir(LOAD_TEST_DIR));
 
 const mod = await import(pathToFileURL(path.join(LOAD_TEST_RUNTIME_DIR, "load.js")).href);
+const codeBudgetMod = await import(pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "code-budget.js")).href);
 const {
   buildWorkerEnv,
   createLoaderCallback,
@@ -139,6 +122,10 @@ const {
   runtimeLoadContentTypeMatches,
   wrapWorkerCodeForHostBindings,
 } = mod;
+const {
+  estimateFinalWorkerLoaderCodeBytes,
+  injectRuntimeModulesForHostBindings,
+} = codeBudgetMod;
 
 const RUNTIME_LOAD_MAGIC = "WDLLOAD!";
 const RUNTIME_LOAD_CONTENT_TYPE = "application/vnd.wdl.runtime-load";
@@ -249,6 +236,108 @@ test("buildWorkerEnv: merges vars + secrets with worker secrets taking precedenc
       targetVersion: "v3",
       targetEntrypoint: null,
       callerNs: "demo",
+    },
+  });
+});
+
+test("buildWorkerEnv stays aligned with control env budget binding estimates", () => {
+  const meta = {
+    vars: { SHARED: "vars", ONLY_VAR: "var-only" },
+    assets: { prefix: "assets/demo/app/token/" },
+    bindings: {
+      KV1: { type: "kv", id: "sessions" },
+      ASSETS: { type: "assets" },
+      Q: { type: "queue", id: "orders", deliveryDelaySeconds: 12 },
+      DB: { type: "d1", databaseId: "d1_0123456789abcdef0123456789abcdef" },
+      BUCKET: { type: "r2", bucketName: "uploads" },
+      ROOM: { type: "do", className: "Room", doStorageId: "do_0123456789abcdef0123456789abcdef" },
+      AUTH: {
+        type: "service",
+        ns: "__platform__",
+        service: "auth",
+        version: "v3",
+        entrypoint: "Auth",
+        requiredCallerSecrets: ["API_TOKEN"],
+      },
+    },
+    workflows: [{
+      name: "orders",
+      binding: "ORDERS",
+      className: "OrderWorkflow",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }],
+  };
+  const nsSecrets = { SHARED: "ns-secret", API_TOKEN: "ns-token" };
+  const workerSecrets = { SHARED: "worker-secret", API_TOKEN: "worker-token" };
+  const doBackend = { __wdlBinding: "internal", name: "DO_BACKEND" };
+  const doOwnerNetwork = { __wdlBinding: "internal", name: "DO_OWNER_NETWORK" };
+  const workflowsBackend = { __wdlBinding: "internal", name: "WORKFLOWS_BACKEND" };
+  const ctx = {
+    exports: {
+      KV: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "kv", props }),
+      Assets: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "assets", props }),
+      QueueProducer: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "queue", props }),
+      D1Database: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "d1", props }),
+      R2Bucket: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "r2", props }),
+      ServiceBinding: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "service", props }),
+    },
+  };
+  const runtimeEnv = buildWorkerEnv(
+    meta,
+    nsSecrets,
+    workerSecrets,
+    "demo",
+    "app",
+    "v5",
+    "https://assets.example",
+    /** @type {any} */ (ctx),
+    doBackend,
+    {
+      doOwnerNetwork,
+      workflowsBackend,
+      // Record the same host-proxy payload shape that the runtime DO factory
+      // passes into Worker env so the control estimator must mirror it.
+      /** @param {{ name: string, spec: any, ns: string, worker: string, version: string }} input */
+      doBindingFactory(input) {
+        const { name, spec, ns, worker, version } = input;
+        const props = {
+          ns,
+          worker,
+          version,
+          doStorageId: spec.doStorageId,
+          binding: name,
+          className: spec.className,
+        };
+        return {
+          __wdlBinding: "do",
+          ...props,
+          hostProxy: { __wdlBinding: "do-host-proxy", props },
+        };
+      },
+    }
+  );
+
+  const estimatedEnv = estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "app",
+    version: "v5",
+    vars: meta.vars,
+    nsSecrets,
+    workerSecrets,
+    meta,
+    assetsCdnBase: "https://assets.example",
+  });
+  const jsonShape = (/** @type {unknown} */ value) => JSON.parse(JSON.stringify(value));
+  const estimatedRuntimeEnv = { ...estimatedEnv };
+  delete estimatedRuntimeEnv.__WDL_DO_ALARMS__;
+  assert.deepEqual(jsonShape(runtimeEnv), jsonShape(estimatedRuntimeEnv));
+  assert.deepEqual(jsonShape(estimatedEnv.__WDL_DO_ALARMS__), {
+    __wdlBinding: "do-alarms",
+    props: {
+      ns: "demo",
+      worker: "app",
+      version: "v5",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
     },
   });
 });
@@ -1062,7 +1151,7 @@ test("createLoaderCallback: attaches configured tail worker and always wraps mai
       assert.equal(/** @type {any} */ (workerCode.modules)["worker.js"], "export default {};");
       assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class __WdlAbort__/);
       assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ WorkerEntrypoint, abortIsolate \} from "cloudflare:workers"/);
-      assert.equal(workerCode.allowExperimental, true);
+      assert.equal("allowExperimental" in workerCode, false);
       assert.deepEqual(workerCode.tails, [{ kind: "tail-fetcher" }]);
       assert.deepEqual(workerCode.globalOutbound, { kind: "public-network" });
       assert.ok(!("meta" in workerCode), "loader callback should not propagate meta into the workerLoader object");
@@ -1372,6 +1461,105 @@ test("createLoaderCallback: aborts hung redis proxy runtime load requests", asyn
       );
       assert.equal(calls, 3);
     }
+  );
+});
+
+/** @param {{ modules: Record<string, unknown> }} workerCode */
+function workerCodeModuleBytes(workerCode) {
+  let total = 0;
+  for (const value of Object.values(workerCode.modules)) {
+    if (typeof value === "string") {
+      total += Buffer.byteLength(value, "utf8");
+      continue;
+    }
+    const record = value && typeof value === "object"
+      ? /** @type {{ cjs?: unknown }} */ (value)
+      : null;
+    if (typeof record?.cjs === "string") {
+      total += Buffer.byteLength(record.cjs, "utf8");
+      continue;
+    }
+    assert.fail(`unexpected workerCode module value ${JSON.stringify(value)}`);
+  }
+  return total;
+}
+
+test("workerLoader code estimator matches runtime wrapper injection exactly", () => {
+  const entrypoint = `Api${"A".repeat(1024)}`;
+  const source = 'import { WorkflowEntrypoint } from "cloudflare:workflows"; export default {};';
+  const meta = {
+    mainModule: "src/worker.js",
+    modules: { "src/worker.js": { type: "module" } },
+    bindings: { DB: { type: "d1", databaseId: "main" } },
+    exports: [{ entrypoint }],
+    workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
+  };
+  /** @type {{ mainModule: string, modules: Record<string, string> }} */
+  const workerCode = {
+    mainModule: meta.mainModule,
+    modules: { "src/worker.js": source },
+  };
+
+  injectRuntimeModulesForHostBindings(workerCode, meta, STUB_RUNTIME_INJECTION_SOURCES);
+
+  assert.equal(
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized: [["src/worker.js", Buffer.from(source)]],
+      meta,
+      runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+    }),
+    workerCodeModuleBytes(workerCode)
+  );
+  assert.match(
+    /** @type {string} */ (workerCode.modules["src/worker.js"]),
+    /"\.\.\/_wdl-cloudflare-workflows\.js"/
+  );
+  assert.match(/** @type {string} */ (workerCode.modules["_wdl-wrapper.js"]), new RegExp(entrypoint));
+});
+
+test("workerLoader code estimator does not rewrite CommonJS workflow strings", () => {
+  const source = 'module.exports = { label: "cloudflare:workflows" };';
+  const meta = {
+    mainModule: "src/worker.cjs",
+    modules: { "src/worker.cjs": { type: "cjs" } },
+    workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
+  };
+  /** @type {{ mainModule: string, modules: Record<string, string | { cjs: string }> }} */
+  const injectedWorkerCode = {
+    mainModule: meta.mainModule,
+    modules: { [meta.mainModule]: { cjs: source } },
+  };
+  injectRuntimeModulesForHostBindings(injectedWorkerCode, meta, STUB_RUNTIME_INJECTION_SOURCES);
+  assert.deepEqual(injectedWorkerCode.modules[meta.mainModule], { cjs: source });
+  const injectedBytes = workerCodeModuleBytes(injectedWorkerCode) - Buffer.byteLength(source, "utf8");
+
+  assert.equal(
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized: [["src/worker.cjs", Buffer.from(source)]],
+      meta,
+      runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+    }),
+    Buffer.byteLength(source, "utf8") + injectedBytes
+  );
+});
+
+test("wrapWorkerCodeForHostBindings rejects empty reserved module collisions", () => {
+  const workerCode = {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": "export default {};",
+      "_wdl-wrapper.js": "",
+    },
+  };
+
+  assert.throws(
+    () => injectRuntimeModulesForHostBindings(workerCode, {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+    }, STUB_RUNTIME_INJECTION_SOURCES),
+    /reserved module names/
   );
 });
 

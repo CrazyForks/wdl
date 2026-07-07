@@ -391,7 +391,7 @@ test("DO alarm shim: failed alarm keeps row in flight and hides getAlarm", async
   assert.equal(await wrapped.getAlarm(), null);
 });
 
-test("DO alarm shim: retry dispatch can reclaim an already in-flight row", async () => {
+test("DO alarm shim: retry dispatch reclaims an already in-flight row", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   const { storage, state } = makeDoAlarmStorage({
@@ -444,6 +444,42 @@ test("DO alarm shim: deleteAll clears alarm row and cancels backend schedule by 
   ]);
   assert.equal(state.row, null);
   assert.equal(kv.size, 0);
+});
+
+test("DO alarm shim: deleteAll skips _cf_ reserved SQL objects case-insensitively", async () => {
+  /** @type {string[]} */
+  const dropped = [];
+  const storage = {
+    sql: {
+      /** @param {string} statement */
+      exec(statement) {
+        if (statement.startsWith("CREATE TABLE")) return [];
+        if (statement.startsWith("SELECT scheduled_time")) return [];
+        if (statement.startsWith("SELECT type, name FROM sqlite_master")) {
+          return [
+            { type: "table", name: "_CF_legacy" },
+            { type: "index", name: "_Cf_legacy_idx" },
+            { type: "table", name: "tenant_table" },
+          ];
+        }
+        if (statement.startsWith("PRAGMA foreign_keys")) return [];
+        if (statement.startsWith("DROP ")) {
+          dropped.push(statement);
+          return [];
+        }
+        throw new Error(`unexpected SQL: ${statement}`);
+      },
+    },
+    async list() {
+      return new Map();
+    },
+    async delete() {},
+  };
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding([]), "Room", "alice");
+
+  await wrapped.deleteAll();
+
+  assert.deepEqual(dropped, ['DROP TABLE IF EXISTS "tenant_table"']);
 });
 
 test("DO alarm shim: deleteAll deleteAlarm false preserves alarm row without backend cancel", async () => {

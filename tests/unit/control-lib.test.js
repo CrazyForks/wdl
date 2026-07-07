@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { loadControlLib } from "../helpers/load-control-lib.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { RESERVED_NS } from "../../shared/ns-pattern.js";
+import {
+  WORKERD_EXPERIMENTAL_COMPAT_FLAGS,
+  WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION,
+} from "../../shared/workerd-compat-flags.js";
 
 const packageJson = /** @type {any} */ (readRepositoryJson("package.json"));
 const packageWorkerdDep = packageJson?.dependencies?.workerd;
@@ -239,9 +243,21 @@ test("normalizeModule: json null is allowed", () => {
   assert.equal(r.bytes.toString(), "null");
 });
 
-test("normalizeModule: cjs / py", () => {
+test("normalizeModule: cjs", () => {
   assert.equal(normalizeModule({ cjs: "module.exports = {}" }).type, "cjs");
-  assert.equal(normalizeModule({ py: "print(1)" }).type, "py");
+});
+
+test("normalizeModule: py is rejected before workerd cold-load", () => {
+  assert.throws(
+    () => normalizeModule({ py: "print(1)" }),
+    (err) => {
+      if (!(err instanceof Error)) return false;
+      const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
+      return coded.code === "python_workers_unsupported" &&
+        coded.status === 400 &&
+        /Python Workers modules are not supported by WDL/.test(coded.message);
+    }
+  );
 });
 
 test("normalizeModule: unknown shape throws", () => {
@@ -250,7 +266,7 @@ test("normalizeModule: unknown shape throws", () => {
   assert.throws(() => normalizeModule(42), /Unrecognized module value/);
 });
 
-test("prepareBundle: happy path", () => {
+test("prepareBundle: normalizes a minimal module bundle", () => {
   const { meta, normalized } = prepareBundle(
     "worker.js",
     { "worker.js": "export default {}", "data.json": { json: { k: 1 } } },
@@ -326,7 +342,7 @@ test("prepareBundle: Object.prototype binding types are unsupported", () => {
   );
 });
 
-test("prepareBundle: kv binding requires CF-style id (rejects ':', so 'foo:v' / key='bar' can't alias 'foo' / key='v:bar')", () => {
+test("prepareBundle: kv binding requires CF-style id and does not alias colon-separated ids", () => {
   assert.throws(
     () => prepareBundle("w.js", { "w.js": "x" }, { bindings: { KV1: { type: "kv" } } }),
     /kv id must match/
@@ -689,6 +705,30 @@ test("prepareBundle: compatibilityFlags preserved", () => {
   assert.deepEqual(meta.compatibilityFlags, ["nodejs_compat"]);
 });
 
+test("prepareBundle: experimental workerd compatibility flags are rejected", () => {
+  assert.throws(
+    () => prepareBundle(
+      "w.js",
+      { "w.js": "x" },
+      { compatibilityFlags: ["nodejs_compat", "unsafe_module"] }
+    ),
+    (err) => {
+      if (!(err instanceof Error)) return false;
+      const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
+      return coded.code === "experimental_compat_flag_unsupported" &&
+        coded.status === 400 &&
+        /"unsafe_module"/.test(coded.message);
+    }
+  );
+  assert.doesNotThrow(() =>
+    prepareBundle(
+      "w.js",
+      { "w.js": "x" },
+      { compatibilityFlags: ["nodejs_compat", "no_nodejs_compat"] }
+    )
+  );
+});
+
 test("prepareBundle: compatibilityDate validates shape before commit", () => {
   assert.equal(
     prepareBundle("w.js", { "w.js": "x" }, { compatibilityDate: "2026-04-24" }).meta.compatibilityDate,
@@ -710,6 +750,8 @@ test("validateCompatibilityDate rejects future and unsupported workerd dates", (
     String(unsupported.getUTCMonth() + 1).padStart(2, "0"),
     String(unsupported.getUTCDate()).padStart(2, "0"),
   ].join("-");
+  const afterUnsupported = new Date(unsupported);
+  afterUnsupported.setUTCDate(afterUnsupported.getUTCDate() + 1);
 
   assert.equal(
     validateCompatibilityDate("2026-06-20", new Date("2026-06-30T00:00:00Z")),
@@ -720,7 +762,7 @@ test("validateCompatibilityDate rejects future and unsupported workerd dates", (
     /must not be later than today UTC/
   );
   assert.throws(
-    () => validateCompatibilityDate(unsupportedDate, new Date("2026-06-30T00:00:00Z")),
+    () => validateCompatibilityDate(unsupportedDate, afterUnsupported),
     /newer than bundled workerd supports/
   );
 });
@@ -746,6 +788,28 @@ test("MAX_WORKER_COMPATIBILITY_DATE matches pinned workerd release plus seven da
     expected
   );
   assert.equal(maxWorkerCompatibilityDateFromPackageJson(JSON.stringify({ dependencies: {} })), null);
+});
+
+test("workerd experimental compat flag mirror matches pinned workerd source version", () => {
+  const regenerate = [
+    "Regenerate shared/workerd-compat-flags.js from an upstream workerd checkout:",
+    "node scripts/extract-workerd-experimental-compat-flags.mjs",
+    "/path/to/workerd/src/workerd/io/compatibility-date.capnp",
+  ].join(" ");
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION, WORKERD_VERSION, regenerate);
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("experimental"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unsafe_module"));
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 33);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);
+  assert.equal(
+    WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nonclass_entrypoint_reuses_ctx_across_invocations"),
+    false
+  );
+  assert.equal(
+    WORKERD_EXPERIMENTAL_COMPAT_FLAGS.some((flag) => flag.startsWith("no_")),
+    false,
+    "only enable flags from $experimental compatibility entries should be mirrored"
+  );
 });
 
 test("prepareBundle: compatibilityFlags rejected when not an array (would be silently dropped at runtime floor merge)", () => {
@@ -2237,7 +2301,7 @@ test("linkServiceBinding: target without exports does not expose named entrypoin
   );
 });
 
-test("linkServiceBinding: same-ns default entrypoint can bind target without exports", async () => {
+test("linkServiceBinding: same-ns default entrypoint binds target without exports", async () => {
   const spec = { type: "service", service: "neighbor" };
   await linkServiceBinding({
     callerNs: "caller", callerName: "c", bindingName: "T",

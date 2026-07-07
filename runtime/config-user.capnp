@@ -47,6 +47,8 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-tail-forwarder", esModule = embed "tail-forwarder.js"),
     (name = "runtime-load", esModule = embed "load.js"),
     (name = "runtime-load-env-build", esModule = embed "load/env-build.js"),
+    (name = "runtime-load-code-budget", esModule = embed "load/code-budget.js"),
+    (name = "runtime-load-injection-sources", esModule = embed "load/injection-sources.js"),
     (name = "runtime-load-module-rewrite", esModule = embed "load/module-rewrite.js"),
     (name = "runtime-load-wrapper-generate", esModule = embed "load/wrapper-generate.js"),
     (name = "runtime-metrics", esModule = embed "metrics.js"),
@@ -91,6 +93,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "shared-observability", esModule = embed "../shared/observability.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-respond", esModule = embed "../shared/respond.js"),
     (name = "shared-bounded-body", esModule = embed "../shared/bounded-body.js"),
     (name = "shared-request-scope", esModule = embed "../shared/request-scope.js"),
@@ -105,10 +108,7 @@ const loaderWorker :Workerd.Worker = (
   compatibilityDate = "2026-04-24",
   # service_binding_extra_handlers exposes stub.queue()/scheduled() on
   # Fetcher stubs returned by workerLoader.get(). Runtime-only flag.
-  # `experimental` is required so this worker may pass `allowExperimental: true`
-  # in its WorkerCode — loaded workers need that to import `abortIsolate` from
-  # cloudflare:workers for the historical-version eviction shim.
-  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers", "experimental"],
+  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers"],
   globalOutbound = "internal-network",
   bindings = [
     (name = "SERVICE_NAME", text = "user-runtime"),

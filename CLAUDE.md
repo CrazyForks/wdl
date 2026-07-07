@@ -73,7 +73,10 @@ shared crate `wdl-rust-common`.
   Runtime receives plaintext only in the internal load envelope after redis-proxy
   decrypts during `/runtime/load`. Env materializes in fixed precedence — vars, then
   namespace secrets, then worker secrets — so a worker secret shadows a namespace secret
-  shadows a var on the same key.
+  shadows a var on the same key. Control must keep the estimated full workerLoader env
+  — user vars/secrets plus runtime-injected binding/workflow env values such as
+  required caller secret copies — within WDL's headroomed workerd serialized env budget
+  before deploy/secret mutation, not let that fail later during cold-load.
 - **DB split is intentional.** DB 0 is control metadata, DB 1 is data-plane KV/queue/log
   streams, DB 2 is Workflows. See `docs/redis-key-layout.md`.
 - **D1/DO correctness comes from owner lease + generation fence.** Service DNS only
@@ -99,7 +102,8 @@ shared crate `wdl-rust-common`.
 - Hidden backend Fetchers and internal auth tokens for D1/DO/workflows are platform
   plumbing and must be stripped before tenant code observes `env`, request headers, or
   tenant-realm facade state.
-- EC2 instance metadata access must be blocked from tenant-running awsvpc tasks.
+- Tenant-running Fargate task roles must stay least-privilege; tenant code must not
+  receive broad cloud credentials through task metadata.
 
 ## Refactor Discipline
 
@@ -165,8 +169,10 @@ output capture, or fixture loading.
   host-only helpers in module functions or WeakMaps.
 - `workerd serve` emits raw console stdout in addition to structured tail events. The
   structured JSON log is the platform source of truth.
-- Mid-response disconnects do not reliably trip `request.signal`; use
-  `ReadableStream.cancel` plus pre-registered `ctx.waitUntil` for cleanup.
+- On current workerd, mid-response disconnects do not reliably trip `request.signal`
+  or async response-body `ReadableStream.cancel`; do not use either as the only
+  cleanup signal. Bound streaming responses with an independent timeout or an
+  explicit app-level heartbeat/close path.
 - Forwarding WebSocket `101` responses requires preserving `response.webSocket`; use the
   shared response helper instead of wrapping with `new Response(body, init)`.
 - workerd/capnp wiring traps apply to every tier's `*.capnp`, not just runtime: `workerd

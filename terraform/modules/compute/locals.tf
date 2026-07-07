@@ -1,6 +1,16 @@
 locals {
-  redis_addr     = "${var.valkey_host}:${var.valkey_port}"
-  data_redis_url = "redis://${local.redis_addr}/1"
+  redis_addr                       = "${var.valkey_host}:${var.valkey_port}"
+  data_redis_url                   = "redis://${local.redis_addr}/1"
+  stateful_runtime_memory_headroom = 128
+  redis_proxy_memory_reservation   = 64
+  d1_runtime_container_memory = coalesce(
+    var.d1_runtime_container_memory,
+    var.runtime_memory - local.stateful_runtime_memory_headroom,
+  )
+  do_runtime_container_memory = coalesce(
+    var.do_runtime_container_memory,
+    var.runtime_memory - local.redis_proxy_memory_reservation - local.stateful_runtime_memory_headroom,
+  )
 
   # PLATFORM_DOMAIN is the base hostname gateway uses to split ns from host
   # (regex builds "<ns>.<PLATFORM_DOMAIN>"). platform_domain carries a leading
@@ -86,8 +96,12 @@ locals {
     minimum_healthy_percent = 50
   }
 
-  ec2_placement_strategies = [
-    { type = "spread", field = "attribute:ecs.availability-zone" },
-    { type = "spread", field = "instanceId" },
+  fargate_stateless_capacity_provider_strategies = [
+    { capacity_provider = "FARGATE", base = 1, weight = var.od_weight },
+    { capacity_provider = "FARGATE_SPOT", weight = var.spot_weight },
+  ]
+
+  fargate_ondemand_capacity_provider_strategies = [
+    { capacity_provider = "FARGATE", weight = 1 },
   ]
 }
