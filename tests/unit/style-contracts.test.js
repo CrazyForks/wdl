@@ -1684,7 +1684,7 @@ test("Valkey 9 is the local and Terraform baseline when HFE commands are used", 
 
   assert.match(tail, /\.hGetEx\(/, "tail activation refreshes active fields with Valkey HGETEX");
   assert.match(tail, /\.hSetEx\(/, "tail activation creates active fields with Valkey HSETEX");
-  assert.match(compose, /image: valkey\/valkey:9\b/);
+  assert.match(compose, /image: valkey\/valkey:9\.1-alpine\b/);
   assert.match(valkeyTf, /engine_version = "9\.1"/);
   assert.match(valkeyTf, /parameter_group_name = "default\.valkey9"/);
 });
@@ -2305,7 +2305,7 @@ test("Docker images build from pinned public base images", () => {
 
   assert.match(workerdDockerfile, /FROM rust:1-alpine AS supervisor-build/);
   assert.match(workerdDockerfile, /FROM node:24-slim AS build/);
-  assert.match(workerdDockerfile, /FROM gcr\.io\/distroless\/base-debian12@sha256:[0-9a-f]{64} AS base/);
+  assert.match(workerdDockerfile, /FROM gcr\.io\/distroless\/base-debian13@sha256:[0-9a-f]{64} AS base/);
   assert.match(rustDockerfile, /FROM rust:1-alpine AS rust-base/);
   // The runtime stage extracts the workerd binary from the npm package so
   // it can ship without a node_modules tree or Node runtime.

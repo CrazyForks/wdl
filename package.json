@@ -37,11 +37,11 @@
   "devDependencies": {
     "@cloudflare/workers-types": "4.20260701.1",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^24.13.2",
-    "esbuild": "^0.28.0",
-    "eslint": "^10.5.0",
-    "globals": "^17.6.0",
-    "knip": "^6.17.1",
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "knip": "^6.25.0",
     "typescript": "^6.0.3"
   },
   "dependencies": {

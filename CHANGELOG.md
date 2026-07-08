@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Updated maintenance dependencies and image baselines: workerd runtime images now use distroless `base-debian13`, local and Kubernetes Valkey use `valkey/valkey:9.1-alpine`, and root development tooling moved to current patch/minor releases.
+
 ## wdl.20260701.1 - 2026-07-08
 
 - Adapted the platform to stock workerd `1.20260701.1`, splitting process-level and loaded-worker experimental usage so `--experimental` stays only on the workerLoader-owning runtimes; see `docs/compatibility.md` for the tenant-visible runtime behavior the bump carries (notably `node:tls` unsupported-option and certificate-hostname-validation changes).

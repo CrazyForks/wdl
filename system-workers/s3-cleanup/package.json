@@ -3,8 +3,5 @@
   "private": true,
   "license": "Apache-2.0",
   "author": "Sean Consulting OÜ",
-  "type": "module",
-  "devDependencies": {
-    "wrangler": "^4.85.0"
-  }
+  "type": "module"
 }

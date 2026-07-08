@@ -55,7 +55,7 @@ RUN npm run compile:workerd
 # must stay on a glibc base image.
 RUN cp -L /app/node_modules/.bin/workerd /workerd && /workerd --version
 
-FROM gcr.io/distroless/base-debian12@sha256:e7e678c88c59e70e105a46549bb3fbfb3d732ee3b4afd3a19fdab2e15afaa6b3 AS base
+FROM gcr.io/distroless/base-debian13@sha256:57c1e4c72feb5925c4763ae4f6bd2013ad3854f57eff5b60dd9acb1ce0abc66e AS base
 WORKDIR /app
 ARG WDL_VERSION
 ARG VCS_REF
