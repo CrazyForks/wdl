@@ -4,6 +4,7 @@ import {
   moduleDataUrl,
   repositoryFileUrl,
 } from "./load-shared-module.js";
+import { doProtocolDataUrl } from "./load-do-protocol.js";
 import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 
 /**
@@ -18,6 +19,8 @@ import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
  *   assertCalls: number,
  *   forgottenOwners: string[],
  *   registryError?: unknown,
+ *   registryWait?: Promise<void>,
+ *   registryWaitStarted?: (() => void),
  *   abortReject?: ((reason: unknown) => void),
  * }} DoHostActorHarnessState
  */
@@ -38,6 +41,7 @@ const DO_ACTOR_TEST_STATE = {
 doActorGlobal.__doActorTestState = DO_ACTOR_TEST_STATE;
 
 const durableObjectStub = "class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }";
+const productionProtocolUrl = doProtocolDataUrl();
 
 const loadUrl = moduleDataUrl(`
 export function loadDoWorkerCode() {
@@ -50,27 +54,28 @@ export function objectRegistryMember(invoke) {
   return [invoke.className, invoke.objectName].join(":");
 }
 export async function rememberDoObject(env, invoke) {
+  if (globalThis.__doActorTestState.registryWait) {
+    globalThis.__doActorTestState.registryWaitStarted?.();
+    await globalThis.__doActorTestState.registryWait;
+  }
   if (globalThis.__doActorTestState.registryError) throw globalThis.__doActorTestState.registryError;
   globalThis.__doActorTestState.remembered.push({ env, invoke });
 }
 `);
 
 const protocolUrl = moduleDataUrl(`
-export class DoRuntimeError extends Error {
-  constructor(status, code, message) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
+export {
+  DO_OWNERSHIP_CODE,
+  DO_OWNERSHIP_ERROR_CONTROL_HEADER,
+  DoRuntimeError,
+  buildRpcRequest,
+  doPlatformErrorResponse,
+} from ${JSON.stringify(productionProtocolUrl)};
 export function buildFacetName(invoke) {
   return [invoke.className, invoke.objectName].join(":");
 }
 export function buildAlarmRequest() { throw new Error("unexpected alarm request"); }
 export function buildForwardRequest() { throw new Error("unexpected forward request"); }
-export function doErrorResponse(err) {
-  return Response.json({ error: err?.code || "internal_error", message: err?.message || String(err) }, { status: err?.status || 500 });
-}
 export function normalizeDoConnectRequest() { throw new Error("unexpected connect normalize"); }
 export async function readLocalActorInvokeRequest() { throw new Error("unexpected actor request read"); }
 `);
@@ -131,6 +136,7 @@ const source = applyModuleReplacements(readRepositoryFile("do-runtime/actor.js")
   [/from "do-runtime-state";/g, `from ${JSON.stringify(stateUrl)};`],
   [/from "shared-errors";/g, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
   [/from "shared-observability";/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};`],
+  [/from "shared-respond";/g, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
 ]);
 
 /** @returns {DoHostActorHarnessState} */
@@ -150,6 +156,8 @@ export function resetDoHostActorHarness() {
   state.assertCalls = 0;
   state.forgottenOwners = [];
   delete state.registryError;
+  delete state.registryWait;
+  delete state.registryWaitStarted;
   delete state.abortReject;
 }
 

@@ -9,12 +9,29 @@ import {
   jsonInitResponse,
   jsonResponse,
   prometheusResponse,
+  rebuildResponseWithHeaders,
   sanitizeJsonErrorDetails,
 } from "../../shared/respond.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
+
+/** @param {Promise<unknown>} promise */
+async function settlesWithinTestWindow(promise) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve(false), 100);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
 
 test("discardResponseBody cancels response bodies", async () => {
   let cancelled = false;
@@ -39,6 +56,21 @@ test("discardResponseBody ignores cancellation failures", async () => {
   await discardResponseBody(response);
 });
 
+test("discardResponseBody does not wait for cancellation cleanup", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream({
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    },
+  }));
+
+  const settled = await settlesWithinTestWindow(discardResponseBody(response));
+
+  assert.equal(settled, true);
+  assert.equal(cancelled, true);
+});
+
 // Node's Response doesn't accept `webSocket` in init, so the 101 branch
 // is covered end-to-end by tests/integration/gateway-websocket.test.js.
 test("echoResponseWithRequestId preserves status/body/headers and stamps x-request-id", async () => {
@@ -61,6 +93,39 @@ test("echoResponseWithRequestId overwrites a pre-existing x-request-id", () => {
   });
   const out = echoResponseWithRequestId(src, "ours-id");
   assert.equal(out.headers.get("x-request-id"), "ours-id");
+});
+
+test("echoResponseWithRequestId filters copied headers before stamping the request id", () => {
+  const src = new Response(null, {
+    headers: {
+      "x-private": "hidden",
+      "x-public": "visible",
+      "x-request-id": "upstream-id",
+    },
+  });
+  const out = echoResponseWithRequestId(src, "ours-id", (headers) => {
+    headers.delete("x-private");
+    headers.delete("x-request-id");
+  });
+
+  assert.equal(out.headers.get("x-private"), null);
+  assert.equal(out.headers.get("x-public"), "visible");
+  assert.equal(out.headers.get("x-request-id"), "ours-id");
+});
+
+test("rebuildResponseWithHeaders preserves response fields while replacing headers", async () => {
+  const src = new Response("hello", {
+    status: 202,
+    statusText: "Accepted",
+    headers: { "x-old": "hidden" },
+  });
+  const out = rebuildResponseWithHeaders(src, { "x-new": "visible" });
+
+  assert.equal(out.status, 202);
+  assert.equal(out.statusText, "Accepted");
+  assert.equal(out.headers.get("x-old"), null);
+  assert.equal(out.headers.get("x-new"), "visible");
+  assert.equal(await out.text(), "hello");
 });
 
 test("jsonResponse returns JSON with the canonical content-type", async () => {

@@ -1,10 +1,12 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
+import { controlD1RuntimeClientDataUrl } from "../helpers/load-d1-protocol.js";
 import {
   applyModuleReplacements,
   moduleDataUrl,
   readRepositoryFile,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
@@ -15,11 +17,18 @@ const D1_MIGRATIONS_TEST_STATE = {
   runtimeCalls: null,
   runtimeResult: null,
   lockToken: null,
+  logs: [],
   splitStatements: null,
 };
 /** @type {typeof globalThis & { __d1MigrationTestState?: typeof D1_MIGRATIONS_TEST_STATE }} */
 const d1MigrationGlobal = globalThis;
 d1MigrationGlobal.__d1MigrationTestState = D1_MIGRATIONS_TEST_STATE;
+
+const sharedRandomIdUrl = repositoryFileUrl("shared/random-id.js");
+const sharedRedisLockUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("shared/redis-lock.js"),
+  [[/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`]]
+));
 
 const controlSharedUrl = controlSharedStubUrl(`
 export const state = {
@@ -41,7 +50,9 @@ export const state = {
       return await fn(globalThis.__d1MigrationTestState.session);
     },
   },
-  log() {},
+  log(level, event, fields) {
+    /** @type {any} */ (globalThis).__d1MigrationTestState.logs.push({ level, event, fields });
+  },
 };
 `);
 
@@ -58,22 +69,9 @@ export function splitSqlStatements(sql) {
 }
 `);
 
+const productionBackendUrl = controlD1RuntimeClientDataUrl();
 const backendUrl = moduleDataUrl(`
-export function d1RuntimeFailure(error, ns, databaseId, result, extra = {}) {
-  const body = result?.body || {};
-  return {
-    error,
-    namespace: ns,
-    databaseId,
-    message: body.message || body.error || "D1 runtime request failed",
-    upstreamCode: body.error || "d1-runtime-error",
-    upstreamCategory: body.category || "internal",
-    upstreamRetryable: body.retryable === true,
-    upstreamStatus: result?.status,
-    detail: body,
-    ...extra,
-  };
-}
+export { d1RuntimeFailure, d1RuntimeFailureLogFields } from ${JSON.stringify(productionBackendUrl)};
 export async function d1RuntimeQuery() {
   const args = Array.from(arguments);
   if (!Array.isArray(/** @type {any} */ (globalThis).__d1MigrationTestState.runtimeCalls)) {
@@ -108,6 +106,7 @@ const src = applyModuleReplacements(readRepositoryFile("control/d1-migrations.js
   [/from "control-d1-model";/, `from ${JSON.stringify(modelUrl)};`],
   [/from "control-d1-runtime-client";/, `from ${JSON.stringify(backendUrl)};`],
   [/from "control-d1-store";/, `from ${JSON.stringify(storeUrl)};`],
+  [/from "shared-redis-lock";/, `from ${JSON.stringify(sharedRedisLockUrl)};`],
 ]);
 
 const {
@@ -123,6 +122,7 @@ afterEach(() => {
   D1_MIGRATIONS_TEST_STATE.runtimeCalls = null;
   D1_MIGRATIONS_TEST_STATE.runtimeResult = null;
   D1_MIGRATIONS_TEST_STATE.lockToken = null;
+  D1_MIGRATIONS_TEST_STATE.logs = [];
   D1_MIGRATIONS_TEST_STATE.splitStatements = null;
 });
 
@@ -265,6 +265,7 @@ test("applyMigrations maps lock renewal loss to 409", async () => {
 test("applyMigrations includes empty progress when reading existing migrations fails", async () => {
   /** @type {any} */ (globalThis).__d1MigrationTestState.redis = {
     async set() { return "OK"; },
+    async delIfEq() { throw new Error("migration lock release unavailable"); },
   };
   /** @type {any} */ (globalThis).__d1MigrationTestState.runtimeResult = {
     ok: false,
@@ -288,8 +289,42 @@ test("applyMigrations includes empty progress when reading existing migrations f
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "d1_migrations_apply_failed");
+    assert.equal(body.message, "Internal error");
+    assert.equal(body.upstreamCode, "d1-runtime-unavailable");
+    assert.equal(body.upstreamCategory, "internal");
+    assert.equal(body.upstreamRetryable, false);
     assert.deepEqual(body.applied, []);
     assert.deepEqual(body.skipped, []);
+    assert.deepEqual(/** @type {any} */ (globalThis).__d1MigrationTestState.logs, [
+      {
+        level: "error",
+        event: "d1_migrations_apply_failed",
+        fields: {
+          request_id: "rid-migration-read-failure",
+          namespace: "demo",
+          database_id: "d1_main",
+          status: 503,
+          reason: "d1_migrations_apply_failed",
+          applied_count: 0,
+          skipped_count: 0,
+          upstream_status: 503,
+          upstream_code: "d1-runtime-unavailable",
+          upstream_category: "internal",
+          upstream_retryable: false,
+        },
+      },
+      {
+        level: "warn",
+        event: "d1_migration_lock_release_failed",
+        fields: {
+          request_id: "rid-migration-read-failure",
+          namespace: "demo",
+          database_id: "d1_main",
+          error_name: "Error",
+          error_message: "migration lock release unavailable",
+        },
+      },
+    ]);
   } finally {
     /** @type {any} */ (globalThis).__d1MigrationTestState.redis = null;
     /** @type {any} */ (globalThis).__d1MigrationTestState.runtimeResult = null;
@@ -306,17 +341,32 @@ test("applyMigrations includes completed progress when a later migration fails",
         /** @type {any} */ (globalThis).__d1MigrationTestState.lockToken = token;
         return "OK";
       }
-      return setCalls === 2 ? "OK" : null;
+      return "OK";
     },
   };
   /** @type {any} */ (globalThis).__d1MigrationTestState.splitStatements = (/** @type {string} */ sql) => [
     { sql, params: [] },
   ];
-  /** @type {any} */ (globalThis).__d1MigrationTestState.runtimeResult = () => ({
-    ok: true,
-    status: 200,
-    body: { success: true, results: [] },
-  });
+  /** @type {any} */ (globalThis).__d1MigrationTestState.runtimeResult = (/** @type {any[]} */ ...args) => {
+    const statements = /** @type {Array<{ sql?: string }>} */ (args[4] || []);
+    if (statements.some((statement) => statement.sql?.startsWith("alter table demo"))) {
+      return {
+        ok: false,
+        status: 503,
+        body: {
+          error: "result-unknown",
+          message: "private commit diagnostic",
+          category: "result-unknown",
+          retryable: false,
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: { success: true, results: [] },
+    };
+  };
 
   try {
     const response = await applyMigrations({
@@ -335,14 +385,36 @@ test("applyMigrations includes completed progress when a later migration fails",
       requestId: "rid-migration-partial",
     });
 
-    const body = await readJsonResponse(response, 409);
-    assert.equal(body.error, "d1_migrations_apply_lock_lost");
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "d1_migration_apply_failed");
+    assert.equal(body.message, "Internal error");
     assert.equal(body.migrationId, "0002_next.sql");
+    assert.equal(body.upstreamCode, "result-unknown");
+    assert.equal(body.upstreamCategory, "result-unknown");
+    assert.equal(body.upstreamRetryable, false);
     assert.deepEqual(
       body.applied.map((/** @type {{ id: string }} */ migration) => migration.id),
       ["0001_init.sql"]
     );
     assert.deepEqual(body.skipped, []);
+    assert.deepEqual(/** @type {any} */ (globalThis).__d1MigrationTestState.logs.at(-1), {
+      level: "error",
+      event: "d1_migration_apply_failed",
+      fields: {
+        request_id: "rid-migration-partial",
+        namespace: "demo",
+        database_id: "d1_main",
+        status: 503,
+        reason: "d1_migration_apply_failed",
+        migration_id: "0002_next.sql",
+        applied_count: 1,
+        skipped_count: 0,
+        upstream_status: 503,
+        upstream_code: "result-unknown",
+        upstream_category: "result-unknown",
+        upstream_retryable: false,
+      },
+    });
   } finally {
     /** @type {any} */ (globalThis).__d1MigrationTestState.redis = null;
     /** @type {any} */ (globalThis).__d1MigrationTestState.lockToken = null;

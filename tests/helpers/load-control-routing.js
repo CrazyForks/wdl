@@ -6,12 +6,13 @@ import {
 } from "./load-shared-module.js";
 import { controlSharedStubUrl } from "./control-shared-stub.js";
 import { compileControlGraph } from "./load-control-lib.js";
+import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 
 const {
   sharedNsUrl,
   sharedAuthRolesUrl,
   sharedQueueKeysUrl,
-  sharedVersionUrl,
+  workerContractUrl,
   sharedErrorsUrl,
   sharedRouteProjectionUrl,
   libUrl: controlLibUrl,
@@ -21,10 +22,8 @@ const {
   routePlanUrl,
 } = await compileControlGraph();
 
-const controlSharedUrl = controlSharedStubUrl(`
-export const DECLARED_HOSTS_KEY = "declared-hosts";
-export const HOST_DECLARATIONS_PREFIX = "host-declarations:";
-`);
+const controlSharedUrl = controlSharedStubUrl();
+const sharedRedisUrl = sharedRedisStubUrl();
 
 export const CONTROL_ROUTING_TEST_URL = moduleDataUrl(applyModuleReplacements(readRepositoryFile("control/routing.js"), [
   ...importSpecifierReplacements({
@@ -34,11 +33,12 @@ export const CONTROL_ROUTING_TEST_URL = moduleDataUrl(applyModuleReplacements(re
     "control-topology": topologyUrl,
     "shared-errors": sharedErrorsUrl,
     "shared-route-projection": sharedRouteProjectionUrl,
-    "shared-version": sharedVersionUrl,
+    "shared-worker-contract": workerContractUrl,
     "control-cron-index": cronIndexUrl,
     "shared-ns-pattern": sharedNsUrl,
     "shared-auth-roles": sharedAuthRolesUrl,
     "shared-queue-keys": sharedQueueKeysUrl,
+    "shared-redis": sharedRedisUrl,
     "control-routing-route-plan": routePlanUrl,
   }),
 ]));

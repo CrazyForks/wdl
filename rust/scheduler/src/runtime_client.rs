@@ -70,7 +70,17 @@ pub(crate) async fn post_runtime(
         };
     };
     let status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(error) => {
+            return RuntimeResponse {
+                status: Some(status),
+                json: None,
+                text: None,
+                error: Some(format!("failed to read runtime response body: {error}")),
+            };
+        }
+    };
     let parsed = serde_json::from_str::<JsonValue>(&text).ok();
     RuntimeResponse {
         status: Some(status),

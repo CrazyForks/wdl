@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import path from "node:path";
+import { parseAllDocuments } from "yaml";
 
 import { readRepoFile, repoPath } from "./source-scan.js";
 
@@ -50,6 +51,15 @@ export function testSourceFiles(dir) {
     }
   }
   return out;
+}
+
+/** @param {string} file */
+export function yamlDocuments(file) {
+  const documents = parseAllDocuments(readRepoFile(file), { merge: true });
+  for (const document of documents) {
+    assert.equal(document.errors.length, 0, `${file} must parse as YAML`);
+  }
+  return documents;
 }
 
 /** @param {Set<string>} [exempt] */
@@ -158,11 +168,6 @@ export function extractRegex(file, name) {
  */
 export function serviceAnchorRegex(service, anchor) {
   return new RegExp(`\\n  ${RegExp.escape(service)}:\\n    <<: \\*${RegExp.escape(anchor)}\\b`);
-}
-
-/** @param {string} service */
-export function d1RuntimeServiceRegex(service) {
-  return new RegExp(`\\n  ${RegExp.escape(service)}:\\n(?:    profiles: \\["d1-multi"\\]\\n)?    <<: \\*d1-runtime-service\\b`);
 }
 
 /**

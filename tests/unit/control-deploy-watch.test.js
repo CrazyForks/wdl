@@ -11,11 +11,15 @@ import {
   readRepositoryModuleSource,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
-import { createFakeRedisSession } from "../helpers/mocks/fake-redis.js";
+import { createFakeRedisSession, sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { realRuntimeInjectionSourcesUrl } from "../helpers/runtime-injection-sources.js";
 
-const { libUrl: controlLibUrl, lifecycleIndexesUrl } = await compileControlGraph();
+const {
+  libUrl: controlLibUrl,
+  lifecycleIndexesUrl,
+  sharedAuthRolesUrl,
+} = await compileControlGraph();
 
 /** @type {any} */
 const CONTROL_DEPLOY_TEST_STATE = {
@@ -38,6 +42,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   watchedKeys: null,
   envBudgetError: false,
   envBudgetCalls: [],
+  secretEnvelopeError: null,
   redis: null,
   logs: [],
   metrics: { increment() {}, observe() {} },
@@ -66,6 +71,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
   CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
+  CONTROL_DEPLOY_TEST_STATE.secretEnvelopeError = null;
   CONTROL_DEPLOY_TEST_STATE.logs = [];
   CONTROL_DEPLOY_TEST_STATE.metrics = { increment() {}, observe() {} };
   CONTROL_DEPLOY_TEST_STATE.service = "control";
@@ -193,36 +199,11 @@ export function parseQueueConsumers() {
 }
 `);
 
-const sharedVersionUrl = moduleDataUrl(`
-export function routesKey(ns) { return "routes:" + ns; }
-export function formatVersion(n) { return "v" + n; }
-export function parseVersion(tag) {
-  const match = /^v([1-9][0-9]*)$/.exec(tag);
-  return match ? Number(match[1]) : null;
-}
-export function bundleKey(ns, worker, version) {
-  const n = parseVersion(version);
-  if (n == null) throw new Error("invalid version tag " + JSON.stringify(version));
-  return "worker:" + ns + ":" + worker + ":v:" + n;
-}
-`);
+const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 
-const sharedRedisUrl = moduleDataUrl(`
-export class WatchError extends Error {}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
 
-const sharedNsUrl = moduleDataUrl(`
-export function isReservedNs(ns) { return typeof ns === "string" && ns.startsWith("__"); }
-export function isValidRouteNs(ns) {
-  return typeof ns === "string" &&
-    (/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(ns) || ns === "__system__");
-}
-export const ROUTES_ALLOWED_RESERVED_NS = new Set(["__system__"]);
-`);
-
-const sharedAuthRolesUrl = moduleDataUrl(`
-export const PLATFORM_TIER_RESERVED_NS = new Set(["__platform__"]);
-`);
+const sharedNsUrl = repositoryFileUrl("shared/ns-pattern.js");
 
 const controlS3Url = moduleDataUrl(`
 export async function putAsset() {
@@ -253,7 +234,17 @@ export async function resolveDatabaseRefFrom(session, ns, databaseRef) {
 }
 `);
 
+const secretEnvelopeUrl = moduleDataUrl(`
+export class SecretEnvelopeError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+`);
+
 const controlEnvBudgetUrl = moduleDataUrl(`
+import { SecretEnvelopeError } from ${JSON.stringify(secretEnvelopeUrl)};
 export class WorkerEnvBudgetError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -274,15 +265,12 @@ export function assertWorkerLoaderUserEnvBudget() {
   }
   return 0;
 }
-export async function decryptSecretHash() { return {}; }
-`);
-
-const secretEnvelopeUrl = moduleDataUrl(`
-export class SecretEnvelopeError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.code = code;
+export async function decryptSecretHash() {
+  const error = /** @type {any} */ (globalThis).__controlDeployTestState.secretEnvelopeError;
+  if (error) {
+    throw new SecretEnvelopeError(error.code, error.message);
   }
+  return {};
 }
 `);
 
@@ -331,7 +319,7 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
     "control-bundle": controlBundleUrl,
     "control-bindings": controlBindingsUrl,
     "control-topology": controlTopologyUrl,
-    "shared-version": sharedVersionUrl,
+    "shared-worker-contract": workerContractUrl,
     "shared-redis": sharedRedisUrl,
     "shared-ns-pattern": sharedNsUrl,
     "shared-auth-roles": sharedAuthRolesUrl,
@@ -691,6 +679,73 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
   }
 });
 
+test("deploy handler classifies empty service target metadata before commit", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      if (key === "routes:other" && field === "api") return "v1";
+      if (key === "worker:other:api:v:1" && field === "__meta__") return "";
+      return null;
+    },
+    async incr() {
+      throw new Error("corrupt target metadata must fail before version allocation");
+    },
+  };
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/caller/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+        bindings: {
+          API: { type: "service", ns: "other", service: "api" },
+        },
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "caller",
+    requestId: "rid-corrupt-service-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.message, "Internal error");
+  assert.ok(CONTROL_DEPLOY_TEST_STATE.logs.some((/** @type {any} */ entry) => (
+    entry.event === "deploy_rejected" &&
+    entry.fields.error_message === "Corrupt __meta__ for other/api/v1"
+  )));
+});
+
+test("deploy handler fails closed instead of hiding empty platform export metadata", async () => {
+  installPlatformAuthWarningFixture();
+  /** @param {string} key @param {string} field */
+  const corruptPlatformMetaHGet = async (key, field) => {
+    if (key === "worker:__platform__:auth:v:1" && field === "__meta__") return "";
+    return null;
+  };
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis.hGet = corruptPlatformMetaHGet;
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/caller/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "caller",
+    requestId: "rid-corrupt-platform-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.message, "Internal error");
+});
+
 test("deploy handler schedules cleanup when the first asset upload fails", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
@@ -742,7 +797,10 @@ test("deploy handler schedules cleanup when the first asset upload fails", async
       requestId: "rid-asset-upload-fail",
     });
 
-    assert.equal(response.status, 502);
+    const body = await readJsonResponse(response, 502);
+    assert.equal(body.error, "asset_upload_failed");
+    assert.equal(body.message, "Asset upload failed");
+    assert.doesNotMatch(JSON.stringify(body), /simulated upload failure/);
     assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.putAssetCalls[0].slice(0, 2), [
       {},
       "assets/demo/style.css",
@@ -917,6 +975,186 @@ test("deploy handler preserves warnings on commit env-budget rejection", async (
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = false;
+  }
+});
+
+test("deploy handler filters diagnostic aliases from rejection logs", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 10;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async hKeys() {
+      return [];
+    },
+    async hGetAll() {
+      return {};
+    },
+    async hGet() {
+      return null;
+    },
+    async incr() {
+      return 1;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/contention/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "contention",
+      requestId: "rid-deploy-contention",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "deploy_contention");
+    const rejection = CONTROL_DEPLOY_TEST_STATE.logs.find((/** @type {any} */ entry) =>
+      entry.event === "deploy_rejected"
+    );
+    assert.equal(rejection.fields.version, "v1");
+    assert.equal(rejection.fields.error_message, "exhausted 5 retries; retry later");
+    assert.equal(Object.hasOwn(rejection.fields, "message"), false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+  }
+});
+
+test("deploy handler keeps D1 ids camelCase on the wire and snake_case in logs", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async hKeys() {
+      return [];
+    },
+    async hGetAll() {
+      return {};
+    },
+    async hGet() {
+      return null;
+    },
+    async incr() {
+      return 2;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/d1-missing/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+          bindings: {
+            DB: { type: "d1", databaseId: "missing-db" },
+          },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "d1-missing",
+      requestId: "rid-deploy-d1-missing",
+    });
+
+    const body = await readJsonResponse(response, 404);
+    assert.equal(body.error, "d1_database_not_found");
+    assert.equal(body.databaseId, "missing-db");
+    const rejection = CONTROL_DEPLOY_TEST_STATE.logs.find((/** @type {any} */ entry) =>
+      entry.event === "deploy_rejected"
+    );
+    assert.equal(rejection.fields.database_id, "missing-db");
+    assert.equal(Object.hasOwn(rejection.fields, "databaseId"), false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+  }
+});
+
+test("deploy handler hides secret provider diagnostics and logs them", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+    },
+    normalized: [["worker.js", "export default {}"]],
+  };
+  /** @type {any} */ (globalThis).__controlDeployTestState.secretEnvelopeError = {
+    code: "secret_encryption_unconfigured",
+    message: "SECRET_ENVELOPE_LOCAL_KEY_B64 must decode to 32 bytes",
+  };
+
+  installPlatformAuthWarningFixture({
+    async incr() {
+      return 8;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  });
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/secret-error/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "secret-error",
+      requestId: "rid-secret-provider",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "secret_encryption_unconfigured");
+    assert.equal(body.message, "Internal error");
+    assert.equal(JSON.stringify(body).includes("SECRET_ENVELOPE_LOCAL_KEY_B64"), false);
+    assert.deepEqual(body.warnings, [{
+      binding: "AUTH",
+      platform: "auth",
+      missingCallerSecrets: ["API_TOKEN"],
+    }]);
+    assert.deepEqual(
+      CONTROL_DEPLOY_TEST_STATE.logs.find((/** @type {any} */ entry) =>
+        entry.event === "deploy_rejected"
+      ),
+      {
+        level: "error",
+        event: "deploy_rejected",
+        fields: {
+          request_id: "rid-secret-provider",
+          namespace: "tenant-a",
+          worker: "secret-error",
+          version: "v8",
+          status: 503,
+          reason: "secret_encryption_unconfigured",
+          error_message: "SECRET_ENVELOPE_LOCAL_KEY_B64 must decode to 32 bytes",
+          error_detail: "SECRET_ENVELOPE_LOCAL_KEY_B64 must decode to 32 bytes",
+        },
+      },
+    );
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.secretEnvelopeError = null;
   }
 });
 
@@ -1302,6 +1540,60 @@ test("commitWithWatch assigns stable workflow keys into bundle meta and wf:defs"
   ]);
 });
 
+test("commitWithWatch reads only workflow definitions declared by the new bundle", async () => {
+  const duplicateKey = "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  /** @type {unknown[][]} */
+  const workflowDefReads = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["wf:defs:tenant-a:orders", {
+      orders: JSON.stringify({ workflowKey: duplicateKey, className: "OrderWorkflow" }),
+      historical: "not-json",
+    }],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 0;
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      const session = makeSession();
+      const hMGet = session.hMGet.bind(session);
+      session.hMGet = async (key, fields) => {
+        workflowDefReads.push([key, [...fields]]);
+        return await hMGet(key, fields);
+      };
+      return await fn(session);
+    },
+  };
+
+  await commitWithWatch({
+    redis,
+    ns: "tenant-a",
+    name: "orders",
+    version: "v1",
+    prepared: {
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "esm" } },
+        workflows: [
+          { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+        ],
+      },
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [],
+    d1Refs: [],
+    controlEnv: {},
+  });
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.workflows[0].workflowKey,
+    duplicateKey
+  );
+  assert.deepEqual(workflowDefReads, [["wf:defs:tenant-a:orders", ["orders"]]]);
+});
+
 test("commitWithWatch checks code budget after workflow keys are materialized", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
@@ -1421,6 +1713,40 @@ test("commitWithWatch reads workflow defs with own-property discipline", async (
   ]);
 });
 
+/** @param {any} redis */
+function platformBindingCommitArgs(redis) {
+  return {
+    redis,
+    ns: "tenant-a",
+    name: "caller",
+    version: "v1",
+    prepared: {
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "esm" } },
+        bindings: {
+          PLATFORM: {
+            type: "service",
+            ns: "__platform__",
+            service: "platformApi",
+            version: "v1",
+            entrypoint: "Api",
+          },
+        },
+      },
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [{
+      binding: "PLATFORM",
+      targetNs: "__platform__",
+      targetWorker: "platformApi",
+      targetVersion: "v1",
+    }],
+    d1Refs: [],
+    controlEnv: {},
+  };
+}
+
 test("commitWithWatch rejects platform binding target drift before commit", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
@@ -1444,36 +1770,7 @@ test("commitWithWatch rejects platform binding target drift before commit", asyn
   };
 
   await assert.rejects(
-    () => commitWithWatch({
-      redis,
-      ns: "tenant-a",
-      name: "caller",
-      version: "v1",
-      prepared: {
-        meta: {
-          mainModule: "worker.js",
-          modules: { "worker.js": { type: "esm" } },
-          bindings: {
-            PLATFORM: {
-              type: "service",
-              ns: "__platform__",
-              service: "platformApi",
-              version: "v1",
-              entrypoint: "Api",
-            },
-          },
-        },
-        normalized: [["worker.js", "export default {}"]],
-      },
-      outgoingRefs: [{
-        binding: "PLATFORM",
-        targetNs: "__platform__",
-        targetWorker: "platformApi",
-        targetVersion: "v1",
-      }],
-      d1Refs: [],
-      controlEnv: {},
-    }),
+    () => commitWithWatch(platformBindingCommitArgs(redis)),
     (err) => {
       const deployErr = /** @type {any} */ (err);
       assert.equal(deployErr.code, "target_drift");
@@ -1487,6 +1784,41 @@ test("commitWithWatch rejects platform binding target drift before commit", asyn
 
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("routes:__platform__"));
+  assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker:__platform__:platformApi:v:1"));
+  assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker-delete-lock:__platform__:platformApi"));
+});
+
+test("commitWithWatch rejects empty platform binding target metadata before commit", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["routes:__platform__", { platformApi: "v1" }],
+    ["worker:__platform__:platformApi:v:1", { "__meta__": "" }],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 0;
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  await assert.rejects(
+    () => commitWithWatch(platformBindingCommitArgs(redis)),
+    (err) => {
+      const deployErr = /** @type {any} */ (err);
+      assert.equal(deployErr.code, "target_drift");
+      assert.equal(deployErr.details.target.ns, "__platform__");
+      assert.equal(deployErr.details.target.worker, "platformApi");
+      assert.equal(deployErr.details.target.version, "v1");
+      assert.equal(deployErr.details.target.reason, "bundle_missing");
+      return true;
+    }
+  );
+
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker:__platform__:platformApi:v:1"));
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker-delete-lock:__platform__:platformApi"));
 });

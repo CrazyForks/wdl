@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importRepositoryModule } from "../helpers/load-shared-module.js";
+import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 const requestIdFromOptionsStub = `const requestIdFromOptions = (options) => {
   if (!options || typeof options !== "object") return null;
@@ -20,13 +21,8 @@ const d1Facade = await importRepositoryModule("runtime/d1-client.js", [
 
 const r2Facade = await importRepositoryModule("runtime/r2-client.js", [
   [
-    /import \{\s*R2_OBJECT_MAX_BUFFER_BYTES,\s*assertR2BufferSize,\s*normalizeR2ListLimit,\s*normalizeR2ObjectKey,\s*\} from "\.\/_wdl-r2-utils\.js";/,
-    `const R2_OBJECT_MAX_BUFFER_BYTES = 26214400;
-     const assertR2BufferSize = (size, operation) => {
-       if (size > R2_OBJECT_MAX_BUFFER_BYTES) throw new TypeError("R2 " + operation + ": object too large");
-     };
-     const normalizeR2ListLimit = (limit) => limit == null ? undefined : Number(limit);
-     const normalizeR2ObjectKey = (key) => String(key);`,
+    /from "\.\/_wdl-r2-utils\.js";/,
+    `from ${JSON.stringify(repositoryFileUrl("runtime/r2-utils.js"))};`,
   ],
   [/import \{ requestIdFromOptions \} from "\.\/_wdl-request-id\.js";/, requestIdFromOptionsStub],
 ]);
@@ -82,4 +78,21 @@ test("loaded R2 facade does not expose the runtime RPC stub handle", () => {
     "put",
     "resumeMultipartUpload",
   ]);
+});
+
+test("loaded D1 and R2 facades use WeakMap intrinsics captured before tenant evaluation", async () => {
+  const fail = () => {
+    throw new Error("tenant WeakMap method was called");
+  };
+  await withMockedProperty(WeakMap.prototype, "get", fail, () =>
+    withMockedProperty(WeakMap.prototype, "has", fail, () =>
+      withMockedProperty(WeakMap.prototype, "set", fail, async () => {
+        const db = new d1Facade.D1Database({ query: async () => ({ results: [] }) });
+        assert.deepEqual(await db.prepare("SELECT 1").all(), { results: [] });
+
+        const bucket = new r2Facade.R2Bucket({ head: async () => null });
+        assert.equal(await bucket.head("key"), null);
+      })
+    )
+  );
 });

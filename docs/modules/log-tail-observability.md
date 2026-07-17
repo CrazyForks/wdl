@@ -11,6 +11,9 @@ Shared JS primitives live in `shared/observability.js`. Runtime tailing uses:
 
 - `runtime/tail-worker.js` for console/exception capture.
 - `runtime/tail-forwarder.js` for active-set checks and append POSTs.
+- The same runtime forwarder owns invocation start/finish envelope timing and
+  thrown-value normalization, so gateway dispatch and service-binding fetches emit one
+  `worker_fetch` shape.
 - `redis-proxy` logs endpoints for active tail checks and stream appends.
 - `control/handlers/logs-tail.js` for SSE sessions and heartbeat activation.
 - CLI `wdl tail` for user consumption.
@@ -134,13 +137,21 @@ Central owners:
 
 Common rules:
 
-- `x-request-id` propagates across gateway, control/runtime, loaded workers, and D1
-  where possible. Missing inbound ids are minted at ingress; dirty ids such as
-  multi-valued, control-character, or overly long ids are treated as absent. JS
-  entrypoints using `shared/request-scope.js` echo the sanitized id on responses and
-  log it as `request_id` on `request_complete`; Rust sidecars sanitize inbound ids and
-  log them where request middleware owns completion. Control's Redis `PUBLISH` path logs
-  the id locally but does not put it in the pub/sub payload.
+- `x-request-id` propagates across gateway, control/runtime, loaded workers, D1, and Workflows
+  where possible. Missing inbound ids are minted at ingress. Header adapters consider
+  only the first comma-delimited token; ids containing bytes outside visible ASCII,
+  quotes, backslashes, or more than 128 bytes are treated as absent. JS entrypoints using
+  `shared/request-scope.js` echo the sanitized id on responses and log it as
+  `request_id` on `request_complete`; Rust sidecars sanitize inbound ids and log them
+  where request middleware owns completion. Control's Redis `PUBLISH` path logs the id
+  locally but does not put it in the pub/sub payload.
+- Loaded-worker host facades receive request ids directly for ordinary handlers.
+  Persistent class entrypoints keep a small mutable diagnostic context until the
+  wrapped result settles; the wrapper inspects callable `then` values and may return a
+  normalized Promise while arranging cleanup. Concurrent or re-entrant class calls may
+  therefore observe another invocation's id. Private do-runtime fetch, alarm, and RPC
+  dispatches carry the available id in `x-request-id`. Propagation is best-effort
+  diagnostic correlation rather than an authorization or integrity boundary.
 - Logs use snake_case fields. Only `level=error` is emitted on stderr; debug/info/warn
   JSON log lines go to stdout so log routing stays identical across JS, Rust, and
   embedded workerd shims.
@@ -149,8 +160,9 @@ Common rules:
   `ts`, `service`, `level`, `event`, plus snake_case fields. JS services use
   `shared/observability.js`; Rust services use
   `wdl-rust-common::log::emit_log_line`. Error text is emitted as `error_message`;
-  secret values, raw credentials, token material, raw Redis keys, and unbounded payloads
-  are not emitted.
+  throwables that cannot be converted to text degrade to `Unknown error` instead of
+  replacing the original failure. Secret values, raw credentials, token material, raw
+  Redis keys, and unbounded payloads are not emitted.
 - Product API response bodies should use camelCase unless an endpoint explicitly
   documents a different wire contract.
 - Metrics should use bounded enumerated labels only.
@@ -160,10 +172,11 @@ Common rules:
   `request_complete` logs as `error_code` / `error_message`.
 - JS and Rust observability implementations intentionally share metric prefix `wdl`,
   request metric families `requests` / `request_duration_ms` / `request_errors`,
-  cardinality warning threshold `100`, and Prometheus content type
-  `text/plain; version=0.0.4; charset=utf-8`. The shared fixture
-  `tests/fixtures/observability-contract.json` pins those values without introducing
-  a runtime metrics owner.
+  cardinality warning threshold `100`, Prometheus content type
+  `text/plain; version=0.0.4; charset=utf-8`, and the structured-log key order, level
+  priorities, stream routing, and timestamp shape. The shared fixture
+  `tests/fixtures/observability-contract.json` pins those values without introducing a
+  runtime observability owner.
 - redis-proxy records KV payload sizes in the `kv_value_bytes` summary with only
   bounded `service`/`operation`/`kind` labels. It records value, metadata, and raw
   batch byte counts so operators can decide whether large-value offload is needed;

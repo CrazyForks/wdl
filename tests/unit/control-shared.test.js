@@ -5,62 +5,44 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
-import {
-  applyModuleReplacements,
-  moduleDataUrl,
-  readRepositoryFile,
-  repositoryFileUrl,
-} from "../helpers/load-shared-module.js";
+import { moduleDataUrl } from "../helpers/load-shared-module.js";
+import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
+import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { installMockProperty } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
-import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 
-const sharedRedisUrl = moduleDataUrl(`
+const sharedRedisUrl = sharedRedisStubUrl(`
   export class RedisClient {}
-  export class WatchError extends Error {}
   export function redisDbFromEnv() { return 0; }
 `);
 const controlS3Url = moduleDataUrl(`export function makeS3Client() { return null; }`);
 const controlR2Url = moduleDataUrl(`export function makeR2AdminClient() { return null; }`);
 const sharedAuthTokenUrl = moduleDataUrl(`export function extractToken() { return null; }`);
 const sharedAuthRolesUrl = moduleDataUrl(`export function validatePrincipalShape() { return false; }`);
-const sharedBoundedBodyUrl = repositoryFileUrl("shared/bounded-body.js");
-const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
-const sharedRandomIdUrl = repositoryFileUrl("shared/random-id.js");
 const sharedQueueKeysUrl = moduleDataUrl(`export function queueStreamKey() { return ""; }`);
-const sharedRespondUrl = moduleDataUrl(readRepositoryFile("shared/respond.js"));
-const controlLibUrl = moduleDataUrl(`export function deleteLockKey(ns, worker) { return \`worker-delete-lock:\${ns}:\${worker}\`; }`);
-const sharedS3CleanupLifecycleUrl = repositoryFileUrl("shared/s3-cleanup-lifecycle.js");
+const { controlSharedUrl, controlWorkflowsClientUrl } = compileControlSharedGraph({
+  sharedRedisUrl,
+  controlS3Url,
+  controlR2Url,
+  sharedAuthTokenUrl,
+  sharedAuthRolesUrl,
+  sharedQueueKeysUrl,
+});
+const { postWorkflowsInternalRequest } = await import(controlWorkflowsClientUrl);
 // Use the same stub constructor imported by control/shared.js so
 // runOptimistic's `instanceof WatchError` check observes the test error.
 const { WatchError: ControlSharedWatchError } = await import(sharedRedisUrl);
 
-const rewritten = applyModuleReplacements(readRepositoryFile("control/shared.js"), [
-  [/from "shared-redis"/g, `from ${JSON.stringify(sharedRedisUrl)}`],
-  [/from "control-s3"/g, `from ${JSON.stringify(controlS3Url)}`],
-  [/from "control-r2"/g, `from ${JSON.stringify(controlR2Url)}`],
-  [/from "shared-auth-token"/g, `from ${JSON.stringify(sharedAuthTokenUrl)}`],
-  [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
-  [/from "shared-bounded-body"/g, `from ${JSON.stringify(sharedBoundedBodyUrl)}`],
-  [/from "shared-errors"/g, `from ${JSON.stringify(sharedErrorsUrl)}`],
-  [/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`],
-  [/from "shared-queue-keys"/g, `from ${JSON.stringify(sharedQueueKeysUrl)}`],
-  [/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`],
-  [/from "control-lib"/g, `from ${JSON.stringify(controlLibUrl)}`],
-  [/from "shared-s3-cleanup-lifecycle"/g, `from ${JSON.stringify(sharedS3CleanupLifecycleUrl)}`],
-  [/from "shared-internal-auth"/g, `from ${JSON.stringify(sharedInternalAuthUrl())}`],
-  [/from "shared-observability"/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)}`],
-]);
-
 const {
   authErrorBody,
   authPolicyResponse,
+  acquireDeleteLock,
   assertWorkflowDeleteAllowed,
   cleanupDoAlarmsForWorker,
+  codedErrorLogFields,
   codedErrorResponse,
   ControlAbort,
   controlAbortResponse,
@@ -69,8 +51,9 @@ const {
   rebuildDeclaredHostIndexes,
   releaseDeleteLock,
   runOptimistic,
+  secretEnvelopeErrorResponse,
   state,
-} = await import(moduleDataUrl(rewritten));
+} = await import(controlSharedUrl);
 
 /**
  * @param {import("node:test").TestContext} t
@@ -558,7 +541,12 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
   };
 
   await assert.rejects(
-    () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", version: "v2" }),
+    () => assertWorkflowDeleteAllowed({
+      ns: "demo",
+      worker: "api",
+      version: "v2",
+      requestId: "rid-lifecycle-failure",
+    }),
     (err) => {
       assert.ok(err instanceof ControlAbort);
       const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
@@ -576,6 +564,7 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
       namespace: "demo",
       worker: "api",
       version: "v2",
+      request_id: "rid-lifecycle-failure",
       error_message: "connect ECONNREFUSED workflows",
     },
   });
@@ -612,21 +601,21 @@ test("assertWorkflowDeleteAllowed preserves active workflow blockers", async (t)
   );
 });
 
-test("cleanupDoAlarmsForWorker uses a bounded workflows fetch signal", async (t) => {
+test("shared workflows calls preserve endpoint-specific timeout behavior", async (t) => {
   restoreControlSharedStateAfter(t);
   state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
-  /** @type {number | null} */
-  let timeoutMs = null;
+  /** @type {number[]} */
+  const timeoutMs = [];
   /** @type {AbortSignal[]} */
   const timeoutSignals = [];
   /** @type {ReturnType<typeof setTimeout>[]} */
   const timeoutHandles = [];
-  /** @type {AbortSignal | undefined} */
-  let fetchSignal;
-  /** @type {unknown} */
-  let cleanupBody = null;
+  /** @type {AbortSignal[]} */
+  const fetchSignals = [];
+  /** @type {Record<string, unknown>} */
+  const requestBodies = {};
   const restoreTimeout = installMockProperty(AbortSignal, "timeout", (ms) => {
-    timeoutMs = ms;
+    timeoutMs.push(ms);
     const controller = new AbortController();
     const handle = setTimeout(() => {
       controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
@@ -637,28 +626,67 @@ test("cleanupDoAlarmsForWorker uses a bounded workflows fetch signal", async (t)
   });
   state.workflows = {
     /**
-     * @param {RequestInfo | URL} _url
+     * @param {RequestInfo | URL} url
      * @param {RequestInit | undefined} init
     */
-    async fetch(_url, init) {
-      fetchSignal = init?.signal ?? undefined;
+    async fetch(url, init) {
       assert.equal(new Headers(init?.headers).get("x-wdl-internal-auth"), TEST_INTERNAL_AUTH_TOKEN);
-      cleanupBody = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
+      const endpoint = String(url);
+      if (endpoint.endsWith("/lifecycle/check-delete")) {
+        assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-lifecycle");
+        assert.equal(init?.signal, undefined);
+        requestBodies.lifecycle = parseJsonObjectRequestBody(init, "workflow lifecycle request body");
+        return Response.json({ allowed: true });
+      }
+      assert.ok(init?.signal instanceof AbortSignal);
+      assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-cleanup");
+      fetchSignals.push(init.signal);
+      requestBodies.cleanup = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
       return Response.json({ ok: true });
     },
   };
 
   try {
-    await cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" });
+    await assertWorkflowDeleteAllowed({
+      ns: "demo", worker: "api", version: "v2", requestId: "rid-lifecycle",
+    });
+    await cleanupDoAlarmsForWorker({
+      ns: "demo", worker: "api", doStorageId: "do_old", requestId: "rid-cleanup",
+    });
   } finally {
     for (const handle of timeoutHandles) clearTimeout(handle);
     restoreTimeout();
   }
 
-  assert.equal(timeoutMs, 5_000);
+  assert.deepEqual(timeoutMs, [5_000]);
   assert.equal(timeoutSignals.length, 1);
-  assert.equal(timeoutSignals[0], fetchSignal);
-  assert.deepEqual(cleanupBody, { ns: "demo", worker: "api", doStorageId: "do_old" });
+  assert.deepEqual(timeoutSignals, fetchSignals);
+  assert.deepEqual(requestBodies, {
+    lifecycle: { ns: "demo", worker: "api", version: "v2" },
+    cleanup: { ns: "demo", worker: "api", doStorageId: "do_old" },
+  });
+});
+
+test("workflows transport requires an explicit timeout selection at runtime", async () => {
+  let fetchCalls = 0;
+  await assert.rejects(
+    postWorkflowsInternalRequest({
+      workflows: {
+        async fetch() {
+          fetchCalls += 1;
+          return Response.json({ ok: true });
+        },
+      },
+      headers: () => ({ "content-type": "application/json" }),
+      endpoint: "workflows/test",
+      body: {},
+      logEvent: "workflow_test_failed",
+      timeoutMs: /** @type {any} */ (undefined),
+      makeError: (/** @type {"unavailable" | "request_failed"} */ failure) => new Error(failure),
+    }),
+    /request_failed/
+  );
+  assert.equal(fetchCalls, 0);
 });
 
 test("codedErrorResponse preserves semantic status/code with a fallback code", async () => {
@@ -674,7 +702,7 @@ test("codedErrorResponse preserves semantic status/code with a fallback code", a
   });
 });
 
-test("codedErrorResponse falls back to detail message for non-ControlAbort coded errors", async () => {
+test("codedErrorResponse hides diagnostic messages on coded server errors", async () => {
   const err = {
     status: 503,
     code: "workflow_backend_invalid_response",
@@ -688,8 +716,93 @@ test("codedErrorResponse falls back to detail message for non-ControlAbort coded
   await assertJsonResponse(res, 503, {
     upstreamStatus: 200,
     error: "workflow_backend_invalid_response",
-    message: "Workflow backend returned a malformed response",
+    message: "Internal error",
   });
+});
+
+test("codedErrorResponse keeps safe server context but strips diagnostic detail fields", async () => {
+  const err = new ControlAbort(500, "corrupt_meta", {
+    namespace: "demo",
+    worker: "api",
+    stage: "retained_meta_parse",
+    detail: "Unexpected token near secret bytes",
+    error_detail: "provider diagnostic",
+  });
+  const res = controlAbortResponse(err);
+
+  await assertJsonResponse(res, 500, {
+    namespace: "demo",
+    worker: "api",
+    error: "corrupt_meta",
+    message: "Internal error",
+  });
+});
+
+test("codedErrorLogFields preserves bounded server diagnostics at error level callers", () => {
+  const err = new ControlAbort(500, "corrupt_meta", {
+    message: "Corrupt __meta__ for demo/api/v2",
+    version: "v2",
+    stage: "bundle_meta_parse",
+    detail: "__meta__ is not valid JSON",
+  });
+
+  assert.deepEqual(codedErrorLogFields(err), {
+    status: 500,
+    reason: "corrupt_meta",
+    error_message: "Corrupt __meta__ for demo/api/v2",
+    metadata_version: "v2",
+    stage: "bundle_meta_parse",
+    error_detail: "__meta__ is not valid JSON",
+  });
+});
+
+test("codedErrorLogFields bounds structured diagnostic strings", () => {
+  const longValue = "x".repeat(4096);
+  const err = new ControlAbort(500, longValue, {
+    message: longValue,
+    version: longValue,
+    stage: longValue,
+    detail: longValue,
+  });
+
+  const fields = codedErrorLogFields(err, err.code, {
+    context: { ...err.details, safe_context: "kept" },
+  });
+  assert.equal(fields.safe_context, "kept");
+  for (const alias of ["message", "detail", "version"]) {
+    assert.equal(Object.hasOwn(fields, alias), false, alias);
+  }
+  for (const key of ["reason", "error_message", "metadata_version", "stage", "error_detail"]) {
+    assert.equal(/** @type {string} */ (fields[key]).length, 2048, key);
+    assert.match(/** @type {string} */ (fields[key]), /\.\.\.$/, key);
+  }
+});
+
+test("secretEnvelopeErrorResponse bounds the final structured log diagnostics", async () => {
+  const longValue = "x".repeat(4096);
+  /** @type {Array<{ level: string, event: string, fields: Record<string, unknown> }>} */
+  const logs = [];
+  const err = Object.assign(new Error(longValue), { code: "secret_provider_error" });
+
+  const response = secretEnvelopeErrorResponse({
+    err: /** @type {any} */ (err),
+    log(/** @type {string} */ level, /** @type {string} */ event, /** @type {Record<string, unknown>} */ fields) {
+      logs.push({ level, event, fields });
+    },
+    event: "secret_mutation_rejected",
+    fields: { request_id: "rid-long-diagnostic" },
+  });
+
+  await assertJsonResponse(response, 503, {
+    error: "secret_provider_error",
+    message: "Internal error",
+  });
+  assert.equal(logs.length, 1);
+  const fields = logs[0].fields;
+  assert.equal(/** @type {string} */ (fields.error_message).length, 2048);
+  assert.equal(/** @type {string} */ (fields.error_detail).length, 2048);
+  assert.match(/** @type {string} */ (fields.error_message), /\.\.\.$/);
+  assert.match(/** @type {string} */ (fields.error_detail), /\.\.\.$/);
 });
 
 test("codedErrorResponse strips only top-level wire-reserved detail fields", async () => {
@@ -802,6 +915,25 @@ test("readJsonBody: streamed body over maxBytes fails while reading", async () =
   });
 });
 
+test("acquireDeleteLock stores a kind-prefixed random token", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const token = await acquireDeleteLock({
+    /** @param {unknown[]} args */
+    async set(...args) {
+      calls.push(args);
+      return "OK";
+    },
+  }, "demo", "api", "version");
+
+  assert.match(token || "", /^version:[0-9a-f]{32}$/);
+  assert.deepEqual(calls, [[
+    "worker-delete-lock:demo:api",
+    token,
+    { nx: true, ttl: 30 },
+  ]]);
+});
+
 test("releaseDeleteLock uses token-scoped DELIFEQ", async (t) => {
   restoreControlSharedStateAfter(t);
   /** @type {unknown[][]} */
@@ -816,8 +948,8 @@ test("releaseDeleteLock uses token-scoped DELIFEQ", async (t) => {
       calls.push(args);
       return 1;
     },
-  }, "demo", "api", "token-a", "rid-delete");
+  }, "demo", "api", "whole:token-a", "rid-delete");
 
-  assert.deepEqual(calls, [["worker-delete-lock:demo:api", "token-a"]]);
+  assert.deepEqual(calls, [["worker-delete-lock:demo:api", "whole:token-a"]]);
   assert.deepEqual(logs, []);
 });

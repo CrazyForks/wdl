@@ -2,31 +2,63 @@ import {
   CLASS_NAME_RE,
   METHOD_NAME_RE,
   HEADER_NAME_RE,
-  WORKER_NAME_RE,
-  NS_FIELD_RE,
   STORAGE_ID_RE,
-  VERSION_RE,
   HOST_ID_RE,
   DO_HOST_SHARD_COUNT,
   MAX_ID_BYTES,
 } from "do-runtime-protocol-wire-grammar";
-import { DoRuntimeError } from "do-runtime-protocol-errors";
-import { hostIdForObject, shardForObjectName } from "do-runtime-protocol-identity";
+import { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
+import {
+  hostIdForObject,
+  isWellFormedUnicodeString,
+  shardForObjectName,
+} from "do-runtime-protocol-identity";
 import { formatWorkerId } from "shared-worker-id";
-import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 import {
   BodyTooLargeError,
   readBoundedBytes as readRequestBoundedBytes,
   readBoundedText as readRequestBoundedText,
 } from "shared-bounded-body";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
+import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
+import { parseVersion } from "shared-worker-contract";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
-export { hostIdForObject, hostIdForShard, shardForObjectName } from "do-runtime-protocol-identity";
+export {
+  hostIdForObject,
+  hostIdForShard,
+  isWellFormedUnicodeString,
+  shardForObjectName,
+} from "do-runtime-protocol-identity";
 
-const MAX_MODULE_COUNT = 128;
-const MAX_MODULE_SOURCE_BYTES = 1024 * 1024;
+export const DO_OWNERSHIP_CODE = Object.freeze({
+  OWNER_CLAIM_RACED: "owner_claim_raced",
+  OWNER_FENCE_MISSING: "owner_fence_missing",
+  STALE_OWNER_GENERATION: "stale_owner_generation",
+  OWNER_LEASE_EXPIRED: "owner_lease_expired",
+  STALE_OWNER_STORAGE: "stale_owner_storage",
+  OWNER_LEASE_TOO_SHORT: "owner_lease_too_short",
+  OWNER_RENEW_RACED: "owner_renew_raced",
+  OWNER_RELEASE_RACED: "owner_release_raced",
+  OWNER_UNAVAILABLE: "owner_unavailable",
+  OWNER_ENDPOINT_MISSING: "owner_endpoint_missing",
+  FORWARD_HOP_EXHAUSTED: "forward_hop_exhausted",
+  TASK_DRAINING: "task_draining",
+});
+export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
+/** @type {Set<string>} */
+const DO_OWNERSHIP_CODES = new Set(Object.values(DO_OWNERSHIP_CODE));
+
+/** @param {unknown} err */
+export function doPlatformErrorResponse(err) {
+  const response = doErrorResponse(err);
+  if (err instanceof DoRuntimeError && DO_OWNERSHIP_CODES.has(err.code)) {
+    response.headers.set(DO_OWNERSHIP_ERROR_CONTROL_HEADER, err.code);
+  }
+  return response;
+}
+
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 const MAX_REQUEST_HEADER_COUNT = 128;
@@ -36,6 +68,8 @@ const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const ALARM_INTERNAL_URL = "https://do.internal/__wdl_alarm";
 const ALARM_INTERNAL_HEADER = "x-wdl-do-internal-alarm";
+const RPC_INTERNAL_URL = "https://do.internal/__wdl_rpc";
+const RPC_INTERNAL_HEADER = "x-wdl-do-internal-rpc";
 const CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
   worker: "x-wdl-do-worker",
@@ -58,10 +92,12 @@ const OWNER_HINT_PROTOCOL_HEADERS = [
 ];
 const CONNECT_INTERNAL_HEADER_NAMES = new Set([
   INTERNAL_AUTH_HEADER,
+  DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   ...Object.values(CONNECT_HEADERS),
   ...OWNER_HINT_PROTOCOL_HEADERS,
   "x-wdl-do-forwarded",
   "x-wdl-do-hop-count",
+  RPC_INTERNAL_HEADER,
 ]);
 const LOCAL_ACTOR_ENVELOPE_HEADER = "x-wdl-do-local-envelope";
 const LOCAL_ACTOR_ENVELOPE_MARKER = "binary";
@@ -70,18 +106,15 @@ const LOCAL_ACTOR_ENVELOPE_MARKER = "binary";
  * @typedef {Record<string, unknown>} JsonRecord
  * @typedef {{ ownerKey: string, taskId: string, generation: number }} OwnerFence
  * @typedef {{ ns: string, worker: string, version: string, doStorageId: string, workerId: string }} BundleSource
- * @typedef {{ workerId: string, workerCode: JsonRecord }} InlineWorkerSource
- * @typedef {BundleSource | InlineWorkerSource} InvokeSource
  * @typedef {{ className: string, objectName: string }} ObjectTarget
  * @typedef {{ method: string, url: string, headers: Array<[string, string]>, bodyBytes?: Uint8Array, bodyBase64?: undefined, bodyText?: undefined }} RequestSpec
  * @typedef {{ retryCount: number, isRetry: boolean, token?: string }} AlarmInfo
  * @typedef {{ method: string, args: unknown[] }} RpcInfo
- * @typedef {InvokeSource & { kind: "fetch", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, request: RequestSpec }} FetchInvoke
- * @typedef {InvokeSource & { kind: "alarm", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, alarm: AlarmInfo }} AlarmInvoke
- * @typedef {InvokeSource & { kind: "rpc", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, rpc: RpcInfo }} RpcInvoke
+ * @typedef {BundleSource & { kind: "fetch", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, request: RequestSpec }} FetchInvoke
+ * @typedef {BundleSource & { kind: "alarm", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, alarm: AlarmInfo }} AlarmInvoke
+ * @typedef {BundleSource & { kind: "rpc", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, rpc: RpcInfo }} RpcInvoke
  * @typedef {FetchInvoke | AlarmInvoke | RpcInvoke} DoInvoke
  * @typedef {Record<string, unknown> & { request?: Record<string, unknown> & { bodyBytes?: Uint8Array } }} EnvelopeInvoke
- * @typedef {{ allowInlineWorkerCode?: boolean }} NormalizeOptions
  */
 
 /**
@@ -162,6 +195,9 @@ function requireRecord(value, field) {
 function requireString(value, field, { maxBytes = MAX_ID_BYTES, pattern = null } = {}) {
   if (typeof value !== "string" || value.length === 0) {
     throw new DoRuntimeError(400, "invalid_request", `${field} must be a non-empty string`);
+  }
+  if (!isWellFormedUnicodeString(value)) {
+    throw new DoRuntimeError(400, "invalid_request", `${field} must contain well-formed Unicode`);
   }
   if (byteLength(value) > maxBytes) {
     throw new DoRuntimeError(400, "invalid_request", `${field} is too large`);
@@ -346,8 +382,12 @@ function normalizeInvokeKind(value) {
  */
 function normalizeAlarmInfo(value) {
   const input = value == null ? {} : requireRecord(value, "alarm");
-  const retryCount = input.retryCount == null ? 0 : Number(input.retryCount);
-  if (!Number.isInteger(retryCount) || retryCount < 0) {
+  const retryCount = input.retryCount == null ? 0 : input.retryCount;
+  if (
+    typeof retryCount !== "number" ||
+    !Number.isInteger(retryCount) ||
+    retryCount < 0
+  ) {
     throw new DoRuntimeError(400, "invalid_request", "alarm.retryCount must be a non-negative integer");
   }
   const token = input.token == null ? undefined : requireString(input.token, "alarm.token");
@@ -390,8 +430,8 @@ function normalizeOwnerFence(value) {
   if (value == null) return null;
   const input = requireRecord(value, "owner");
   const generation = Number(input.generation);
-  if (!Number.isInteger(generation) || generation < 0) {
-    throw new DoRuntimeError(400, "invalid_request", "owner.generation must be a non-negative integer");
+  if (!Number.isSafeInteger(generation) || generation <= 0) {
+    throw new DoRuntimeError(400, "invalid_request", "owner.generation must be a positive safe integer");
   }
   return {
     ownerKey: requireString(input.ownerKey, "owner.ownerKey"),
@@ -421,18 +461,15 @@ function parseHostId(value) {
 
 /**
  * @param {unknown} value
- * @param {InvokeSource} source
+ * @param {BundleSource} source
  * @param {ObjectTarget} input
  */
 function normalizeHostId(value, source, input) {
   const parsed = parseHostId(value);
   if (
-    "ns" in source &&
-    (
-      parsed.doStorageId !== source.doStorageId ||
-      parsed.className !== input.className ||
-      parsed.shard !== shardForObjectName(input.objectName)
-    )
+    parsed.doStorageId !== source.doStorageId ||
+    parsed.className !== input.className ||
+    parsed.shard !== shardForObjectName(input.objectName)
   ) {
     throw new DoRuntimeError(400, "invalid_request", "hostId does not match object shard");
   }
@@ -440,70 +477,19 @@ function normalizeHostId(value, source, input) {
 }
 
 /**
- * @param {unknown} value
- * @returns {JsonRecord}
- */
-function normalizeWorkerCode(value) {
-  const input = requireRecord(value, "workerCode");
-  const modules = requireRecord(input.modules, "workerCode.modules");
-  const entries = Object.entries(modules);
-  if (entries.length === 0) {
-    throw new DoRuntimeError(400, "invalid_request", "workerCode.modules must not be empty");
-  }
-  if (entries.length > MAX_MODULE_COUNT) {
-    throw new DoRuntimeError(400, "invalid_request", "workerCode.modules has too many modules");
-  }
-  /** @type {Record<string, string>} */
-  const normalizedModules = {};
-  for (const [name, source] of entries) {
-    const moduleName = requireString(name, "workerCode module name", { maxBytes: 512 });
-    if (moduleName.includes("..")) {
-      throw new DoRuntimeError(400, "invalid_request", "workerCode module names must not contain ..");
-    }
-    if (typeof source !== "string") {
-      throw new DoRuntimeError(400, "invalid_request", `workerCode.modules.${moduleName} must be a string`);
-    }
-    if (byteLength(source) > MAX_MODULE_SOURCE_BYTES) {
-      throw new DoRuntimeError(400, "invalid_request", `workerCode.modules.${moduleName} is too large`);
-    }
-    normalizedModules[moduleName] = source;
-  }
-  const mainModule = requireString(input.mainModule, "workerCode.mainModule", { maxBytes: 512 });
-  if (!Object.hasOwn(normalizedModules, mainModule)) {
-    throw new DoRuntimeError(400, "invalid_request", "workerCode.mainModule must reference a module");
-  }
-  const compatibilityDate = input.compatibilityDate == null
-    ? "2026-04-24"
-    : requireString(input.compatibilityDate, "workerCode.compatibilityDate", { maxBytes: 64 });
-  const compatibilityFlags = Array.isArray(input.compatibilityFlags)
-    ? input.compatibilityFlags.map((flag, index) => requireString(flag, `workerCode.compatibilityFlags[${index}]`, { maxBytes: 128 }))
-    : ["nodejs_compat"];
-  const experimentalFlag = firstWorkerdExperimentalCompatFlag(compatibilityFlags);
-  if (experimentalFlag) {
-    throw new DoRuntimeError(
-      400,
-      "experimental_compat_flag_unsupported",
-      `workerCode.compatibilityFlags contains experimental workerd flag ${JSON.stringify(experimentalFlag)}, which WDL does not support for tenant workers`
-    );
-  }
-  const env = input.env == null ? {} : requireRecord(input.env, "workerCode.env");
-  return {
-    compatibilityDate,
-    compatibilityFlags,
-    mainModule,
-    modules: normalizedModules,
-    env,
-  };
-}
-
-/**
  * @param {JsonRecord} input
  * @returns {BundleSource}
  */
 function normalizeBundleSource(input) {
-  const ns = requireString(input.ns, "ns", { pattern: NS_FIELD_RE });
+  const ns = requireString(input.ns, "ns");
+  if (!isValidRuntimeLoadNs(ns)) {
+    throw new DoRuntimeError(400, "invalid_request", "ns is not valid");
+  }
   const worker = requireString(input.worker, "worker", { pattern: WORKER_NAME_RE });
-  const version = requireString(String(input.version ?? ""), "version", { pattern: VERSION_RE });
+  const version = requireString(input.version, "version");
+  if (parseVersion(version) == null) {
+    throw new DoRuntimeError(400, "invalid_request", "version is not valid");
+  }
   const doStorageId = requireString(input.doStorageId, "doStorageId", { pattern: STORAGE_ID_RE });
   return {
     ns,
@@ -516,40 +502,31 @@ function normalizeBundleSource(input) {
 
 /**
  * @param {unknown} value
- * @param {NormalizeOptions} [options]
  * @returns {DoInvoke}
  */
-export function normalizeDoInvokeRequest(value, options = {}) {
+export function normalizeDoInvokeRequest(value) {
   const input = requireRecord(value, "body");
-  const allowInlineWorkerCode = options.allowInlineWorkerCode === true;
-  const hasInlineWorkerCode = input.workerCode != null;
-  if (hasInlineWorkerCode && !allowInlineWorkerCode) {
-    throw new DoRuntimeError(400, "invalid_request", "workerCode is only accepted when DO_TEST_HOOKS=1");
+  if (input.workerCode != null) {
+    throw new DoRuntimeError(400, "invalid_request", "workerCode is not accepted by the DO invoke protocol");
   }
-  /** @type {InvokeSource} */
-  const source = hasInlineWorkerCode
-    ? {
-        workerId: requireString(input.workerId, "workerId"),
-        workerCode: normalizeWorkerCode(input.workerCode),
-      }
-    : normalizeBundleSource(input);
+  const source = normalizeBundleSource(input);
   const kind = normalizeInvokeKind(input.kind);
   const className = requireString(input.className, "className", { pattern: CLASS_NAME_RE });
   const objectName = requireString(input.objectName, "objectName");
   const base = {
     kind,
     hostId: input.hostId == null
-      ? defaultHostId(source, { className, objectName })
+      ? hostIdForObject(source.doStorageId, className, objectName)
       : normalizeHostId(input.hostId, source, { className, objectName }),
     className,
     objectName,
-    props: "ns" in source ? {
+    props: {
       ns: source.ns,
       worker: source.worker,
       version: source.version,
       doStorageId: source.doStorageId,
       className,
-    } : {},
+    },
     ...(input.owner == null ? {} : { owner: /** @type {OwnerFence} */ (normalizeOwnerFence(input.owner)) }),
     ...source,
   };
@@ -591,17 +568,6 @@ export function normalizeDoConnectRequest(request) {
   return normalizeDoInvokeRequest(body);
 }
 
-/**
- * @param {InvokeSource} source
- * @param {ObjectTarget} input
- */
-function defaultHostId(source, input) {
-  if (!("ns" in source) || !source.ns || !source.worker) {
-    throw new DoRuntimeError(400, "invalid_request", "hostId is required for inline workerCode test hooks");
-  }
-  return hostIdForObject(source.doStorageId, input.className, input.objectName);
-}
-
 /** @param {DoInvoke} invoke */
 export function buildFacetName(invoke) {
   return `${invoke.className}:${invoke.objectName}`;
@@ -625,6 +591,7 @@ export function buildForwardRequest(spec) {
   // User-controlled DO fetches must not be able to spoof internal Workflows
   // alarm delivery; only the alarm builder may attach this.
   request.headers.delete(ALARM_INTERNAL_HEADER);
+  request.headers.delete(RPC_INTERNAL_HEADER);
   request.headers.delete(INTERNAL_AUTH_HEADER);
   return request;
 }
@@ -689,9 +656,8 @@ export function buildLocalActorRequest(url, invoke, requestId = null) {
 
 /**
  * @param {Request} request
- * @param {NormalizeOptions} [options]
  */
-export async function readLocalActorInvokeRequest(request, options = {}) {
+export async function readLocalActorInvokeRequest(request) {
   if (request.headers.get(LOCAL_ACTOR_ENVELOPE_HEADER) !== LOCAL_ACTOR_ENVELOPE_MARKER) {
     throw new DoRuntimeError(415, "unsupported_media_type", "DO host actor requests require the local envelope");
   }
@@ -709,7 +675,7 @@ export async function readLocalActorInvokeRequest(request, options = {}) {
   } catch {
     throw new DoRuntimeError(400, "invalid_json", "Request body must be valid JSON");
   }
-  const invoke = normalizeDoInvokeRequest(metadata, options);
+  const invoke = normalizeDoInvokeRequest(metadata);
   const bodyBytes = bytes.subarray(4 + metadataLength);
   if (bodyBytes.length === 0) return invoke;
   if (!("request" in invoke)) {
@@ -745,10 +711,9 @@ function decodeInvokeEnvelope(bytes) {
 /**
  * @param {unknown} metadata
  * @param {Uint8Array} bodyBytes
- * @param {NormalizeOptions} options
  */
-function invokeWithEnvelopeBody(metadata, bodyBytes, options) {
-  const invoke = normalizeDoInvokeRequest(metadata, options);
+function invokeWithEnvelopeBody(metadata, bodyBytes) {
+  const invoke = normalizeDoInvokeRequest(metadata);
   if (bodyBytes.length === 0) return invoke;
   if (!("request" in invoke)) {
     throw new DoRuntimeError(400, "invalid_request", "DO invoke envelope body is only valid for fetch requests");
@@ -764,9 +729,8 @@ function invokeWithEnvelopeBody(metadata, bodyBytes, options) {
 
 /**
  * @param {Request} request
- * @param {NormalizeOptions} [options]
  */
-export async function readDoInvokeRequest(request, options = {}) {
+export async function readDoInvokeRequest(request) {
   const contentType = request.headers.get("content-type") || "";
   if (contentType.split(";", 1)[0].trim().toLowerCase() !== DO_INVOKE_CONTENT_TYPE) {
     throw new DoRuntimeError(
@@ -776,7 +740,7 @@ export async function readDoInvokeRequest(request, options = {}) {
     );
   }
   const { metadata, bodyBytes } = decodeInvokeEnvelope(await readBoundedBytes(request, MAX_INVOKE_ENVELOPE_BYTES));
-  return invokeWithEnvelopeBody(metadata, bodyBytes, options);
+  return invokeWithEnvelopeBody(metadata, bodyBytes);
 }
 
 /** @param {EnvelopeInvoke} invoke */
@@ -788,14 +752,31 @@ export function encodeDoInvokeRequest(invoke) {
   });
 }
 
-/** @param {JsonRecord} alarm */
-export function buildAlarmRequest(alarm) {
+/** @param {JsonRecord} alarm @param {string | null} requestId */
+export function buildAlarmRequest(alarm, requestId) {
   return new Request(ALARM_INTERNAL_URL, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       [ALARM_INTERNAL_HEADER]: "1",
+      ...(requestId ? { "x-request-id": requestId } : {}),
     },
     body: JSON.stringify(alarm),
+  });
+}
+
+/**
+ * @param {RpcInfo} rpc
+ * @param {string | null} requestId
+ */
+export function buildRpcRequest(rpc, requestId) {
+  return new Request(RPC_INTERNAL_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [RPC_INTERNAL_HEADER]: "1",
+      ...(requestId ? { "x-request-id": requestId } : {}),
+    },
+    body: JSON.stringify({ method: rpc.method, args: rpc.args }),
   });
 }

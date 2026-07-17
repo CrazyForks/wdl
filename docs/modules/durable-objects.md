@@ -65,6 +65,32 @@ Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The
 rejects an oversized `Content-Length` before reading, and streamed bodies are read
 incrementally so the cap is enforced before buffering the full body.
 
+DO RPC method names use the JavaScript identifier grammar. The do-runtime protocol
+reader caps them at 256 ASCII bytes. RPC arguments are structural JSON data capped at
+1 MiB: finite numbers, strings, booleans, null, dense arrays, and plain objects are
+accepted. Serialization does not invoke `toJSON()` hooks; sparse arrays, circular
+structures, non-plain objects, and non-JSON values fail before dispatch.
+
+do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
+intercepted by the generated wrapper. Those requests carry the outer request id so the
+host facade can propagate it without adding platform metadata to the tenant argument
+list. Persistent class instances use a small mutable diagnostic context, so concurrent
+or re-entrant calls may observe another invocation's id. Nested DO fetch/connect
+requests discard tenant-supplied `x-request-id` values and propagate the sanitized
+context id when available. Request ids remain best-effort, untrusted diagnostic
+metadata.
+
+DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
+and storage id. They do not accept inline worker source.
+
+Tenant-facing DO object names and ids must be well-formed Unicode strings. Lone UTF-16
+surrogates are rejected by `idFromName()` / `idFromString()` before hashing or dispatch;
+do-runtime alarm ingress and Workflows revalidation enforce the same boundary.
+
+DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
+leading zeroes. DO binding class names use the ASCII JavaScript class-name grammar and
+are capped at 468 bytes at deploy, so every shard suffix fits the aggregate host-id cap.
+
 ## Redis / Storage Contracts
 
 Control assigns an opaque `doStorageId` per logical worker lifecycle and freezes it into
@@ -110,6 +136,9 @@ when the logical worker is gone or now points at a different `doStorageId`.
 
 - One task owns a class shard at a time.
 - Generation fencing prevents stale owners from committing after ownership moves.
+- `do-runtime/protocol.js` owns the DO ownership error vocabulary. The injected runtime
+  transport keeps its retry and stale-hint subsets private and pins them through
+  response-classification tests.
 - Facet identity is `className:objectName` inside stable `doStorageId`, so worker
   promotion preserves object state.
 - Existing native facets keep the constructed class version until host actor restart or
@@ -130,18 +159,26 @@ when the logical worker is gone or now points at a different `doStorageId`.
   disconnect as the primary safety mechanism.
   Client messages queued under an older backend reconnect epoch may be discarded
   without per-frame ack/nack when the gateway resets that epoch.
-- Ordinary fetch/RPC can fall back through the router after explicit stale-owner or
-  owner-race responses. A direct owner transport failure, or a 502/503/504 without a
-  fresh owner-hint header, evicts the cached hint. Safe `GET`/`HEAD` requests may replay
-  through the router to rediscover the owner; non-idempotent methods and RPC return
-  `owner_unavailable` without replay because the owner may already have applied the
-  request.
+- Ordinary fetch/RPC can perform one router rediscovery after a trusted owner-hint or an
+  explicit pre-dispatch stale-owner/owner-race response carrying do-runtime's private
+  ownership-error control header, including for non-idempotent methods and RPC. Tenant
+  response bodies cannot opt into replay. An unmarked direct owner transport failure, or
+  a 502/503/504 without either trusted marker, evicts the cached hint. Safe `GET`/`HEAD`
+  requests may replay through the router; non-idempotent methods and RPC return
+  `owner_unavailable` because the owner may already have applied the request.
+- The shared runtime transport owns owner-hint cache wiring, invoke race retry, and
+  response-header stripping for both the host binding and injected facade. Its connect
+  wrapper deliberately omits the invoke-only router fallback required to preserve
+  owner-established WebSocket upgrades.
 - `WEBSOCKET_RECONNECT_DELAYS_MS` and `WEBSOCKET_MAX_BUFFERED_MESSAGES` tune gateway
   backend reconnect budget and client-message buffering without a code rebuild.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
-  do-runtime `/internal/do/alarms/dispatch`. do-runtime still constructs the native
+  do-runtime `/internal/do/alarms/dispatch`. do-runtime constructs a native
   `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path.
+- Alarm mutation, retarget, dispatch, and whole-worker storage cleanup accept only the
+  canonical positive JavaScript-safe-integer worker version grammar. Invalid internal or
+  persisted versions fail before a job is stored or a worker invoke is attempted.
 - Alarm due times are Unix millisecond timestamps supplied to `setAlarm()`. Workflows
   and do-runtime both evaluate those timestamps with their local wall clocks; if a
   backend ready hint reaches do-runtime before the SQLite alarm row is locally due,
@@ -165,8 +202,12 @@ when the logical worker is gone or now points at a different `doStorageId`.
 Owner resolution is the single-writer protocol:
 
 1. do-runtime derives an owner scope from `doStorageId`, class name, and shard.
-2. It WATCHes the owner record, generation key, and active worker storage pointer before
-   claiming or renewing.
+2. Owner resolution WATCHes the owner record, generation key, worker delete lock, and
+   active worker storage pointer. A `whole` delete lock rejects ownership; a `version`
+   lock remains part of the watched snapshot but does not interrupt active storage. The
+   WATCH prevents a claim from committing after whole-worker delete starts. Renewal
+   separately WATCHes the owner record and active storage pointer; its generation fence
+   is carried by the owner record rather than a second generation-key read.
 3. If a live owner exists on another task, the router returns that owner or an
    owner-hint header; the runtime facade may retry directly, but the owner task still
    rechecks the fence.
@@ -203,15 +244,34 @@ interrupt.
 
 ## Security Boundaries
 
-- do-runtime internal endpoints are private-mesh only and are not
-  application-authenticated.
+- do-runtime internal endpoints are private-mesh only and require the shared
+  `WDL_INTERNAL_AUTH_TOKEN` through `x-wdl-internal-auth`; health and metrics are the
+  only unauthenticated endpoints.
 - Tenant code reaches DOs only through runtime-generated facades and frozen metadata.
 - Tenant-visible DO metadata and errors must not include owner task ids, backend
   endpoints, or raw transport error text.
 - Owner hints are trusted only when returned by do-runtime headers and validated against
-  endpoint grammar.
-- Owner-hint defense is layered: tenant response bodies are ignored, only do-runtime
-  control headers are trusted, and endpoint grammar/acceptable-address checks must pass.
+  endpoint grammar. Owner hints and invoke fences must carry a positive
+  JavaScript-safe-integer generation.
+- Task identities and persisted owner records are validated on write and read. A
+  persisted record's `ownerKey`, `hostId`, storage id, class, and shard must reconstruct
+  the Redis scope under which it was read. During owner resolution, its canonical
+  namespace and worker must also match the invoking bundle before do-runtime reads that
+  bundle's active storage pointer. Owner forwarding accepts only the DO service/headless
+  DNS forms or private RFC1918/100.64 IPv4 addresses on port 8788; invalid records fail
+  closed before internal auth is attached.
+- Owner-hint and ownership-error defense is layered: tenant response bodies and
+  tenant-supplied control headers are ignored, only do-runtime control headers are
+  trusted, and endpoint grammar/acceptable-address checks must pass for hints.
+- The injected DO transport and shared D1/DO endpoint validator evaluate before tenant
+  modules and capture the intrinsics used for private-header stripping, request bounds,
+  invoke serialization, replay classification, and endpoint validation. Tenant prototype
+  mutation cannot rewrite a trusted target or replay policy after those checks.
+- The injected alarm shim also evaluates before the tenant module and captures the
+  request, response, numeric, proxy, and reflection operations that classify internal
+  alarms, update their SQLite state, and install the storage facade. Tenant top-level
+  mutation of those intrinsics cannot redirect an internal alarm to the tenant fetch
+  handler or prevent that facade installation.
 - do-runtime supervisor must call local `127.0.0.1:8788` drain/renew endpoints; Service
   Connect aliases may hit a different task.
 
@@ -267,8 +327,11 @@ recovery after the initial 101.
   fenced to the deleted `doStorageId`, so a same-name redeploy with a new storage id is
   not swept by the old delete. If best-effort cleanup fails, a far-future residual alarm
   job can remain in DB 2 until it becomes due; it then self-discards because the storage
-  pointer is gone.
-  `do:objects:<doStorageId>` remains a tombstone for future platform cleanup.
+  pointer is gone. First owner claim watches the same per-worker delete lock and storage
+  pointer; only the `whole` lock kind rejects ownership, so deleting an inactive version
+  does not interrupt the active worker. A whole-worker delete therefore cannot miss
+  owner/generation state created after its final owner scan. `do:objects:<doStorageId>`
+  remains a tombstone for future platform cleanup.
 - DO object registry writes are best-effort. Dispatch continues if the registry write
   fails, so the tombstone set may be incomplete; future cleanup must tolerate missing
   members and treat the active storage pointer plus owner/alarm state as the stronger
@@ -281,10 +344,11 @@ recovery after the initial 101.
   that epoch.
 - Owner-hinted WebSocket direct retry failures do not fall back to the router, because
   the final 101 must come from the owner endpoint.
-- Owner-hinted ordinary fetch/RPC direct failures only fall back to the router for safe
+- Unmarked ordinary fetch/RPC direct failures only fall back to the router for safe
   `GET`/`HEAD` requests. Non-idempotent methods and RPC return `owner_unavailable` when
-  the outcome may be unknown. Explicit stale-owner and owner-race responses remain
-  retryable because they prove the owner-side fence rejected the request.
+  the outcome may be unknown. A trusted owner-hint or explicit stale-owner/owner-race
+  response remains retryable once for every method because it proves dispatch did not
+  reach tenant code.
 - Renamed/deleted migrations are deferred.
 - Long handlers still need user-level care; lease-budget watchdogs protect platform
   ownership and narrow failover races, not every storage call or the final SQLite

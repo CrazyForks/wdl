@@ -12,16 +12,19 @@ import {
 } from "./load-shared-module.js";
 import { compileSharedAuthRoles } from "./load-auth-roles.js";
 import { CLOUDFLARE_WORKERS_URL } from "./mocks/cloudflare-workers.js";
+import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 
 const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_AUTH_TOKEN_URL = repositoryFileUrl("shared/auth-token.js");
 const SHARED_HEX_URL = repositoryFileUrl("shared/hex.js");
 const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
+const SHARED_REDIS_LOCK_URL = freshRepositoryModuleDataUrl("shared/redis-lock.js", [
+  [/from "shared-random-id"/g, `from ${JSON.stringify(SHARED_RANDOM_ID_URL)}`],
+]);
 const SHARED_OBSERVABILITY_URL = repositoryFileUrl("shared/observability.js");
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 
 const SHARED_REDIS_MOCK = `
-export class WatchError extends Error {}
-
 function ensureState() {
   if (!globalThis.__authMockState) {
     throw new Error("auth-index harness: globalThis.__authMockState not initialized");
@@ -41,7 +44,16 @@ function bumpKeyVersion(key) {
   s.keyVersions.set(key, (s.keyVersions.get(key) || 0) + 1);
 }
 
+function expireStringIfNeeded(key) {
+  const s = ensureState();
+  const expiresAt = s.expirations.get(key);
+  if (expiresAt == null || expiresAt > Date.now()) return;
+  s.expirations.delete(key);
+  if (s.strings.delete(key)) bumpKeyVersion(key);
+}
+
 function keyVersion(key) {
+  expireStringIfNeeded(key);
   const s = ensureState();
   return s.keyVersions.get(key) || 0;
 }
@@ -53,6 +65,7 @@ export class RedisClient {
   }
   async get(key) {
     const s = ensureState();
+    expireStringIfNeeded(key);
     if (s.getThrows && s.getThrows.has(key)) {
       const err = new Error("forced get throw on " + key);
       recordCommand("GET", false, err.message);
@@ -88,13 +101,16 @@ export class RedisClient {
   }
   async del(key) {
     const s = ensureState();
+    expireStringIfNeeded(key);
     recordCommand("DEL", true);
     const had = s.strings.delete(key) || s.hashes.delete(key);
+    s.expirations.delete(key);
     if (had) bumpKeyVersion(key);
     return had ? 1 : 0;
   }
   async delIfEq(key, value) {
     const s = ensureState();
+    expireStringIfNeeded(key);
     if (s.delIfEqThrows && s.delIfEqThrows.has(key)) {
       const err = new Error("forced delIfEq throw on " + key);
       recordCommand("DELIFEQ", false, err.message);
@@ -103,8 +119,36 @@ export class RedisClient {
     recordCommand("DELIFEQ", true);
     if (s.strings.get(key) !== value) return 0;
     s.strings.delete(key);
+    s.expirations.delete(key);
     bumpKeyVersion(key);
     return 1;
+  }
+  async set(key, value, options = {}) {
+    const s = ensureState();
+    expireStringIfNeeded(key);
+    if (options.nx && s.strings.has(key)) {
+      recordCommand("SET", true);
+      return null;
+    }
+    if (options.ifeq != null && s.strings.get(key) !== options.ifeq) {
+      recordCommand("SET", true);
+      return null;
+    }
+    s.strings.set(key, value);
+    if (typeof options.ttl === "number") {
+      s.expirations.set(key, Date.now() + options.ttl * 1000);
+    } else {
+      s.expirations.delete(key);
+    }
+    bumpKeyVersion(key);
+    try {
+      if (s.afterSetAppliedBeforeReply) s.afterSetAppliedBeforeReply(key, value, options);
+    } catch (err) {
+      recordCommand("SET", false, err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    recordCommand("SET", true);
+    return "OK";
   }
   async scan(_cursor, pattern, _count) {
     const s = ensureState();
@@ -135,7 +179,9 @@ export class RedisClient {
     for (const cmd of cmds) {
       const [op, key, ...rest] = cmd;
       if (op === "DEL") {
+        expireStringIfNeeded(key);
         const had = s.strings.delete(key) || s.hashes.delete(key);
+        s.expirations.delete(key);
         if (had) bumpKeyVersion(key);
         out.push(had ? 1 : 0);
         recordCommand("DEL", true);
@@ -149,11 +195,19 @@ export class RedisClient {
         out.push(rest.length / 2);
         recordCommand("HSET", true);
       } else if (op === "SET") {
-        const options = rest.slice(1).map((arg) => String(arg).toUpperCase());
-        if (options.includes("NX") && s.strings.has(key)) {
+        expireStringIfNeeded(key);
+        const options = rest.slice(1).map((arg) => String(arg));
+        const upperOptions = options.map((arg) => arg.toUpperCase());
+        if (upperOptions.includes("NX") && s.strings.has(key)) {
           out.push(null);
         } else {
           s.strings.set(key, rest[0]);
+          const exIndex = upperOptions.indexOf("EX");
+          if (exIndex >= 0) {
+            s.expirations.set(key, Date.now() + Number(options[exIndex + 1]) * 1000);
+          } else {
+            s.expirations.delete(key);
+          }
           bumpKeyVersion(key);
           out.push("OK");
         }
@@ -161,6 +215,12 @@ export class RedisClient {
       } else {
         throw new Error("multiExec mock: unsupported " + op);
       }
+    }
+    try {
+      if (s.afterMultiExecAppliedBeforeReply) s.afterMultiExecAppliedBeforeReply(cmds);
+    } catch (err) {
+      recordCommand("MULTI_EXEC", false, err instanceof Error ? err.message : String(err));
+      throw err;
     }
     return out;
   }
@@ -176,6 +236,7 @@ export class RedisClient {
       async get(key) { return self.get(key); },
       async del(key) { return self.del(key); },
       async delIfEq(key, value) { return self.delIfEq(key, value); },
+      async set(key, value, options) { return self.set(key, value, options); },
       async hGet(key, field) { return self.hGet(key, field); },
       async hGetAll(key) { return self.hGetAll(key); },
       async hGetAllMany(keys) { return self.hGetAllMany(keys); },
@@ -301,7 +362,7 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
   const authLib = await import(authLibUrl);
 
   // Mocks have no module-level state; cache them across loads.
-  const sharedRedisUrl = moduleDataUrl(SHARED_REDIS_MOCK);
+  const sharedRedisUrl = sharedRedisStubUrl(SHARED_REDIS_MOCK);
   const sharedObservabilityUrl = moduleDataUrl(SHARED_OBSERVABILITY_MOCK);
 
   const authRuntimeUrl = freshRepositoryModuleDataUrl("auth/runtime.js", [
@@ -309,6 +370,7 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
     [/from "shared-observability"/g, `from ${JSON.stringify(sharedObservabilityUrl)}`],
     [/from "auth-lib"/g, `from ${JSON.stringify(authLibUrl)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
+    [/from "shared-optimistic-retry"/g, `from ${JSON.stringify(repositoryFileUrl("shared/optimistic-retry.js"))}`],
   ]);
 
   const indexUrl = freshRepositoryModuleDataUrl("auth/index.js", [
@@ -316,6 +378,8 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
     [/from "auth-lib"/g, `from ${JSON.stringify(authLibUrl)}`],
     [/from "auth-runtime"/g, `from ${JSON.stringify(authRuntimeUrl)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
+    [/from "shared-redis-lock"/g, `from ${JSON.stringify(SHARED_REDIS_LOCK_URL)}`],
+    [/from "shared-worker-contract"/g, `from ${JSON.stringify(WORKER_CONTRACT_URL)}`],
   ]);
   const indexMod = await import(indexUrl);
 
@@ -329,6 +393,7 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
 export function resetAuthMockState() {
   /** @type {any} */ (globalThis).__authMockState = {
     strings: new Map(),
+    expirations: new Map(),
     hashes: new Map(),
     sets: new Map(),
     getThrows: new Set(),
@@ -336,6 +401,8 @@ export function resetAuthMockState() {
     delIfEqThrows: new Set(),
     scanPages: [],
     keyVersions: new Map(),
+    afterSetAppliedBeforeReply: null,
+    afterMultiExecAppliedBeforeReply: null,
     beforeMultiExec: null,
     onCommand: null,
     commands: [],

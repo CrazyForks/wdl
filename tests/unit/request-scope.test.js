@@ -17,8 +17,9 @@ export function recordRequestComplete(fields) {
 `);
 
 const respondUrl = moduleDataUrl(`
-export function echoResponseWithRequestId(response, requestId) {
+export function echoResponseWithRequestId(response, requestId, filterHeaders) {
   const out = new Response(response.body, response);
+  filterHeaders?.(out.headers);
   out.headers.set("x-request-id", requestId);
   return out;
 }
@@ -55,18 +56,46 @@ test("createHttpRequestScope echoes request id and records final request state",
     log,
     route: "initial",
     extras: () => ({ namespace: "tenant-a" }),
+    responseHeaderFilter(/** @type {Headers} */ headers) {
+      headers.delete("x-private");
+    },
   });
   scope.setRoute("worker_fetch");
-  const err = new Error("boom");
+  const err = false;
   scope.markError(err);
-  const response = scope.respond(Response.json({ ok: false }, { status: 502 }));
+  const response = scope.respond(Response.json({ ok: false }, {
+    status: 502,
+    headers: { "x-private": "hidden", "x-public": "visible" },
+  }));
   scope.complete();
 
   assert.equal(response.headers.get("x-request-id"), "rid-123");
+  assert.equal(response.headers.get("x-private"), null);
+  assert.equal(response.headers.get("x-public"), "visible");
   assert.equal(scope.requestId, "rid-123");
   assert.equal(observability.calls.complete.length, 1);
   assert.equal(observability.calls.complete[0].route, "worker_fetch");
   assert.equal(observability.calls.complete[0].status, 502);
   assert.equal(observability.calls.complete[0].error, err);
+  assert.equal(observability.calls.complete[0].hasError, true);
   assert.deepEqual(observability.calls.complete[0].extras, { namespace: "tenant-a" });
+});
+
+test("createHttpRequestScope records nullish thrown values as errors", () => {
+  for (const err of [null, undefined]) {
+    observability.calls.complete.length = 0;
+    const scope = createHttpRequestScope({
+      request: new Request("http://runtime.test/path"),
+      service: "runtime",
+      log() {},
+      route: "worker_fetch",
+    });
+
+    scope.markError(err);
+    scope.respond(new Response(null, { status: 502 }));
+    scope.complete();
+
+    assert.equal(observability.calls.complete[0].hasError, true);
+    assert.equal(observability.calls.complete[0].error, err);
+  }
 });

@@ -7,13 +7,17 @@ import {
   repositoryModuleDataUrl,
   sharedModuleDataUrl,
 } from "./load-shared-module.js";
-import { createFakeRedisState, resetFakeRedisState } from "./mocks/fake-redis.js";
+import {
+  createFakeRedisState,
+  resetFakeRedisState,
+  sharedRedisStubUrl,
+} from "./mocks/fake-redis.js";
 
 const PROTOCOL_URL = doProtocolDataUrl();
 const FAKE_REDIS_URL = repositoryFileUrl("tests/helpers/mocks/fake-redis.js");
 const SHARED_ENV_URL = repositoryFileUrl("shared/env.js");
 const SHARED_OWNER_LEASE_URL = sharedModuleDataUrl("shared/owner-lease.js");
-const SHARED_VERSION_URL = sharedModuleDataUrl("shared/version.js");
+const WORKER_CONTRACT_URL = sharedModuleDataUrl("shared/worker-contract.js");
 const SHARED_OWNER_PROTOCOL_URL = repositoryModuleDataUrl("shared/owner-protocol.js", [
   [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
 ]);
@@ -31,6 +35,7 @@ const redisState = createFakeRedisState();
  * @property {Array<{ level: string, event: string, fields: Record<string, unknown> }>} logEntries
  * @property {number} redisTimeMs
  * @property {number[]} redisTimeSequence
+ * @property {(() => void) | null} onExecFailure
  * @property {boolean} draining
  * @property {number} inFlightDispatches
  */
@@ -39,12 +44,13 @@ export const DO_OWNER_REGISTRY_TEST_STATE = {
   redisState,
   store: redisState.strings,
   ownedScopes: new Map(),
-  taskIdentity: { taskId: "task-a", endpoint: "task-a:8788" },
+  taskIdentity: { taskId: "task-a", endpoint: "do-runtime-a:8788" },
   watchedKeys: redisState.watched,
   metricIncrements: [],
   logEntries: [],
   redisTimeMs: Date.now(),
   redisTimeSequence: [],
+  onExecFailure: null,
   draining: false,
   inFlightDispatches: 0,
 };
@@ -57,11 +63,12 @@ export function resetDoOwnerRegistryTestState() {
   const testState = DO_OWNER_REGISTRY_TEST_STATE;
   resetFakeRedisState(testState.redisState);
   testState.ownedScopes.clear();
-  testState.taskIdentity = { taskId: "task-a", endpoint: "task-a:8788" };
+  testState.taskIdentity = { taskId: "task-a", endpoint: "do-runtime-a:8788" };
   testState.metricIncrements = [];
   testState.logEntries = [];
   testState.redisTimeMs = Date.now();
   testState.redisTimeSequence = [];
+  testState.onExecFailure = null;
   testState.draining = false;
   testState.inFlightDispatches = 0;
 }
@@ -97,14 +104,7 @@ export async function resolveTaskIdentity() {
 }
 `);
 
-const sharedRedisUrl = moduleDataUrl(`
-export { FakeRedisWatchError as WatchError } from ${JSON.stringify(FAKE_REDIS_URL)};
-export function decodeBulk(value) {
-  if (value == null || typeof value === "string") return value;
-  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-  return String(value);
-}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
 
 const redisUrl = moduleDataUrl(`
 import { createFakeRedisClient } from ${JSON.stringify(FAKE_REDIS_URL)};
@@ -117,6 +117,7 @@ export function createRedisClient() {
       if (Array.isArray(sequence) && sequence.length) return sequence.shift();
       return testState().redisTimeMs;
     },
+    onExecFailure: () => testState().onExecFailure?.(),
   });
 }
 `);
@@ -129,9 +130,11 @@ const src = applyModuleReplacements(readRepositoryFile("do-runtime/owner-registr
   [/from "shared-env";/, `from ${JSON.stringify(SHARED_ENV_URL)};`],
   [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
   [/from "shared-owner-protocol";/, `from ${JSON.stringify(SHARED_OWNER_PROTOCOL_URL)};`],
-  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
   [/from "do-runtime-state";/, `from ${JSON.stringify(stateUrl)};`],
   [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+  [/from "shared-owner-endpoint";/, `from ${JSON.stringify(repositoryFileUrl("shared/owner-endpoint.js"))};`],
 ]);
 
 const registry = await import(moduleDataUrl(src));
@@ -143,6 +146,7 @@ export const {
   ownerGenerationKeyOf,
   ownerLeaseGuardMs,
   ownerKeyOf,
+  parseOwner,
   renewOwnedScopes,
   releaseOwner,
   resolveDoOwner,

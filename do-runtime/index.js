@@ -4,14 +4,15 @@ import {
   verifyInternalAuthHeaders,
 } from "shared-internal-auth";
 import { createHttpRequestScope } from "shared-request-scope";
-import { discardResponseBody, prometheusResponse } from "shared-respond";
+import { discardResponseBody, prometheusResponse, rebuildResponseWithHeaders } from "shared-respond";
 import { boundedPositiveIntEnv } from "shared-owner-lease";
+import { parseVersion } from "shared-worker-contract";
 import { formatWorkerId } from "shared-worker-id";
 import { WdlDoHostActor } from "do-runtime-actor";
 import { handleAlarmDispatch } from "do-runtime-alarm-dispatch";
 import {
   buildLocalActorRequest,
-  doErrorResponse,
+  doPlatformErrorResponse,
   DoRuntimeError,
   hostIdForObject,
   hostIdForShard,
@@ -72,7 +73,7 @@ const STORAGE_DELETE_REQUEST = {
 };
 
 /**
- * @typedef {Record<string, unknown> & { LOG_LEVEL?: unknown, REDIS_ADDR?: string, DO_HOSTS: DurableObjectNamespace, DO_TEST_HOOKS?: unknown, DO_DRAIN_IN_FLIGHT_TIMEOUT_MS?: unknown, DO_RENEW_INTERVAL_MS?: unknown }} DoEnv
+ * @typedef {Record<string, unknown> & { LOG_LEVEL?: unknown, REDIS_ADDR?: string, DO_HOSTS: DurableObjectNamespace, DO_DRAIN_IN_FLIGHT_TIMEOUT_MS?: unknown, DO_RENEW_INTERVAL_MS?: unknown }} DoEnv
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
  * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, acceptOwnerHint?: boolean }} DispatchOptions
@@ -153,14 +154,7 @@ function withOwnerHintHeaders(response, owner) {
   for (const [name, value] of Object.entries(ownerHintHeaders(owner))) {
     headers.set(name, value);
   }
-  const init = /** @type {ResponseInit & { webSocket?: WebSocket }} */ ({
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-  const webSocket = /** @type {{ webSocket?: WebSocket }} */ (response).webSocket;
-  if (webSocket) init.webSocket = webSocket;
-  return new Response(response.status === 101 ? null : response.body, init);
+  return rebuildResponseWithHeaders(response, headers);
 }
 
 /** @param {Request} request */
@@ -245,9 +239,7 @@ async function dispatchStorageDelete(env, invoke, requestId = null, hopCount = 0
  * @param {string} requestId
  */
 async function handleInvoke(request, env, requestId) {
-  const invoke = await readDoInvokeRequest(request, {
-    allowInlineWorkerCode: env.DO_TEST_HOOKS === "1",
-  });
+  const invoke = await readDoInvokeRequest(request);
   return await dispatchInvoke(
     env,
     invoke,
@@ -364,9 +356,7 @@ async function handleDrain(env) {
  * @param {string} requestId
  */
 async function handleStorageDelete(request, env, requestId) {
-  const invoke = await readDoInvokeRequest(request, {
-    allowInlineWorkerCode: false,
-  });
+  const invoke = await readDoInvokeRequest(request);
   return await dispatchStorageDelete(
     env,
     invoke,
@@ -429,6 +419,9 @@ async function handleStorageDeleteWorker(env, request, requestId = null) {
   const members = Array.isArray(input.members) ? input.members.filter((/** @type {unknown} */ m) => typeof m === "string") : [];
   if (!ns || !worker || !version || !doStorageId) {
     return jsonError(400, "invalid_request", "ns, worker, version, and doStorageId are required");
+  }
+  if (parseVersion(version) == null) {
+    return jsonError(400, "invalid_request", "version is invalid");
   }
 
   let deleted = 0;
@@ -543,7 +536,7 @@ export default {
       return scope.respond(jsonError(404, "not_found", "Not found"));
     } catch (err) {
       scope.markError(err);
-      return scope.respond(doErrorResponse(err));
+      return scope.respond(doPlatformErrorResponse(err));
     } finally {
       scope.complete();
     }

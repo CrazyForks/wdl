@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBase64Json } from "../helpers/json-payload.js";
-import { runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
+import { readRepositoryJson, runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
 
 const {
   toBytes,
@@ -16,8 +16,23 @@ const {
   normalizeQueuedDispatchBody,
   normalizeScheduledDispatchBody,
 } = await import(runtimeLibModuleDataUrl());
+const { base64ToBytes, bytesToBase64 } = await import("../../shared/base64.js");
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 
 const enc = new TextEncoder();
+
+test("shared base64 codec round-trips large binary payloads", () => {
+  const bytes = Uint8Array.from({ length: 70_000 }, (_, index) => index % 256);
+  assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
+});
+
+test("shared base64 decoder matches atob rejection semantics with Buffer present", () => {
+  assert.deepEqual(base64ToBytes("Z g =="), new Uint8Array([0x66]));
+  assert.deepEqual(base64ToBytes("Zg"), new Uint8Array([0x66]));
+  for (const invalid of ["%%%", "Zg=", "Zm9v=", "-_8=", "YWJjZA==x"]) {
+    assert.throws(() => base64ToBytes(invalid), /Invalid base64 input/);
+  }
+});
 
 test("toBytes: string → Uint8Array utf8", () => {
   const r = toBytes("hi");
@@ -175,6 +190,19 @@ test("normalizeWorkflowNotifyBody validates route worker identity grammar", () =
   );
 });
 
+test("workflow dispatch version ingress matches the shared JS/Rust fixture", () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    const body = workflowBody({ frozenVersion: tag });
+    if (parsed == null) {
+      assert.throws(() => normalizeWorkflowRunBody(body), /frozenVersion/, tag);
+      assert.throws(() => normalizeWorkflowNotifyBody(body), /frozenVersion/, tag);
+    } else {
+      assert.equal(normalizeWorkflowRunBody(body).frozenVersion, tag, tag);
+      assert.equal(normalizeWorkflowNotifyBody(body).frozenVersion, tag, tag);
+    }
+  }
+});
+
 test("decodeQueuedDispatchMessages decodes runtime queue wire messages", () => {
   const messages = decodeQueuedDispatchMessages([
     {
@@ -297,13 +325,29 @@ test("bundleToWorkerCode: uses meta.compatibilityDate when set", () => {
     mkBundle(
       {
         mainModule: "w.js",
-        compatibilityDate: "2024-01-01",
+        compatibilityDate: "2026-04-01",
         modules: { "w.js": { type: "module" } },
       },
       { "w.js": enc.encode("x") }
     )
   );
-  assert.equal(code.compatibilityDate, "2024-01-01");
+  assert.equal(code.compatibilityDate, "2026-04-01");
+});
+
+test("bundleToWorkerCode: rejects compatibilityDate below the WDL dynamic-worker floor", () => {
+  assert.throws(
+    () => bundleToWorkerCode(
+      mkBundle(
+        {
+          mainModule: "w.js",
+          compatibilityDate: "2026-03-31",
+          modules: { "w.js": { type: "module" } },
+        },
+        { "w.js": enc.encode("x") }
+      )
+    ),
+    /meta\.compatibilityDate 2026-03-31 is older than WDL supports \(2026-04-01\)/
+  );
 });
 
 test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date platform floor, meta is frozen", () => {
@@ -367,6 +411,46 @@ test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup",
     )
   );
   assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat"]);
+});
+
+test("bundleToWorkerCode: legacy error serialization fails closed", () => {
+  /** @type {[string | undefined, string, RegExp][]} */
+  const cases = [
+    ["2026-04-20", "legacy_error_serialization", /requires enhanced error serialization/],
+    ["2026-04-21", "legacy_error_serialization", /requires enhanced error serialization/],
+  ];
+  for (const [compatibilityDate, flag, message] of cases) {
+    assert.throws(
+      () => bundleToWorkerCode(
+        mkBundle(
+          {
+            mainModule: "w.js",
+            ...(compatibilityDate ? { compatibilityDate } : {}),
+            compatibilityFlags: [flag],
+            modules: { "w.js": { type: "module" } },
+          },
+          { "w.js": enc.encode("x") }
+        )
+      ),
+      message,
+      `${flag} should be rejected for ${compatibilityDate ?? "the default date"}`
+    );
+  }
+});
+
+test("bundleToWorkerCode: leaves redundant positive flags to workerd", () => {
+  const code = bundleToWorkerCode(
+    mkBundle(
+      {
+        mainModule: "w.js",
+        compatibilityDate: "2026-04-21",
+        compatibilityFlags: ["enhanced_error_serialization"],
+        modules: { "w.js": { type: "module" } },
+      },
+      { "w.js": enc.encode("x") }
+    )
+  );
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization"]);
 });
 
 test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibilityFlags in bundle bytes", () => {
@@ -608,6 +692,10 @@ test("decodeQueueBody: bytes contentType preserves binary payload", () => {
   const decoded = decodeQueueBody(b64FromBytes(payload), "bytes");
   assert.ok(decoded instanceof Uint8Array);
   assert.deepEqual(Array.from(decoded), Array.from(payload));
+});
+
+test("decodeQueueBody: invalid base64 fails closed before handler dispatch", () => {
+  assert.throws(() => decodeQueueBody("%%%", "bytes"), /Invalid base64 input/);
 });
 
 test("decodeQueueBody: unknown contentType throws (v8 path must not silently pass)", () => {

@@ -16,6 +16,7 @@ mod limits;
 mod model;
 mod payload;
 mod pending_create;
+mod pending_restart;
 mod progress;
 mod redis_script;
 mod retention;
@@ -25,7 +26,7 @@ mod status;
 mod tick;
 use active_export::{
     ensure_worker_not_deleting, request_with_active_version, verify_active_workflow_current,
-    verify_active_workflow_export, verify_workflow_def,
+    verify_workflow_def,
 };
 pub(crate) use create::{create_batch, create_instance};
 pub(crate) use do_alarms::{
@@ -55,7 +56,7 @@ use limits::{
     MAX_WORKFLOW_EVENT_TYPE_BYTES, MAX_WORKFLOW_INSTANCE_PAYLOAD_BYTES,
     MAX_WORKFLOW_JSON_BODY_BYTES, MAX_WORKFLOW_PARAMS_BYTES, MAX_WORKFLOW_RESULT_BYTES,
     MAX_WORKFLOW_RUNTIME_RESPONSE_BYTES, MAX_WORKFLOW_STEP_CONFIG_BYTES,
-    MAX_WORKFLOW_STEP_NAME_BYTES, READY_SHARDS,
+    MAX_WORKFLOW_STEP_NAME_BYTES, READY_SHARDS, WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
 };
 pub(crate) use model::{
     CreateBatchResponse, EventRecord, InstanceIdentity, InstanceResponse, LifecycleBlocker,
@@ -71,6 +72,10 @@ use pending_create::{
     cleanup_pending_create_identity, finalize_created_instance, is_pending_create,
     pending_create_cleanup_from_state, pending_create_expired, pending_create_token,
     public_state_or_empty, wait_for_public_create_state,
+};
+use pending_restart::{
+    PendingRestartMarker, active_pending_restart_blockers, create_pending_restart,
+    pending_restart_marker, remove_pending_restart,
 };
 use progress::{
     spawn_progress_from_identity, spawn_progress_from_request, spawn_progress_from_step,
@@ -91,6 +96,18 @@ use status::{
     read_public_state, read_public_state_by_id, read_state, read_state_by_id, response_from_state,
 };
 pub(crate) use tick::tick_workflows;
+
+fn runtime_endpoint(app: &AppState, ns: &str, path: &str) -> String {
+    let (host, port) = if ns == "__system__" {
+        (
+            &app.config.system_runtime_host,
+            app.config.system_runtime_port,
+        )
+    } else {
+        (&app.config.runtime_host, app.config.runtime_port)
+    };
+    format!("http://{host}:{port}{path}")
+}
 
 #[cfg(test)]
 pub(crate) use execution::{

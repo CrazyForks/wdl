@@ -1,35 +1,42 @@
-// 101 upgrades can't be re-wrapped with the original body: workerd
-// rejects a body on 101 (http.c++:1136-1149) and Response.clone() rejects
-// WS handshakes (http.c++:1269). Rebuild with a null body + the hijacked
-// WebSocket so the upgrade flows through and x-request-id still lands on
-// the 101 headers.
+// 101 upgrades can't be re-wrapped with the original body: workerd rejects a
+// body on 101 and Response.clone() rejects WS handshakes. Rebuild with a null
+// body plus the hijacked WebSocket so callers can safely replace headers.
 /**
  * @param {Response & { webSocket?: WebSocket | null }} response
- * @param {string} requestId
+ * @param {HeadersInit} headers
  * @returns {Response}
  */
-export function echoResponseWithRequestId(response, requestId) {
-  if (response.status === 101) {
-    const rebuilt = new Response(null, {
-      status: 101,
-      headers: response.headers,
-      webSocket: response.webSocket,
-    });
-    rebuilt.headers.set("x-request-id", requestId);
-    return rebuilt;
-  }
-  const echoed = new Response(response.body, response);
-  echoed.headers.set("x-request-id", requestId);
-  return echoed;
+export function rebuildResponseWithHeaders(response, headers) {
+  const init = /** @type {ResponseInit & { webSocket?: WebSocket }} */ ({
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+  const webSocket = response.webSocket;
+  if (webSocket) init.webSocket = webSocket;
+  return new Response(response.status === 101 ? null : response.body, init);
 }
 
 /**
- * @param {Response} response
+ * @param {Response & { webSocket?: WebSocket | null }} response
+ * @param {string} requestId
+ * @param {((headers: Headers) => void) | undefined} [filterHeaders]
+ * @returns {Response}
+ */
+export function echoResponseWithRequestId(response, requestId, filterHeaders = undefined) {
+  const headers = new Headers(response.headers);
+  filterHeaders?.(headers);
+  headers.set("x-request-id", requestId);
+  return rebuildResponseWithHeaders(response, headers);
+}
+
+/**
+ * @param {{ body: ReadableStream<Uint8Array> | null }} message
  * @returns {Promise<void>}
  */
-export async function discardResponseBody(response) {
+export async function discardResponseBody(message) {
   try {
-    await response.body?.cancel();
+    void message.body?.cancel().catch(() => {});
   } catch {
     // Best-effort cleanup only; the caller's status/error path owns behavior.
   }

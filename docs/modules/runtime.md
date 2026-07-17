@@ -21,6 +21,9 @@ are:
 
 Workers are loaded by immutable id `<ns>:<worker>:<version>`. Promotion creates a new
 id, so active-version changes naturally cold-load a fresh isolate.
+`runtime/load.js` also owns the shared `workerLoader.get()` wrapper: every cache miss is
+recorded for later eviction, while only active-version dispatch paths request sibling
+eviction. Service bindings load their pinned version without evicting siblings.
 
 The two runtime pools use the same image and source but different capnp configs:
 
@@ -84,9 +87,10 @@ services. Runtime therefore treats bindings as adapters:
   worker secrets. A worker-level secret with the same name wins over a namespace-level
   secret, which wins over a var. Control enforces a headroomed estimate of workerd's
   `workerLoader` serialized env budget during deploys and secret mutations. That
-  estimate includes user vars/secrets plus runtime-injected binding/workflow env values,
-  including required caller secret copies in platform/service binding props, so an
-  over-large env fails in the control plane instead of during runtime cold-load.
+  estimate calls the same `buildWorkerEnv()` materializer as cold-load with shape-only
+  factories, then measures user vars/secrets plus runtime-injected binding/workflow env
+  values, including required caller secret copies in platform/service binding props, so
+  an over-large env fails in the control plane instead of during runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
   services. The hidden backend Fetchers stay in runtime and are removed before tenant
   code observes `env`.
@@ -128,7 +132,9 @@ are isolated by prefix. Runtime supports the common `head`, `get`, `put`, `delet
 25 MiB cap. `put(stream, ...)` currently buffers and sends one S3 PUT with the same cap;
 multipart upload, SSE-C, and checksum selection are not supported. Conditional requests
 and range GETs implement the common R2 behavior. `list({ include: [...] })` performs
-extra HEAD requests for metadata fields and applies a concurrency cap.
+extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-supplied
+`Headers` metadata must carry a canonical IMF-fixdate `Expires` value when that header
+is present; malformed write metadata is rejected before the host binding call.
 Tenant-facing R2 errors expose operation/status plus virtual object keys where useful,
 but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-plane
 R2 admin errors may retain backend detail for operators.
@@ -150,7 +156,9 @@ Service bindings are frozen at caller deploy time. Control resolves target names
 worker, version, and entrypoint, stores them in caller metadata, and runtime loads that
 exact target version on first use. Promoting the target later does not move existing
 callers; caller redeploy is the refresh boundary. This version pinning makes rollback
-and version delete referrer checks deterministic.
+and version delete referrer checks deterministic. Runtime revalidates the persisted
+pinned version with the canonical positive JavaScript-safe-integer grammar before
+materializing the binding.
 
 Cross-namespace service bindings require a target `[[exports]]` entry for the bound
 entrypoint, including `entrypoint = "default"` for the default export. The entry's
@@ -183,9 +191,12 @@ Data-plane bindings use their own storage:
 
 Runtime must treat Redis bundle metadata as control-authored, but still revalidates
 reserved runtime entrypoint and binding names when materializing older stored metadata.
-It also fails closed if older metadata contains Python module entries or upstream
-experimental compatibility flags, because those would otherwise reach workerd as
-opaque cold-load failures under the current stock binary.
+It also fails closed if older metadata has a `compatibilityDate` before `2026-04-01`,
+contains Python module entries or upstream experimental compatibility flags, disables
+WDL's required enhanced error serialization, or violates another WDL-owned metadata
+contract. The date floor and enhanced-serialization requirement are WDL forward-only
+policy. Workerd remains responsible for rejecting redundant or otherwise incompatible
+upstream flags during cold load.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -196,12 +207,24 @@ opaque cold-load failures under the current stock binary.
 - Internal active-version scheduled/queue dispatches opt into sibling eviction; frozen
   workflow dispatches do not.
 - Wrapper generation hides raw env from unwrapped entrypoints whenever privileged
-  internal Fetchers are injected.
+  internal Fetchers are injected. Its host-wrapper runtime evaluates before tenant
+  modules and captures the intrinsics used to decide handler or env wrapping, so tenant
+  top-level prototype mutation cannot bypass the env boundary.
+- Generated wrappers pass request ids directly to per-request facade objects. Persistent
+  class instances keep a small mutable diagnostic context that is refreshed when a
+  wrapped handler starts; concurrent or deliberately re-entrant calls may therefore
+  observe another invocation's id. Propagation is best-effort observability, not a
+  security or correctness boundary, and Runtime does not rewrite tenant compatibility
+  flags to support it. Request ids must never authorize, fence, or deduplicate work.
+  Request-id syntax remains owned by the injected canonical request-id module.
 - Request context wrappers swap facade objects into env and propagate request id where
-  that event class can carry it.
+  that event class can carry it. do-runtime alarm and RPC calls enter through private
+  fetch dispatches carrying the outer request id, without adding platform metadata to
+  tenant method arguments.
 - An uncaught tenant `fetch()` exception maps to a platform `502 runtime_error`
   response with the request id. Exception details are emitted to structured logs/live
-  tail and are not copied into the client body.
+  tail and are not copied into the client body. Tail formatting cannot replace the
+  original throwable when its string conversion fails.
 - Internal scheduled, queue, and workflow dispatch routes use result envelopes for
   handler outcomes. A tenant handler error is represented as outcome state for the
   scheduler/workflow protocol, not as a generic platform transport error.
@@ -238,7 +261,7 @@ when a matching active tail session exists.
 - Runtime must roll before scheduler/workflows if they depend on a new `:8088` internal
   path or dispatch body.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
-  Historical-version eviction still injects `__WdlAbort__`, but `abortIsolate()` is
+  Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline.
 - Removing the broad loaded-worker `experimental` flag intentionally removes access to
   non-GA experimental-only tenant surfaces, such as irrevocable long-term stub storage.
@@ -252,7 +275,7 @@ when a matching active tail session exists.
   workerd fail later with a mixed JS/Python bundle error.
 - The runtime workerd processes still run with process-level `--experimental` because
   upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
-  Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
+  Do not add the `experimental` compatibility flag or `allowExperimental` to loaded
   WorkerCode unless another upstream API explicitly requires it.
 - Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
   env at 1 MiB. Control estimates final WorkerCode before version allocation and again

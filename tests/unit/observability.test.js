@@ -15,10 +15,39 @@ import {
 } from "../../shared/observability.js";
 import { parseStdoutJson } from "../helpers/json-payload.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
+import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { withCapturedConsole } from "../helpers/output-capture.js";
+import { withMockedPropertyDescriptor } from "../helpers/mock-global.js";
+import {
+  requestIdFromOptions,
+  sanitizeRequestId as sanitizeRuntimeRequestId,
+} from "../../runtime/_wdl-request-id.js";
 
 const REQUEST_ID_FIXTURES = readRepositoryJson("tests/fixtures/request-id-sanitizer.json");
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
+const OBSERVABILITY_NOOP = await import(OBSERVABILITY_NOOP_URL);
+
+test("loaded-runtime request-id sanitizer matches the shared contract", () => {
+  for (const fixture of REQUEST_ID_FIXTURES) {
+    assert.equal(sanitizeRuntimeRequestId(fixture.raw), fixture.sanitized);
+  }
+});
+
+test("loaded-runtime request-id options ignore inherited values", async () => {
+  await withMockedPropertyDescriptor(/** @type {any} */ (Object.prototype), "requestId", {
+    configurable: true,
+    value: "inherited-value",
+  }, async () => {
+    await withMockedPropertyDescriptor(/** @type {any} */ (Object.prototype), "requestIdProvider", {
+      configurable: true,
+      value: () => "inherited-provider",
+    }, async () => {
+      assert.equal(requestIdFromOptions({}), null);
+      assert.equal(requestIdFromOptions({ requestId: "own-value" }), "own-value");
+      assert.equal(requestIdFromOptions({ requestIdProvider: () => "own-provider" }), "own-provider");
+    });
+  });
+});
 
 test("generateRequestId produces 16 lowercase hex chars", () => {
   for (let i = 0; i < 20; i++) {
@@ -82,6 +111,12 @@ test("sanitizeRequestId follows the cross-language fixture contract", () => {
   }
 });
 
+test("observability noop uses production request-id and error normalization", () => {
+  assert.equal(OBSERVABILITY_NOOP.sanitizeRequestId, sanitizeRequestId);
+  assert.equal(OBSERVABILITY_NOOP.formatError, formatError);
+  assert.equal(OBSERVABILITY_NOOP.ensureRequestId({ "x-request-id": "bad id" }), "rid");
+});
+
 test("formatError normalizes null, Error objects, and primitive throwables", () => {
   assert.deepEqual(formatError(null), { error_message: "Unknown error" });
   assert.deepEqual(formatError(new TypeError("boom")), {
@@ -89,6 +124,7 @@ test("formatError normalizes null, Error objects, and primitive throwables", () 
     error_message: "boom",
   });
   assert.deepEqual(formatError(42), { error_message: "42" });
+  assert.deepEqual(formatError(Object.create(null)), { error_message: "Unknown error" });
 });
 
 test("formatError promotes stable code/reason fields to error_code", () => {
@@ -103,6 +139,33 @@ test("formatError promotes stable code/reason fields to error_code", () => {
   const reasoned = new Error("auth unavailable");
   /** @type {any} */ (reasoned).reason = "auth_unavailable";
   assert.equal(formatError(reasoned).error_code, "auth_unavailable");
+});
+
+test("formatError contains throwing Error field getters", () => {
+  const broken = new Error("original");
+  for (const field of ["name", "message", "code"]) {
+    Object.defineProperty(broken, field, {
+      configurable: true,
+      get() { throw new Error(`formatter read ${field}`); },
+    });
+  }
+  Object.defineProperty(broken, "reason", { value: "tenant_failure" });
+
+  assert.deepEqual(formatError(broken), {
+    error_name: "Error",
+    error_message: "Unknown error",
+    error_code: "tenant_failure",
+  });
+});
+
+test("formatError contains a throwing Error classification trap", () => {
+  const throwable = new Proxy(Object.create(null), {
+    getPrototypeOf() { throw new Error("prototype trap"); },
+  });
+
+  assert.deepEqual(formatError(throwable), {
+    error_message: "Unknown error",
+  });
 });
 
 test("MetricsRegistry: renderPrometheus emits counter TYPE + totals", () => {
@@ -243,6 +306,53 @@ test("MetricsRegistry: cardinality warning fires per-metric-name as structured J
     reg.increment("wide_counter_a", { bucket: "0" });
     assert.match(reg.renderPrometheus(), /wdl_wide_counter_a_total\{bucket="0"\} 2/);
   });
+});
+
+test("structured log envelope follows the cross-language contract", () => {
+  const { orderedKeys, timestampShape } = OBSERVABILITY_CONTRACT.logEnvelope;
+  /** @type {Array<{ name: string, priority: number, stream: string }>} */
+  const levels = OBSERVABILITY_CONTRACT.logEnvelope.levels;
+  setLogLevel("debug");
+  try {
+    const log = createLogger("test-svc");
+    withCapturedConsole(({ stdout, stderr }) => {
+      for (const { name } of levels) log(name, `event_${name}`, { probe: true });
+
+      const emitted = [
+        ...stdout.map((line) => ({ line, stream: "stdout" })),
+        ...stderr.map((line) => ({ line, stream: "stderr" })),
+      ].map((record) => ({
+        ...record,
+        payload: parseStdoutJson(record.line, `${record.stream} log payload`),
+      }));
+      assert.equal(emitted.length, levels.length);
+      for (const expected of levels) {
+        const record = emitted.find(({ payload }) => payload.level === expected.name);
+        assert.ok(record, `missing ${expected.name} log line`);
+        assert.equal(record.stream, expected.stream, `${expected.name} stream`);
+        const { payload } = record;
+        assert.deepEqual(Object.keys(payload).slice(0, orderedKeys.length), orderedKeys);
+        assert.equal(payload.ts.replace(/\d/g, "0"), timestampShape);
+      }
+    });
+
+    for (const minimum of levels) {
+      setLogLevel(minimum.name);
+      withCapturedConsole(({ stdout, stderr }) => {
+        for (const { name } of levels) log(name, `gated_${name}`);
+        const actual = [...stdout, ...stderr]
+          .map((line) => parseStdoutJson(line, `minimum=${minimum.name} log payload`).level)
+          .toSorted();
+        const expected = levels
+          .filter(({ priority }) => priority >= minimum.priority)
+          .map(({ name }) => name)
+          .toSorted();
+        assert.deepEqual(actual, expected, `minimum=${minimum.name}`);
+      });
+    }
+  } finally {
+    setLogLevel("info");
+  }
 });
 
 test("setLogLevel=warn suppresses info but passes error through", () => {
@@ -726,6 +836,20 @@ test("recordRequestComplete: error argument flows into log via formatError", () 
   });
   assert.equal(entries[0].fields.error_name, "TypeError");
   assert.equal(entries[0].fields.error_message, "bad");
+});
+
+test("recordRequestComplete: falsey thrown values remain errors", () => {
+  for (const [error, message] of [[0, "0"], [false, "false"], [null, "Unknown error"], [undefined, "Unknown error"]]) {
+    const { log, entries } = captureLog();
+    recordRequestComplete({
+      service: "runtime", metrics: null, log,
+      method: "POST", requestId: "r", route: "worker_scheduled", status: 200,
+      startedAt: Date.now(), error, hasError: true,
+    });
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].level, "error");
+    assert.equal(entries[0].fields.error_message, message);
+  }
 });
 
 test("setLogLevel ignores unknown names (keeps previous level)", () => {

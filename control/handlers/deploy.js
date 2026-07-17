@@ -5,7 +5,8 @@ import {
   getControlS3,
   runOptimistic,
   stageBundleCommit, buildS3CleanupTaskId, recordS3CleanupIntent,
-  ControlAbort, controlAbortResponse, codedErrorResponse,
+  ControlAbort, controlAbortResponse, codedErrorLogFields, codedErrorResponse,
+  secretEnvelopeErrorResponse,
 } from "control-shared";
 import { PLATFORM_TIER_RESERVED_NS } from "shared-auth-roles";
 import {
@@ -13,8 +14,7 @@ import {
   d1DatabaseNameKey,
   extractD1Refs,
   extractOutgoingRefs,
-  deleteLockKey,
-  doStorageIdKey,
+  parseBundleMeta,
   workflowDefsKey,
 } from "control-lib";
 import {
@@ -37,9 +37,23 @@ import {
   parseCronList,
   parseQueueConsumers,
 } from "control-topology";
-import { formatVersion, parseVersion, bundleKey, routesKey } from "shared-version";
+import {
+  bundleKey,
+  deleteLockKey,
+  doStorageIdKey,
+  formatVersion,
+  nextVersionKey,
+  parseVersion,
+  routesKey,
+} from "shared-worker-contract";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
-import { isReservedNs, isValidRouteNs, ROUTES_ALLOWED_RESERVED_NS } from "shared-ns-pattern";
+import {
+  isReservedNs,
+  isValidRouteNs,
+  platformDomainFromEnv,
+  ROUTES_ALLOWED_RESERVED_NS,
+  WORKFLOW_KEY_RE,
+} from "shared-ns-pattern";
 import { putAsset, inferContentType } from "control-s3";
 import { generateAssetsToken, assetsPrefixFor } from "shared-assets-token";
 import { resolveDatabaseRefFrom } from "control-d1-store";
@@ -58,7 +72,17 @@ const MAX_COMMIT_ATTEMPTS = 5;
 const DEPLOY_JSON_BODY_MAX_BYTES = 32 * 1024 * 1024;
 const DEPLOY_ASSET_UPLOAD_CONCURRENCY = 8;
 
+// Deploy keeps thin local wrappers even though they mirror ControlAbort-like
+// fields: commit aborts need cleanup/log handling, while request errors are
+// pre-commit shape rejections.
 class DeployAbort extends ControlAbort {}
+
+/** @param {Record<string, unknown>} details */
+function deployAbortLogContext(details) {
+  const { databaseId, ...context } = details;
+  if (databaseId !== undefined) context.database_id = databaseId;
+  return context;
+}
 
 /**
  * @typedef {import("control-shared").ControlLogger} ControlLogger
@@ -145,6 +169,16 @@ function isPlatformExportMeta(value) {
     isStringArray(record.allowedCallers) &&
     (record.requiredCallerSecrets === undefined || isStringArray(record.requiredCallerSecrets))
   );
+}
+
+/** @param {string} ns @param {string} worker @param {string} version @param {unknown} raw */
+function linkableBundleMeta(ns, worker, version, raw) {
+  return parseBundleMeta(raw, {
+    ns,
+    worker,
+    version,
+    makeError: ({ message }) => new LinkError(500, "corrupt_meta", message),
+  });
 }
 
 /** @param {unknown} err @returns {DeployRequestError} */
@@ -332,7 +366,9 @@ async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
     if (cached) return await cached;
     const load = (async () => {
       const rawMeta = await redis.hGet(bundleKey(targetNs, worker, version), "__meta__");
-      return rawMeta ? JSON.parse(rawMeta) : null;
+      return rawMeta == null
+        ? null
+        : linkableBundleMeta(targetNs, worker, version, rawMeta);
     })();
     metaCache.set(key, load);
     return await load;
@@ -364,15 +400,9 @@ async function collectPlatformExports(redis) {
   }))).flat();
 
   const exportsByWorker = await Promise.all(routeEntries.map(async ({ ns, worker, version }) => {
-    /** @type {{ exports?: unknown }} */
-    let meta;
-    try {
-      const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
-      if (!rawMeta) return [];
-      meta = JSON.parse(rawMeta);
-    } catch {
-      return [];
-    }
+    const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
+    if (rawMeta == null) return [];
+    const meta = linkableBundleMeta(ns, worker, version, rawMeta);
     if (!Array.isArray(meta.exports)) return [];
     const exportsList = /** @type {unknown[]} */ (meta.exports);
     return exportsList
@@ -513,7 +543,7 @@ async function uploadDeployAssets({
     )
   );
   if (firstFailure) {
-    const { assetPath, key, err } = firstFailure;
+    const { key, err } = firstFailure;
     log("error", "asset_upload_failed", {
       request_id: requestId,
       namespace: ns,
@@ -531,7 +561,7 @@ async function uploadDeployAssets({
       response: jsonError(
         502,
         "asset_upload_failed",
-        `Asset upload failed for ${assetPath}: ${errMessage(err)}`,
+        "Asset upload failed",
         { ...(warnings.length ? { warnings } : {}) }
       ),
     };
@@ -704,20 +734,33 @@ async function commitPreparedDeploy({
     }
     const warningDetails = warnings.length ? { warnings } : {};
     if (err instanceof DeployAbort) {
-      log("warn", "deploy_rejected", {
+      log(err.status >= 500 ? "error" : "warn", "deploy_rejected", {
         request_id: requestId,
         namespace: ns,
         worker: name,
         version,
-        status: err.status,
-        reason: err.code,
-        ...err.details,
+        ...codedErrorLogFields(err, err.code, { context: deployAbortLogContext(err.details) }),
       });
       return { response: controlAbortResponse(err, warningDetails) };
     }
     if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
     if (err instanceof WorkerCodeBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
-    if (err instanceof SecretEnvelopeError) return { response: jsonError(503, err.code, err.message, warningDetails) };
+    if (err instanceof SecretEnvelopeError) {
+      return {
+        response: secretEnvelopeErrorResponse({
+          err,
+          log,
+          event: "deploy_rejected",
+          fields: {
+            request_id: requestId,
+            namespace: ns,
+            worker: name,
+            version,
+          },
+          responseDetails: warningDetails,
+        }),
+      };
+    }
     throw err;
   }
   return { commitDurationMs: Date.now() - commitStartedAt };
@@ -728,9 +771,7 @@ export async function handle({ request, env, ns, name, requestId }) {
   const redis = requireControlRedis();
   const s3 = getControlS3();
   const log = requireControlLog();
-  const platformDomain = typeof env.PLATFORM_DOMAIN === "string" && env.PLATFORM_DOMAIN
-    ? env.PLATFORM_DOMAIN
-    : "workers.local";
+  const platformDomain = platformDomainFromEnv(env);
 
   const parsed = await parseDeployRequestForHandler({ request, ns, platformDomain });
   if (parsed.response) return parsed.response;
@@ -744,7 +785,15 @@ export async function handle({ request, env, ns, name, requestId }) {
       deployRequest: parsed.deployRequest,
     });
   } catch (err) {
-    if (err instanceof LinkError) return codedErrorResponse(err, "link_error");
+    if (err instanceof LinkError) {
+      log(err.status >= 500 ? "error" : "warn", "deploy_rejected", {
+        request_id: requestId,
+        namespace: ns,
+        worker: name,
+        ...codedErrorLogFields(err, "link_error"),
+      });
+      return codedErrorResponse(err, "link_error");
+    }
     throw err;
   }
   const { bindings: mergedBindings, warnings } = platformResult;
@@ -782,7 +831,7 @@ export async function handle({ request, env, ns, name, requestId }) {
     return deployAssetsS3NotConfiguredResponse(warningDetails);
   }
 
-  const num = await redis.incr(`worker:${ns}:${name}:next_version`);
+  const num = await redis.incr(nextVersionKey(ns, name));
   const version = formatVersion(num);
 
   const uploadResult = await uploadDeployAssetsBeforeCommit({
@@ -866,7 +915,7 @@ async function scheduleDeployAbortCleanup({
     warnings.push({
       kind: "assets_cleanup_task_failed",
       prefix,
-      reason: errMessage(err),
+      reason: "cleanup_task_write_failed",
     });
   }
 }
@@ -1061,7 +1110,7 @@ async function validateOutgoingRefsForCommit(iso, { outgoingRefs }) {
       });
     }
     const targetMeta = targetMetas[index];
-    if (!targetMeta) {
+    if (typeof targetMeta !== "string" || targetMeta.length === 0) {
       throw new DeployAbort(409, "target_drift", {
         target: {
           ns: ref.targetNs,
@@ -1088,26 +1137,16 @@ async function materializeCommittedMetadata(iso, { ns, name, prepared, resolvedD
   const workflowDefUpdates = [];
   if (Array.isArray(committedMeta.workflows) && committedMeta.workflows.length) {
     const defsKey = workflowDefsKey(ns, name);
-    const rawDefs = await iso.hMGet(defsKey, committedMeta.workflows.map((workflow) => workflow.name));
-    for (const [index, workflow] of committedMeta.workflows.entries()) {
-      const rawDef = rawDefs[index];
+    const existingDefRaws = await iso.hMGet(
+      defsKey,
+      committedMeta.workflows.map((workflow) => workflow.name)
+    );
+    for (let index = 0; index < committedMeta.workflows.length; index += 1) {
+      const workflow = committedMeta.workflows[index];
+      const existingDef = parsePersistedWorkflowDef(workflow.name, existingDefRaws[index]);
       let workflowKey;
-      if (rawDef) {
-        /** @type {JsonObject} */
-        let parsed;
-        try {
-          parsed = /** @type {JsonObject} */ (JSON.parse(rawDef));
-        } catch {
-          throw new DeployAbort(500, "workflow_definition_corrupt", {
-            workflow: workflow.name,
-          });
-        }
-        if (typeof parsed?.workflowKey !== "string" || !/^wf_[0-9a-f]{32}$/.test(parsed.workflowKey)) {
-          throw new DeployAbort(500, "workflow_definition_corrupt", {
-            workflow: workflow.name,
-          });
-        }
-        workflowKey = parsed.workflowKey;
+      if (existingDef) {
+        workflowKey = existingDef.workflowKey;
       } else {
         workflowKey = newWorkflowKey();
       }
@@ -1135,6 +1174,35 @@ async function materializeCommittedMetadata(iso, { ns, name, prepared, resolvedD
   }
   deepFreeze(committedMeta);
   return { committedMeta, workflowDefUpdates, doStorageId };
+}
+
+/**
+ * @param {string} workflowName
+ * @param {string | null | undefined} rawDef
+ * @returns {{ workflowKey: string } | null}
+ */
+function parsePersistedWorkflowDef(workflowName, rawDef) {
+  if (rawDef == null) return null;
+  /** @type {JsonObject | null} */
+  let parsed;
+  try {
+    parsed = typeof rawDef === "string"
+      ? /** @type {JsonObject} */ (JSON.parse(rawDef))
+      : null;
+  } catch {
+    parsed = null;
+  }
+  if (
+    !parsed ||
+    Array.isArray(parsed) ||
+    typeof parsed.workflowKey !== "string" ||
+    !WORKFLOW_KEY_RE.test(parsed.workflowKey)
+  ) {
+    throw new DeployAbort(500, "workflow_definition_corrupt", {
+      workflow: workflowName,
+    });
+  }
+  return { workflowKey: parsed.workflowKey };
 }
 
 /**

@@ -1,18 +1,20 @@
 import {
   jsonResponse, jsonError,
-  acquireDeleteLock, releaseDeleteLock,
+  acquireDeleteLock, releaseDeleteLock, renewDeleteLock, deleteLockExpiredDetails,
   assertWorkflowDeleteAllowed,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
-  ControlAbort, controlAbortResponse,
-  errMessage,
+  ControlAbort, codedErrorLogFields, controlAbortResponse,
   requireControlLog,
   requireControlRedis,
   runOptimistic,
 } from "control-shared";
 import {
-  workerVersionsKey, referrersKey,
+  referrersKey,
   extractD1Refs,
   extractOutgoingRefs, formatReferrerBlocker,
+  bundleAssetPrefix,
+  parseBundleMeta,
+  workflowDefsKey,
 } from "control-lib";
 import {
   stageD1ReferrerRemovals,
@@ -21,7 +23,14 @@ import {
   stageWorkerVersionIndexDelete,
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
-import { parseVersion, bundleKey, routesKey } from "shared-version";
+import {
+  VERSION_DELETE_LOCK_KIND,
+  bundleKey,
+  deleteLockKey,
+  parseVersion,
+  routesKey,
+  workerVersionsKey,
+} from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
 
 const MAX_DELETE_ATTEMPTS = 5;
@@ -68,7 +77,7 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
     return jsonError(400, "invalid_version", `Version must be "v<int>", got ${JSON.stringify(version)}`);
   }
 
-  const lockToken = await acquireDeleteLock(redis, ns, name);
+  const lockToken = await acquireDeleteLock(redis, ns, name, VERSION_DELETE_LOCK_KIND);
   if (!lockToken) {
     log("warn", "version_delete_rejected", {
       request_id: requestId,
@@ -84,19 +93,23 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
   try {
     let result;
     try {
-      await assertWorkflowDeleteAllowed({ ns, worker: name, version, allowCleanup: true });
+      await assertWorkflowDeleteAllowed({
+        ns, worker: name, version, allowCleanup: true, requestId,
+      });
+      if (!await renewDeleteLock(redis, ns, name, lockToken)) {
+        throw new VersionDeleteError(409, "deleting", deleteLockExpiredDetails(ns, name, version));
+      }
       result = await executeVersionDelete({
-        redis, ns, name, version, principal, requestId,
+        redis, ns, name, version, principal, requestId, lockToken,
       });
     } catch (err) {
       if (err instanceof ControlAbort) {
-        log("warn", "version_delete_rejected", {
+        log(err.status >= 500 ? "error" : "warn", "version_delete_rejected", {
           request_id: requestId,
           namespace: ns,
           worker: name,
           version,
-          status: err.status,
-          reason: err.code,
+          ...codedErrorLogFields(err),
         });
         return controlAbortResponse(err);
       }
@@ -137,9 +150,9 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, version: string, principal?: AccessPrincipal | null, requestId: string }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, version: string, principal?: AccessPrincipal | null, requestId: string, lockToken: string }} args
  */
-async function executeVersionDelete({ redis, ns, name, version, principal, requestId }) {
+async function executeVersionDelete({ redis, ns, name, version, principal, requestId, lockToken }) {
   return await runOptimistic(redis, {
     attempts: MAX_DELETE_ATTEMPTS,
     onExhausted: () => {
@@ -150,12 +163,19 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     },
   }, async (iso) => {
     await iso.watch(
+      deleteLockKey(ns, name),
       routesKey(ns),
       workerVersionsKey(ns, name),
       workerSecretsKey(ns, name),
+      workflowDefsKey(ns, name),
       bundleKey(ns, name, version),
       referrersKey(ns, name, version),
     );
+
+    if (await iso.get(deleteLockKey(ns, name)) !== lockToken) {
+      await iso.unwatch();
+      throw new VersionDeleteError(409, "deleting", deleteLockExpiredDetails(ns, name, version));
+    }
 
     const currentActive = await iso.hGet(routesKey(ns), name);
     if (currentActive === version) {
@@ -179,19 +199,16 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     }
 
     const bundleMetaRaw = await iso.hGet(bundleKey(ns, name, version), "__meta__");
-    if (!bundleMetaRaw) {
-      throw new VersionDeleteError(404, "version_not_found", {
+    const bundleMeta = parseBundleMeta(bundleMetaRaw, {
+      ns,
+      worker: name,
+      version,
+      makeError: ({ reason }) => new VersionDeleteError(500, "corrupt_meta", {
         namespace: ns, name, version,
-      });
-    }
-    let bundleMeta;
-    try {
-      bundleMeta = JSON.parse(bundleMetaRaw);
-    } catch {
-      throw new VersionDeleteError(500, "corrupt_meta", {
-        namespace: ns, name, version,
-      });
-    }
+        stage: "target_meta_parse",
+        detail: reason,
+      }),
+    });
 
     const referrerMembers = await iso.sMembers(referrersKey(ns, name, version));
     if (referrerMembers.length > 0) {
@@ -203,8 +220,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
 
     const outgoingRefs = extractOutgoingRefs(bundleMeta.bindings, ns);
     const d1Refs = extractD1Refs(bundleMeta.bindings);
-    const prefix = bundleMeta.assets && bundleMeta.assets.prefix
-      ? bundleMeta.assets.prefix : null;
+    const prefix = bundleAssetPrefix(bundleMeta);
 
     // Secret-bump COPY can make siblings share the same assets prefix;
     // skip the cleanup task if any other retained version still points
@@ -215,18 +231,17 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       for (const otherV of currentVersions) {
         if (otherV === version) continue;
         const otherRaw = await iso.hGet(bundleKey(ns, name, otherV), "__meta__");
-        if (!otherRaw) continue;
-        let otherMeta;
-        try {
-          otherMeta = JSON.parse(otherRaw);
-        } catch (err) {
-          throw new VersionDeleteError(500, "corrupt_meta", {
+        const otherMeta = parseBundleMeta(otherRaw, {
+          ns,
+          worker: name,
+          version: otherV,
+          makeError: ({ reason }) => new VersionDeleteError(500, "corrupt_meta", {
             namespace: ns, name, version: otherV,
             stage: "sibling_meta_parse",
-            detail: errMessage(err),
-          });
-        }
-        if (otherMeta && otherMeta.assets && otherMeta.assets.prefix === prefix) {
+            detail: reason,
+          }),
+        });
+        if (bundleAssetPrefix(otherMeta) === prefix) {
           skipS3Cleanup = true;
           break;
         }
@@ -234,6 +249,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     }
 
     const hasWorkerSecrets = (await iso.exists(workerSecretsKey(ns, name))) > 0;
+    const hasWorkflowDefs = (await iso.exists(workflowDefsKey(ns, name))) > 0;
     const lastRetainedNoActive =
       currentVersions.length === 1 &&
       currentVersions[0] === version &&
@@ -253,11 +269,10 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       databaseIdFor: (ref) => /** @type {string} */ (ref.databaseId),
     });
     if (lastRetainedNoActive) {
-      // Single-version DELETE must never touch worker secrets — that's
-      // whole-delete's job. A worker with secrets but no bundles /
-      // active projection stays in workers:<ns> as a secret-only entry.
+      // Single-version DELETE leaves non-version lifecycle state for
+      // whole-delete. Keep those workers discoverable through workers:<ns>.
       stageWorkerVersionIndexDelete(multi, ns, name);
-      if (!hasWorkerSecrets) {
+      if (!hasWorkerSecrets && !hasWorkflowDefs) {
         stageWorkerHidden(multi, ns, name);
       }
     }

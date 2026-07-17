@@ -19,6 +19,7 @@ import {
   createHttpRequestScope,
 } from "shared-request-scope";
 import {
+  deleteGatewayInternalHeaders,
   isWebSocketUpgrade,
   normalizeRequestHost,
 } from "gateway-lib";
@@ -37,6 +38,7 @@ import {
   runtimeForwardOutcome,
 } from "gateway-runtime";
 import { formatWorkerId } from "shared-worker-id";
+import { platformDomainFromEnv } from "shared-ns-pattern";
 
 // Re-exported so workerd's capnp `durableObjectNamespaces` entry resolves
 // the class name against this worker's exports.
@@ -62,19 +64,6 @@ function notFoundResponse() {
 }
 
 const bindLogLevel = createLogLevelBinder();
-const INTERNAL_HEADER_PREFIX = "x-wdl-";
-const INTERNAL_FORWARD_HEADERS = [
-  "x-worker-id",
-  "x-worker-prefix",
-];
-
-/** @param {Headers} headers */
-function stripClientInternalHeaders(headers) {
-  for (const header of INTERNAL_FORWARD_HEADERS) headers.delete(header);
-  for (const header of [...headers.keys()]) {
-    if (header.toLowerCase().startsWith(INTERNAL_HEADER_PREFIX)) headers.delete(header);
-  }
-}
 
 export default {
   /**
@@ -86,7 +75,6 @@ export default {
     bindLogLevel(env);
     const url = new URL(request.url);
     const redis = createGatewayRedis(env.REDIS_ADDR);
-    const platformDomain = normalizeRequestHost(env.PLATFORM_DOMAIN || "workers.local").toLowerCase();
     /** @type {string | null} */
     let namespace = null;
     /** @type {string | null} */
@@ -100,12 +88,13 @@ export default {
       log,
       route: "worker_fetch",
       extras: () => ({ namespace, worker, version }),
+      responseHeaderFilter: deleteGatewayInternalHeaders,
     });
 
-    const subscriberStart = ensureGatewaySubscriber(env.REDIS_ADDR);
-    if (subscriberStart) ctx.waitUntil(subscriberStart);
-
     try {
+      const subscriberStart = ensureGatewaySubscriber(env.REDIS_ADDR);
+      if (subscriberStart) ctx.waitUntil(subscriberStart);
+
       if (url.pathname === "/healthz" && request.method === "GET") {
         scope.setRoute("healthz");
         return scope.respond(jsonResponse(200, {
@@ -120,6 +109,9 @@ export default {
         prepareGatewayMetrics();
         return scope.respond(prometheusResponse(metrics));
       }
+
+      // After health/metrics so a malformed PLATFORM_DOMAIN cannot 502 probes.
+      const platformDomain = platformDomainFromEnv(env);
 
       // Admin host short-circuit runs before any ns / Redis lookup so
       // control stays reachable even mid-FLUSHALL / Redis outage.
@@ -145,7 +137,7 @@ export default {
       url.pathname = dispatch.forwardPath;
 
       const forwardRequest = new Request(url.toString(), request);
-      stripClientInternalHeaders(forwardRequest.headers);
+      deleteGatewayInternalHeaders(forwardRequest.headers);
       // Loader branches carry worker identity + prefix; control is
       // infrastructure and has no worker id to inject.
       if (dispatch.bindingName !== "CONTROL") {

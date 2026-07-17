@@ -3,10 +3,16 @@ import {
   jsonError,
   readJsonBody,
   errMessage,
-  randomHex,
+  formatError,
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
+import {
+  acquireTokenLock,
+  createTokenLock,
+  releaseTokenLock,
+  renewTokenLock,
+} from "shared-redis-lock";
 import {
   migrationStatus,
   MIGRATIONS_TABLE_SQL,
@@ -17,6 +23,7 @@ import {
 } from "control-d1-model";
 import {
   d1RuntimeFailure,
+  d1RuntimeFailureLogFields,
   d1RuntimePublicResult,
   d1RuntimeQuery,
 } from "control-d1-runtime-client";
@@ -46,6 +53,38 @@ const MIGRATION_LOCK_TTL_SECONDS = 600;
 const MIGRATIONS_TABLE_NAME = "_wdl_d1_migrations";
 
 /**
+ * @param {string} event
+ * @param {string} reason
+ * @param {string} requestId
+ * @param {string} ns
+ * @param {string} databaseId
+ * @param {{ body?: unknown, status: number }} result
+ * @param {Record<string, unknown>} [extra]
+ */
+function logD1MigrationFailure(event, reason, requestId, ns, databaseId, result, extra = {}) {
+  requireControlLog()(result.status >= 500 ? "error" : "warn", event, {
+    request_id: requestId,
+    namespace: ns,
+    database_id: databaseId,
+    status: result.status,
+    reason,
+    ...extra,
+    ...d1RuntimeFailureLogFields(result),
+  });
+}
+
+/**
+ * @param {unknown[]} applied
+ * @param {unknown[]} skipped
+ */
+function migrationProgressLogFields(applied, skipped) {
+  return {
+    applied_count: applied.length,
+    skipped_count: skipped.length,
+  };
+}
+
+/**
  * @param {unknown[]} applied
  * @param {unknown[]} skipped
  */
@@ -60,28 +99,35 @@ function migrationProgress(applied, skipped) {
 async function acquireMigrationLock(ns, databaseId) {
   const redis = requireControlRedis();
   const key = migrationLockKey(ns, databaseId);
-  const token = randomHex();
-  const ok = await redis.set(key, token, { ttl: MIGRATION_LOCK_TTL_SECONDS, nx: true });
-  if (!ok) return null;
-  return { key, token };
+  const lock = createTokenLock(key);
+  return await acquireTokenLock(redis, lock, { ttlSeconds: MIGRATION_LOCK_TTL_SECONDS })
+    ? lock
+    : null;
 }
 
 /** @param {MigrationLock | null} lock */
 export async function renewMigrationLock(lock) {
   if (!lock) return { ok: false, reason: "lost" };
   const redis = requireControlRedis();
-  const renewed = await redis.set(lock.key, lock.token, {
-    ttl: MIGRATION_LOCK_TTL_SECONDS,
-    ifeq: lock.token,
-  });
+  const renewed = await renewTokenLock(redis, lock, MIGRATION_LOCK_TTL_SECONDS);
   return renewed ? { ok: true } : { ok: false, reason: "lost" };
 }
 
-/** @param {MigrationLock | null} lock */
-async function releaseMigrationLock(lock) {
+/**
+ * @param {MigrationLock | null} lock
+ * @param {{ log: import("control-shared").ControlLogger, ns: string, databaseId: string, requestId: string }} context
+ */
+async function releaseMigrationLock(lock, { log, ns, databaseId, requestId }) {
   if (!lock) return;
   const redis = requireControlRedis();
-  await redis.delIfEq(lock.key, lock.token);
+  await releaseTokenLock(redis, lock, {
+    onError: (err) => log("warn", "d1_migration_lock_release_failed", {
+      request_id: requestId,
+      namespace: ns,
+      database_id: databaseId,
+      ...formatError(err),
+    }),
+  });
 }
 
 /**
@@ -161,6 +207,10 @@ export async function listMigrations({ env, ns, databaseId, requestId }) {
   const database = checked.database;
   const applied = await readAppliedMigrationsIfTableExists(env, ns, database.databaseId, requestId);
   if (applied.ok === false) {
+    logD1MigrationFailure(
+      "d1_migrations_list_failed", "d1_migrations_list_failed",
+      requestId, ns, database.databaseId, applied
+    );
     return jsonResponse(applied.status, d1RuntimeFailure("d1_migrations_list_failed", ns, database.databaseId, applied));
   }
   return jsonResponse(200, {
@@ -187,6 +237,10 @@ export async function migrationStatusEndpoint({ request, env, ns, databaseId, re
   }
   const applied = await readAppliedMigrationsIfTableExists(env, ns, database.databaseId, requestId);
   if (applied.ok === false) {
+    logD1MigrationFailure(
+      "d1_migrations_status_failed", "d1_migrations_status_failed",
+      requestId, ns, database.databaseId, applied
+    );
     return jsonResponse(applied.status, d1RuntimeFailure("d1_migrations_status_failed", ns, database.databaseId, applied));
   }
   const migrations = migrationStatus(localMigrations, applied.migrations);
@@ -238,6 +292,11 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
   try {
     const existing = await readAppliedMigrations(env, ns, database.databaseId, requestId);
     if (existing.ok === false) {
+      logD1MigrationFailure(
+        "d1_migrations_apply_failed", "d1_migrations_apply_failed",
+        requestId, ns, database.databaseId, existing,
+        migrationProgressLogFields(appliedNow, skipped)
+      );
       return jsonResponse(existing.status, d1RuntimeFailure(
         "d1_migrations_apply_failed",
         ns,
@@ -301,6 +360,11 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
         },
       ], requestId);
       if (!result.ok) {
+        logD1MigrationFailure(
+          "d1_migration_apply_failed", "d1_migration_apply_failed",
+          requestId, ns, database.databaseId, result,
+          { migration_id: migration.id, ...migrationProgressLogFields(appliedNow, skipped) }
+        );
         return jsonResponse(result.status, d1RuntimeFailure(
           "d1_migration_apply_failed",
           ns,
@@ -320,7 +384,12 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
       appliedById.set(migration.id, record);
     }
   } finally {
-    await releaseMigrationLock(lock);
+    await releaseMigrationLock(lock, {
+      log,
+      ns,
+      databaseId: database.databaseId,
+      requestId,
+    });
   }
 
   log("info", "d1_migrations_applied", {

@@ -7,11 +7,16 @@ import {
   QUEUE_NAME_RE,
   BINDING_NAME_RE,
   KV_ID_RE,
+  D1_DATABASE_ID_RE,
   R2_BUCKET_NAME_RE,
   WDL_RESERVED_BINDING_RE,
   RESERVED_OBJECT_KEYS,
   RESERVED_TENANT_NS,
   WDL_RESERVED_ENTRYPOINT_RE,
+  MAX_DO_CLASS_NAME_BYTES,
+  isValidKvId,
+  isValidQueueName,
+  isValidWorkerName,
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
@@ -20,13 +25,8 @@ import { errorMessage } from "shared-errors";
 import {
   NS_RE,
   isAdminAcceptableNs,
-  isValidKvId,
-  isValidQueueName,
-  isValidWorkerName,
   MAX_QUEUE_DELAY_SECONDS,
 } from "control-lib";
-
-const D1_DATABASE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 // Narrower than SECRET_KEY_RE (no lowercase) so platform slot names read
 // as registered identifiers rather than local vars.
@@ -143,9 +143,14 @@ const BINDING_VALIDATORS = Object.assign(Object.create(null), /** @type {Record<
   },
   do(b, name) {
     const className = b.className;
-    if (typeof className !== "string" || !isValidJsClassDeclarationName(className)) {
+    if (
+      typeof className !== "string" ||
+      !isValidJsClassDeclarationName(className) ||
+      className.length > MAX_DO_CLASS_NAME_BYTES
+    ) {
       throw new Error(
-        `bindings.${name}: do className must be a valid JS class declaration name, got ${JSON.stringify(className)}`
+        `bindings.${name}: do className must be a valid JS class declaration name of at most ` +
+          `${MAX_DO_CLASS_NAME_BYTES} bytes, got ${JSON.stringify(className)}`
       );
     }
     assertNotRuntimeReservedEntrypoint(`bindings.${name}`, className);
@@ -457,6 +462,9 @@ export async function linkServiceBinding({
     targetMeta = await lookupTargetMeta(targetNs, service, targetVersion);
     if (!targetMeta) targetMeta = {};
   } catch (err) {
+    // The injected reader may classify persisted target metadata separately
+    // from transport failures; preserve that domain error at the link boundary.
+    if (err instanceof LinkError) throw err;
     const message = errorMessage(err);
     throw new LinkError(502, "service_binding_target_meta_unavailable",
       `bindings.${bindingName}: failed to read target meta: ${message}`);

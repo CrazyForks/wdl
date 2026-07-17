@@ -3,6 +3,33 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
 const WORKFLOWS_BASE_URL = "http://workflows/internal/workflows";
 const MAX_CREATE_BATCH = 100;
 const WORKFLOW_INSTANCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const intrinsicJsonStringify = JSON.stringify;
+const intrinsicObjectAssign = Object.assign;
+const intrinsicObjectCreate = Object.create;
+const intrinsicReflectApply = Reflect.apply;
+
+/** @param {unknown} value */
+function stringifyJson(value) {
+  return intrinsicReflectApply(intrinsicJsonStringify, undefined, [value]);
+}
+
+/**
+ * @param {Record<string, unknown>} fields
+ * @param {WorkflowMetadata} metadata
+ * @param {string | null} requestId
+ */
+function workflowRequestBody(fields, metadata, requestId) {
+  const body = /** @type {Record<string, unknown>} */ (intrinsicObjectCreate(null));
+  intrinsicObjectAssign(body, fields);
+  body.ns = metadata.ns;
+  body.worker = metadata.worker;
+  body.frozenVersion = metadata.version;
+  body.workflowName = metadata.name;
+  body.workflowKey = metadata.workflowKey;
+  body.className = metadata.className;
+  body.requestId = requestId;
+  return body;
+}
 
 /**
  * @typedef {{ fetch(url: string, init: RequestInit): Promise<Response> }} WorkflowBackend
@@ -144,7 +171,8 @@ export class Workflow {
       retention: opts.retention ?? null,
       callback: opts.callback ?? null,
     });
-    return this.#instance(body.id === undefined || body.id === null ? id : validateInstanceId(body.id));
+    const responseId = validateInstanceId(body.id);
+    return this.#instance(responseId);
   }
 
   /** @param {unknown} options */
@@ -168,15 +196,9 @@ export class Workflow {
     if (!Array.isArray(body.instances)) {
       throw new Error("Workflow createBatch response must include instances");
     }
-    const instances = body.instances;
-    const expectedIds = new Set(entries.map((entry) => entry.instanceId));
-    return instances.map((entry, index) => {
+    return body.instances.map((entry, index) => {
       const instance = ensureObject(entry, "Workflow createBatch response entry");
       const id = validateCreateBatchResponseId(instance.id, index);
-      if (!expectedIds.has(id)) {
-        const expected = [...expectedIds].join(", ");
-        throw new Error(`Workflow createBatch response id mismatch: unexpected ${id}; expected one of ${expected}`);
-      }
       return this.#instance(id);
     });
   }
@@ -185,12 +207,13 @@ export class Workflow {
   async get(id) {
     validateInstanceId(id);
     const body = await this.#call("get", { instanceId: id });
-    return this.#instance(body.id === undefined || body.id === null ? id : validateInstanceId(body.id));
+    const responseId = validateInstanceId(body.id);
+    return this.#instance(responseId);
   }
 
   /** @param {string} id */
   #instance(id) {
-    return new WorkflowInstance(id, this.#call.bind(this));
+    return new WorkflowInstance(id, (endpoint, fields) => this.#call(endpoint, fields));
   }
 
   /** @param {string} endpoint @param {Record<string, unknown>} [fields] */
@@ -199,20 +222,15 @@ export class Workflow {
       throw new Error("Workflow backend is not configured");
     }
     const metadata = this.#metadata;
-    const body = {
-      ...fields,
-      ns: metadata.ns,
-      worker: metadata.worker,
-      frozenVersion: metadata.version,
-      workflowName: metadata.name,
-      workflowKey: metadata.workflowKey,
-      className: metadata.className,
-      requestId: requestIdFromOptions(this.#options),
-    };
+    const requestId = requestIdFromOptions(this.#options);
+    const body = workflowRequestBody(fields, metadata, requestId);
     const response = await this.#backend.fetch(`${WORKFLOWS_BASE_URL}/${endpoint}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: {
+        "content-type": "application/json",
+        ...(requestId ? { "x-request-id": requestId } : {}),
+      },
+      body: stringifyJson(body),
     });
     return await readWorkflowResponse(response);
   }

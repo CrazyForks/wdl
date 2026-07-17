@@ -44,7 +44,6 @@ variable "runtime_desired_count" { type = number }
 variable "d1_runtime_desired_count" { type = number }
 variable "do_runtime_desired_count" { type = number }
 variable "d1_test_hooks_enabled" { type = bool }
-variable "do_test_hooks_enabled" { type = bool }
 variable "scheduler_desired_count" { type = number }
 variable "workflows_desired_count" { type = number }
 variable "gateway_cpu" { type = number }

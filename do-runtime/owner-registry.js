@@ -4,7 +4,9 @@ import {
 } from "shared-redis";
 import {
   buildOwnerKey,
+  DO_OWNERSHIP_CODE,
   DoRuntimeError,
+  hostIdForShard,
 } from "do-runtime-protocol";
 import {
   resolveTaskIdentity,
@@ -20,6 +22,8 @@ import {
 import { createRedisClient } from "do-runtime-redis";
 import { envValueOr } from "shared-env";
 import { errorMessage } from "shared-errors";
+import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import {
   boundedPositiveIntEnv,
   currentOwnerGenerationCounter,
@@ -34,25 +38,33 @@ import {
   ownerProtocolKeys,
   readOwnerRecord,
   readOwnerRecordWithRedisTime,
+  readOwnerSnapshotWithRedisTime,
   stageOwnerClaim,
   stageOwnerRelease,
   stageOwnerRenew,
 } from "shared-owner-protocol";
-import { doStorageIdKey } from "shared-version";
+import {
+  DO_OWNER_SCOPE_PREFIX,
+  VERSION_DELETE_LOCK_KIND,
+  deleteLockKey,
+  doStorageIdKey,
+  parseDeleteLockKind,
+} from "shared-worker-contract";
 
 const DEFAULT_OWNER_TTL_SECONDS = 120;
 const DEFAULT_RENEW_CONCURRENCY = 8;
 const MAX_RENEW_CONCURRENCY = 64;
 const DEFAULT_OWNER_LEASE_GUARD_MS = 1_000;
-const OWNER_PREFIX = "do:owner:scope:";
 const OWNER_CLAIM_RETRIES = 3;
 const OWNER_RENEW_FRACTION = 0.5;
+const DO_OWNER_PORT = 8788;
 
 /**
  * @typedef {Record<string, unknown> & { REDIS_ADDR?: unknown, REDIS_DB?: unknown, DO_OWNER_TTL_SECONDS?: unknown, DO_OWNER_LEASE_GUARD_MS?: unknown, DO_RENEW_CONCURRENCY?: unknown }} DoEnv
  * @typedef {{ taskId: string, endpoint: string }} LocalTask
  * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
  * @typedef {{ ownerKey: string, taskId: string, generation: number }} OwnerFence
+ * @typedef {{ ns: string, worker: string }} BundleScope
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {{ hostId: string, className?: string, ns: string, worker: string, doStorageId: string }} InvokeScope
  * @typedef {{ get(key: string): Promise<string | Uint8Array | null | undefined>, getWithTime(key: string): Promise<{ value: string | Uint8Array | null | undefined, nowMs: number }>, time(): Promise<number>, watch?(...keys: string[]): Promise<unknown>, unwatch?(): Promise<unknown>, multi?(): import("shared-redis").RedisMulti }} RedisLike
@@ -82,24 +94,31 @@ export function renewConcurrency(env) {
 
 /** @param {string} ownerKey */
 export function ownerKeyOf(ownerKey) {
-  return ownerProtocolKeys(OWNER_PREFIX, ownerKey).ownerKey;
+  return ownerProtocolKeys(DO_OWNER_SCOPE_PREFIX, ownerKey).ownerKey;
 }
 
 /** @param {string} ownerKey */
 export function ownerGenerationKeyOf(ownerKey) {
-  return ownerProtocolKeys(OWNER_PREFIX, ownerKey).generationKey;
+  return ownerProtocolKeys(DO_OWNER_SCOPE_PREFIX, ownerKey).generationKey;
 }
 
-/** @param {DoInvoke} invoke */
+/** @param {unknown} value @returns {value is BundleScope & Record<string, unknown>} */
+function isValidBundleScope(value) {
+  const scope = /** @type {Record<string, unknown>} */ (value);
+  return isValidRuntimeLoadNs(scope?.ns) &&
+    typeof scope?.worker === "string" &&
+    WORKER_NAME_RE.test(scope.worker);
+}
+
+/** @param {DoInvoke} invoke @returns {InvokeScope} */
 function requireInvokeScope(invoke) {
   const record = /** @type {Record<string, unknown>} */ (invoke);
   if (
     typeof record.hostId !== "string" || !record.hostId ||
-    typeof record.ns !== "string" || !record.ns ||
-    typeof record.worker !== "string" || !record.worker ||
+    !isValidBundleScope(record) ||
     typeof record.doStorageId !== "string" || !record.doStorageId
   ) {
-    throw new DoRuntimeError(400, "invalid_request", "DO owner request is missing bundle scope");
+    throw new DoRuntimeError(400, "invalid_request", "DO owner request has missing or invalid bundle scope");
   }
   return {
     hostId: record.hostId,
@@ -110,11 +129,57 @@ function requireInvokeScope(invoke) {
   };
 }
 
-/** @param {unknown} raw @returns {DoOwner | null} */
-export function parseOwner(raw) {
-  return /** @type {DoOwner | null} */ (
+/**
+ * @param {DoOwner | null} owner
+ * @param {string} expectedOwnerKey
+ * @param {BundleScope | null | undefined} expectedBundleScope
+ */
+function ownerMatchesScope(owner, expectedOwnerKey, expectedBundleScope) {
+  if (
+    !owner ||
+    typeof owner.ownerKey !== "string" || owner.ownerKey !== expectedOwnerKey ||
+    typeof owner.hostId !== "string" || owner.hostId !== expectedOwnerKey ||
+    typeof owner.className !== "string" || !owner.className ||
+    !isValidBundleScope(owner) ||
+    typeof owner.doStorageId !== "string" || !owner.doStorageId
+  ) return false;
+  if (
+    expectedBundleScope &&
+    (!isValidBundleScope(expectedBundleScope) ||
+      owner.ns !== expectedBundleScope.ns ||
+      owner.worker !== expectedBundleScope.worker)
+  ) return false;
+  const shardMarker = ":shard";
+  const markerIndex = expectedOwnerKey.lastIndexOf(shardMarker);
+  if (markerIndex < 0) return false;
+  const shard = Number(expectedOwnerKey.slice(markerIndex + shardMarker.length));
+  try {
+    return hostIdForShard(owner.doStorageId, owner.className, shard) === expectedOwnerKey;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {unknown} raw
+ * @param {string} expectedOwnerKey
+ * @param {BundleScope | null} [expectedBundleScope]
+ * @returns {DoOwner | null}
+ */
+export function parseOwner(raw, expectedOwnerKey, expectedBundleScope = null) {
+  if (raw == null) return null;
+  const owner = /** @type {DoOwner | null} */ (
     parseOwnerRecord(/** @type {string | BufferSource | null | undefined} */ (raw))
   );
+  if (
+    !owner ||
+    !ownerMatchesScope(owner, expectedOwnerKey, expectedBundleScope) ||
+    typeof owner.taskId !== "string" || !owner.taskId ||
+    !validOwnerEndpointForService(owner.endpoint, DO_OWNER_PORT, "do-runtime")
+  ) {
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE, "DO owner record is invalid");
+  }
+  return owner;
 }
 
 /**
@@ -165,7 +230,7 @@ function renewedOwnerRecordFor(env, current, localTask, nowMs) {
  * @returns {Promise<DoOwner | null>}
  */
 async function readOwnerFromClient(client, ownerKey) {
-  return await readOwnerRecord(client, ownerKeyOf(ownerKey), parseOwner);
+  return await readOwnerRecord(client, ownerKeyOf(ownerKey), (raw) => parseOwner(raw, ownerKey));
 }
 
 /**
@@ -174,15 +239,19 @@ async function readOwnerFromClient(client, ownerKey) {
  * @returns {Promise<{ owner: DoOwner | null, nowMs: number }>}
  */
 async function readOwnerWithTimeFromClient(client, ownerKey) {
-  return await readOwnerRecordWithRedisTime(client, ownerKeyOf(ownerKey), parseOwner);
+  return await readOwnerRecordWithRedisTime(
+    client,
+    ownerKeyOf(ownerKey),
+    (raw) => parseOwner(raw, ownerKey)
+  );
 }
 
 /**
  * @param {RedisLike} session
- * @param {DoOwner | null | undefined} owner
+ * @param {Pick<DoOwner, "ns" | "worker" | "doStorageId"> | null | undefined} owner
  */
 async function ownerStoragePointerCurrent(session, owner) {
-  if (!owner?.ns || !owner.worker || !owner.doStorageId) return false;
+  if (!owner?.doStorageId || !isValidBundleScope(owner)) return false;
   const current = decodeBulk(await session.get(doStorageIdKey(owner.ns, owner.worker)));
   return current === owner.doStorageId;
 }
@@ -274,16 +343,36 @@ export async function resolveDoOwner(env, invoke) {
   const ownerKey = buildOwnerKey(scope);
   const key = ownerKeyOf(ownerKey);
   const generationKey = ownerGenerationKeyOf(ownerKey);
+  const workerDeleteLockKey = deleteLockKey(scope.ns, scope.worker);
+  const storagePointerKey = doStorageIdKey(scope.ns, scope.worker);
 
   return await withWatchRetries(async () => client.session(async (session) => {
-    await session.watch(key, generationKey);
-    const { owner: current, nowMs } = await readOwnerWithTimeFromClient(session, ownerKey);
+    await session.watch(key, generationKey, workerDeleteLockKey);
+    const { owner: current, relatedValues, nowMs } = await readOwnerSnapshotWithRedisTime(
+      session,
+      key,
+      [workerDeleteLockKey],
+      (raw) => parseOwner(raw, ownerKey, scope)
+    );
+    const deleteLockToken = decodeBulk(relatedValues[0]);
+    if (
+      deleteLockToken != null &&
+      parseDeleteLockKind(deleteLockToken) !== VERSION_DELETE_LOCK_KIND
+    ) {
+      await session.unwatch();
+      forgetOwnedScope(ownerKey);
+      throw new DoRuntimeError(
+        503,
+        DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
+        `DO scope ${ownerKey} worker is being deleted`
+      );
+    }
     if (current && !ownerLeaseExpired(current, nowMs)) {
-      await session.watch(doStorageIdKey(scope.ns, scope.worker));
+      await session.watch(storagePointerKey);
       if (!await ownerStoragePointerCurrent(session, current)) {
         await session.unwatch();
         forgetOwnedScope(ownerKey);
-        throw new DoRuntimeError(503, "stale_owner_storage", `DO scope ${ownerKey} no longer matches active worker storage`);
+        throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE, `DO scope ${ownerKey} no longer matches active worker storage`);
       }
       if (current.taskId !== localTask.taskId) {
         await session.unwatch();
@@ -292,7 +381,7 @@ export async function resolveDoOwner(env, invoke) {
         return current;
       }
       if (isDraining()) {
-        throw new DoRuntimeError(503, "task_draining", "DO task is draining");
+        throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
       }
       const alreadyLocal = ownedScopes.has(ownerKey);
       const counter = alreadyLocal ? current.generation : await currentOwnerGenerationCounter(session, generationKey);
@@ -315,7 +404,17 @@ export async function resolveDoOwner(env, invoke) {
     }
 
     if (isDraining()) {
-      throw new DoRuntimeError(503, "task_draining", "DO task is draining");
+      throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
+    }
+    await session.watch(storagePointerKey);
+    if (!await ownerStoragePointerCurrent(session, scope)) {
+      await session.unwatch();
+      forgetOwnedScope(ownerKey);
+      throw new DoRuntimeError(
+        503,
+        DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
+        `DO scope ${ownerKey} no longer matches active worker storage`
+      );
     }
     const generation = await nextOwnerGeneration(session, generationKey, current?.generation);
     const owner = ownerRecordFor(env, invoke, localTask, generation, nowMs);
@@ -331,7 +430,7 @@ export async function resolveDoOwner(env, invoke) {
       generation,
     });
     return owner;
-  }), "owner_claim_raced", `failed to resolve DO owner for ${ownerKey}`);
+  }), DO_OWNERSHIP_CODE.OWNER_CLAIM_RACED, `failed to resolve DO owner for ${ownerKey}`);
 }
 
 /**
@@ -342,21 +441,21 @@ export async function resolveDoOwner(env, invoke) {
  */
 export async function assertCurrentOwnerWithLeaseBudget(env, owner, options = {}) {
   if (!owner?.ownerKey || !owner.taskId || owner.generation == null) {
-    throw new DoRuntimeError(503, "owner_fence_missing", "DO host request is missing an owner generation fence");
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING, "DO host request is missing an owner generation fence");
   }
   const client = redisClient(env);
   const { owner: current, nowMs } = await readOwnerWithTimeFromClient(client, owner.ownerKey);
   if (!current || !ownerFenceMatches(current, owner)) {
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "stale_owner_generation", `DO scope ${owner.ownerKey} owner generation is stale`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_GENERATION, `DO scope ${owner.ownerKey} owner generation is stale`);
   }
   if (ownerLeaseExpired(current, nowMs)) {
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "owner_lease_expired", `DO scope ${owner.ownerKey} owner lease has expired`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED, `DO scope ${owner.ownerKey} owner lease has expired`);
   }
   if (!await ownerStoragePointerCurrent(client, current)) {
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "stale_owner_storage", `DO scope ${owner.ownerKey} no longer matches active worker storage`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE, `DO scope ${owner.ownerKey} no longer matches active worker storage`);
   }
   const leaseRemainingMs = Number(current.leaseExpiresAt ?? 0) - nowMs;
   if (leaseRemainingMs < ownerLeaseGuardMs(env)) {
@@ -376,7 +475,7 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options = {}
       }
     }
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "owner_lease_too_short", `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT, `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
   }
   return {
     owner: current,
@@ -402,9 +501,9 @@ export async function renewOwner(env, owner) {
   const client = redisClient(env);
   const key = ownerKeyOf(owner.ownerKey);
   return await withWatchRetries(async () => client.session(async (session) => {
-    // Redis WATCH observes explicit writes/deletes, not passive TTL expiry.
-    // Renewal is therefore a freshness optimization; generation fencing remains
-    // the authority if a peer claims the scope in the tiny expiry window.
+    // Valkey expiration deletes invalidate WATCH just like explicit writes.
+    // Generation fencing remains authoritative if a peer claims the scope after
+    // the lease expires and before this renewal commits.
     await session.watch(key);
     const { owner: current, nowMs } = await readOwnerWithTimeFromClient(session, owner.ownerKey);
     if (!current || !ownerFenceMatches(current, owner)) {
@@ -432,7 +531,7 @@ export async function renewOwner(env, owner) {
     await stageOwnerRenew(session.multi(), key, renewed, ownerTtlSeconds(env)).exec();
     rememberOwner(renewed);
     return { renewed: true, owner: renewed, nowMs };
-  }), "owner_renew_raced", `failed to renew DO owner for ${owner.ownerKey}`);
+  }), DO_OWNERSHIP_CODE.OWNER_RENEW_RACED, `failed to renew DO owner for ${owner.ownerKey}`);
 }
 
 /** @param {DoEnv} env */
@@ -501,7 +600,7 @@ export async function releaseOwner(env, owner) {
   const key = ownerKeyOf(owner.ownerKey);
   return await withWatchRetries(async () => client.session(async (session) => {
     await session.watch(key);
-    const current = parseOwner(await session.get(key));
+    const current = parseOwner(await session.get(key), owner.ownerKey);
     if (!ownerFenceMatches(current, owner)) {
       await session.unwatch();
       forgetOwnedScope(owner.ownerKey);
@@ -510,7 +609,7 @@ export async function releaseOwner(env, owner) {
     await stageOwnerRelease(session.multi(), key).exec();
     forgetOwnedScope(owner.ownerKey);
     return { released: true, owner: null };
-  }), "owner_release_raced", `failed to release DO owner for ${owner.ownerKey}`);
+  }), DO_OWNERSHIP_CODE.OWNER_RELEASE_RACED, `failed to release DO owner for ${owner.ownerKey}`);
 }
 
 /** @param {DoEnv} env */

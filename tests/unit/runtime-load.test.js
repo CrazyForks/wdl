@@ -6,13 +6,16 @@ import { pathToFileURL } from "node:url";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
-  moduleDataUrl,
+  readRepositoryJson,
   readRepositoryModuleSource,
   repositoryFileUrl,
+  repositoryModuleDataUrl,
 } from "../helpers/load-shared-module.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { makeRecordingFetch, withMockedFetch } from "../helpers/mock-fetch.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
+import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 import {
@@ -26,21 +29,23 @@ const SHARED_WORKER_ID_URL = repositoryFileUrl("shared/worker-id.js");
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
-const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
-const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
-const SHARED_REDIS_URL = moduleDataUrl(`
-export class WatchError extends Error {
-  constructor(message = "watched key changed") {
-    super(message);
-    this.name = "WatchError";
-  }
-}
-`);
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
+const SHARED_REDIS_URL = sharedRedisStubUrl();
+const { libUrl: CONTROL_LIB_URL } = await compileControlGraph();
+const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl(
+  "runtime/load/env-build.js",
+  importSpecifierReplacements({
+    "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+    "shared-worker-contract": WORKER_CONTRACT_URL,
+  })
+);
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 const FETCH_STUB = { fetch() {} };
 const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
+  "control-lib": CONTROL_LIB_URL,
+  "runtime-load-env-build": RUNTIME_ENV_BUILD_URL,
   "shared-secret-envelope": SHARED_SECRET_ENVELOPE_URL,
-  "shared-errors": SHARED_ERRORS_URL,
-  "shared-version": SHARED_VERSION_URL,
+  "shared-worker-contract": WORKER_CONTRACT_URL,
   "shared-redis": SHARED_REDIS_URL,
 }));
 const RUNTIME_LOAD_INJECTION_SOURCES_URL = stubRuntimeInjectionSourcesUrl();
@@ -69,6 +74,15 @@ const src = readRepositoryModuleSource("runtime/load.js", [
     "shared-respond": SHARED_RESPOND_URL,
   }),
   [
+    /import \{ evictSiblings, recordLoadedWorker \} from "runtime-state";/,
+    `const recordLoadedWorker = (workerId) => {
+       /** @type {any[]} */ (globalThis).__runtimeLoadRecordedWorkers.push(workerId);
+     };
+     const evictSiblings = async (options) => {
+       /** @type {any[]} */ (globalThis).__runtimeLoadEvictions.push(options);
+     };`
+  ],
+  [
     /from "runtime-load-code-budget";/,
     'from "./load/code-budget.js";'
   ],
@@ -95,6 +109,7 @@ const LOAD_TEST_RUNTIME_DIR = path.join(LOAD_TEST_DIR, "runtime");
 const LOAD_TEST_SUBMODULE_DIR = path.join(LOAD_TEST_RUNTIME_DIR, "load");
 const ENV_BUILD_SOURCE = readRepositoryModuleSource("runtime/load/env-build.js", importSpecifierReplacements({
   "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+  "shared-worker-contract": WORKER_CONTRACT_URL,
 }));
 mkdirSync(LOAD_TEST_SUBMODULE_DIR, { recursive: true });
 writeFileSync(path.join(LOAD_TEST_RUNTIME_DIR, "load.js"), src);
@@ -113,12 +128,16 @@ for (const name of ["env-build.js", "code-budget.js", "module-rewrite.js", "wrap
 }
 after(() => removeTempDir(LOAD_TEST_DIR));
 
+/** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers = [];
+/** @type {any} */ (globalThis).__runtimeLoadEvictions = [];
+
 const mod = await import(pathToFileURL(path.join(LOAD_TEST_RUNTIME_DIR, "load.js")).href);
 const codeBudgetMod = await import(pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "code-budget.js")).href);
 const {
   buildWorkerEnv,
   createLoaderCallback,
   decodeRuntimeLoadPayload,
+  getLoadedWorkerStub,
   runtimeLoadContentTypeMatches,
   wrapWorkerCodeForHostBindings,
 } = mod;
@@ -625,6 +644,7 @@ test("buildWorkerEnv: service binding with requiredCallerSecrets filters from ns
     makeCtx()
   );
   // Listed keys only, worker wins over ns, missing key silently absent.
+  assert.equal(Object.getPrototypeOf(env.JSJ.props.callerSecrets), Object.prototype);
   assert.deepEqual(env.JSJ.props.callerSecrets, { JSJ_API_KEY: "worker-level-key" });
   assert.equal(env.JSJ.props.callerNs, "demo");
   assert.equal(env.JSJ.props.targetNs, "__platform__");
@@ -653,6 +673,7 @@ test("buildWorkerEnv: requiredCallerSecrets does NOT fall back to vars", () => {
     "https://assets.example",
     makeCtx()
   );
+  assert.equal(Object.getPrototypeOf(env.JSJ.props.callerSecrets), Object.prototype);
   assert.deepEqual(env.JSJ.props.callerSecrets, {});
 });
 
@@ -742,7 +763,23 @@ test("buildWorkerEnv: D1 binding requires databaseId", () => {
         "https://assets.example",
         makeCtx()
       ),
-    /D1 binding but missing databaseId/
+    /D1 binding but has invalid databaseId/
+  );
+});
+
+test("buildWorkerEnv: D1 bindings revalidate namespace and database id grammar", () => {
+  assert.throws(
+    () => buildWorkerEnv(
+      { bindings: { DB: { type: "d1", databaseId: "db/child" } } },
+      {},
+      {},
+      "demo",
+      "app",
+      "v1",
+      "https://assets.example",
+      makeCtx()
+    ),
+    /invalid databaseId/
   );
 });
 
@@ -778,6 +815,26 @@ test("buildWorkerEnv: service binding requires service and version", () => {
       ),
     /service binding but missing service\/version/
   );
+});
+
+test("buildWorkerEnv: stored service binding versions match the shared fixture", () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    if (parsed != null || tag === "") continue;
+    assert.throws(
+      () => buildWorkerEnv(
+        { bindings: { AUTH: { type: "service", service: "auth", version: tag } } },
+        {},
+        {},
+        "demo",
+        "app",
+        "v1",
+        "https://assets.example",
+        makeCtx()
+      ),
+      /service binding but has invalid version/,
+      tag
+    );
+  }
 });
 
 test("buildWorkerEnv: stored service binding cannot target runtime-reserved entrypoints", () => {
@@ -1157,6 +1214,77 @@ test("createLoaderCallback: attaches configured tail worker and always wraps mai
       assert.ok(!("meta" in workerCode), "loader callback should not propagate meta into the workerLoader object");
       assert.equal(fetchCalls.length, 1);
       assert.equal(fetchCalls[0].init.signal.aborted, false);
+    }
+  );
+});
+
+test("getLoadedWorkerStub records cache misses before scheduling active-version eviction", async () => {
+  /** @type {Array<{ id: string, factory: () => Promise<unknown> }>} */
+  const loaderCalls = [];
+  /** @type {Promise<unknown>[]} */
+  const backgroundTasks = [];
+  /** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers.length = 0;
+  /** @type {any} */ (globalThis).__runtimeLoadEvictions.length = 0;
+  const stub = { getEntrypoint() {} };
+  const env = {
+    REDIS_PROXY_URL: "http://redis-proxy.local",
+    WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
+    ASSETS_CDN_BASE: "https://assets.example",
+    PUBLIC_NETWORK: { kind: "public-network" },
+    LOADER: {
+      get(/** @type {string} */ id, /** @type {() => Promise<unknown>} */ factory) {
+        loaderCalls.push({ id, factory });
+        return stub;
+      },
+    },
+  };
+  const ctx = {
+    ...makeCtx(),
+    waitUntil(/** @type {Promise<unknown>} */ promise) {
+      backgroundTasks.push(promise);
+    },
+  };
+
+  await withMockedFetch(
+    async () => new Response(encodeRuntimeLoadPayload({
+      bundle: {
+        "__meta__": JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": { type: "module" } },
+        }),
+        "worker.js": "export default {};",
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": RUNTIME_LOAD_CONTENT_TYPE },
+    }),
+    async () => {
+      const loaded = getLoadedWorkerStub({
+        requestId: "rid-loader-wrapper",
+        env,
+        ctx,
+        ns: "demo",
+        worker: "app",
+        version: "v2",
+        evictOnLoad: true,
+      });
+
+      assert.equal(loaded.workerId, "demo:app:v2");
+      assert.equal(loaded.stub, stub);
+      assert.equal(loaderCalls.length, 1);
+      assert.equal(loaderCalls[0].id, "demo:app:v2");
+      assert.deepEqual(/** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers, []);
+
+      await loaderCalls[0].factory();
+      await Promise.all(backgroundTasks);
+
+      assert.deepEqual(/** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers, ["demo:app:v2"]);
+      assert.deepEqual(
+        /** @type {any} */ (globalThis).__runtimeLoadEvictions.map(
+          (/** @type {{ workerId: string }} */ entry) => entry.workerId
+        ),
+        ["demo:app:v2"]
+      );
     }
   );
 });
@@ -1546,21 +1674,23 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
 });
 
 test("wrapWorkerCodeForHostBindings rejects empty reserved module collisions", () => {
-  const workerCode = {
-    mainModule: "worker.js",
-    modules: {
-      "worker.js": "export default {};",
-      "_wdl-wrapper.js": "",
-    },
-  };
-
-  assert.throws(
-    () => injectRuntimeModulesForHostBindings(workerCode, {
+  for (const reserved of ["_wdl-wrapper.js", "_wdl-host-wrapper-runtime.js"]) {
+    const workerCode = {
       mainModule: "worker.js",
-      modules: { "worker.js": { type: "module" } },
-    }, STUB_RUNTIME_INJECTION_SOURCES),
-    /reserved module names/
-  );
+      modules: {
+        "worker.js": "export default {};",
+        [reserved]: "",
+      },
+    };
+
+    assert.throws(
+      () => injectRuntimeModulesForHostBindings(workerCode, {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "module" } },
+      }, STUB_RUNTIME_INJECTION_SOURCES),
+      /reserved module names/
+    );
+  }
 });
 
 test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserves original main module", () => {
@@ -1594,18 +1724,40 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /from "\.\/_wdl-d1-data-field\.js";/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-client.js"], /class D1Database/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \* as user from "\.\/src\/worker\.js";/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /Local wrapper subclasses intentionally shadow/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], /intrinsicArrayForEach/);
+  assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], /AsyncLocalStorage/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \* as __WdlHostRuntime__/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \* as __WdlUserModule__ from "\.\/src\/worker\.js";/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /Explicit aliases replace same-name star exports/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const D1_BINDINGS = \["DB"\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const R2_BINDINGS = \[\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \[\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new D1Database\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /requestIdFromEventArg/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /wrapClassInstance\(this, requestContext\)/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const HOST_WRAPPED_HANDLER_KEYS = \["fetch", "scheduled", "queue", "tail"\]/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export class Api extends user\.Api/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export class Admin extends user\.Admin/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /forEachArray\(HOST_WRAPPED_HANDLER_KEYS/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Api/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /__WdlWrappedEntrypoint\d+__ as Admin/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class default/);
+  assert.equal(/** @type {any} */ (workerCode).compatibilityFlags, undefined);
+});
+
+test("wrapWorkerCodeForHostBindings preserves compatibility flags", () => {
+  for (const input of [
+    ["no_nodejs_als"],
+    ["no_global_navigator", "no_nodejs_als"],
+    ["nodejs_compat", "no_nodejs_als"],
+  ]) {
+    const workerCode = {
+      compatibilityFlags: input,
+      mainModule: "worker.js",
+      modules: { "worker.js": "export default {};" },
+    };
+    wrapWorkerCodeForHostBindings(workerCode, {
+      bindings: { DB: { type: "d1", databaseId: "main" } },
+    });
+    assert.deepEqual(workerCode.compatibilityFlags, input);
+  }
 });
 
 test("wrapWorkerCodeForHostBindings: default object wraps inherited and accessor handler keys", async () => {
@@ -1670,18 +1822,34 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
     mainModule: "worker.js",
     modules: {
       "worker.js": `
+        import * as hostRuntime from "./_wdl-host-wrapper-runtime.js";
+        export function hostRuntimeContextExports() {
+          return {
+            currentRequestId: typeof hostRuntime.currentRequestId,
+            runWithRequestContext: typeof hostRuntime.runWithRequestContext,
+          };
+        }
         export class Api {
           constructor(ctx, env) { this.env = env; }
           dbConstructorName() { return this.env.DB?.constructor?.name; }
           rawDbVisible() { return this.env.DB?.raw === true; }
+          echo(value) { return value; }
         }
+        export class currentRequestId extends Api {}
+        export class runWithRequestContext extends Api {}
+        export class __wdlRunWithRequestContext extends Api {}
         export default {};
       `,
     },
   };
   wrapWorkerCodeForHostBindings(workerCode, {
     bindings: { DB: { type: "d1", databaseId: "main" } },
-    exports: [{ entrypoint: "Api", allowedCallers: ["*"] }],
+    exports: [
+      { entrypoint: "Api", allowedCallers: ["*"] },
+      { entrypoint: "currentRequestId", allowedCallers: ["*"] },
+      { entrypoint: "runWithRequestContext", allowedCallers: ["*"] },
+      { entrypoint: "__wdlRunWithRequestContext", allowedCallers: ["*"] },
+    ],
   });
 
   await withTempDir("wdl-d1-wrapper-", async (dir) => {
@@ -1696,7 +1864,8 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
     for (const [name, source] of Object.entries(workerCode.modules)) {
       const file = path.join(dir, name);
       const stubbed = name === "_wdl-wrapper.js"
-        ? source.replace(`from "cloudflare:workers"`, `from "./_cf_workers_stub.js"`)
+        ? source
+          .replace(`from "cloudflare:workers"`, `from "./_cf_workers_stub.js"`)
         : source;
       writeFileSync(file, stubbed);
     }
@@ -1712,6 +1881,14 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
     });
     assert.equal(instance.dbConstructorName(), "D1Database");
     assert.equal(instance.rawDbVisible(), false);
+    for (const name of ["currentRequestId", "runWithRequestContext", "__wdlRunWithRequestContext"]) {
+      assert.ok(new wrapped[name]({}, { DB: { raw: true } }) instanceof user[name]);
+    }
+
+    assert.deepEqual(wrapped.hostRuntimeContextExports(), {
+      currentRequestId: "undefined",
+      runWithRequestContext: "undefined",
+    });
   });
 });
 
@@ -1737,6 +1914,7 @@ test("wrapWorkerCodeForHostBindings: workers without host facades get only the a
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-d1-client.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-r2-client.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-client.js"], undefined);
+  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-transport.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], undefined);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /class NonRetryableError extends Error/);
@@ -1874,7 +2052,7 @@ test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object 
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \["ROOMS"\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new DurableObjectNamespace\(out\[name\], doOptions\(requestIdOrContext, doBackend, doOwnerNetwork\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export class Room extends user\.Room/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Room/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from/);
 });
 
@@ -1912,7 +2090,7 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback\(request, wrapEnv\(this\.env, requestIdFromEventArg\(request\)\)\)/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export class OrderWorkflow extends user\.OrderWorkflow/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.OrderWorkflow/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from "\.\/worker\.js";/);
 });
 

@@ -1,49 +1,57 @@
+x-rust-published: &rust-published
+  image: docker.io/getwdl/wdl-rust:latest
+  pull_policy: always
+
+x-workerd-published: &workerd-published
+  image: docker.io/getwdl/wdl-workerd:latest
+  pull_policy: always
+
 services:
   redis-proxy-user:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
+    build: !reset null
   redis-proxy-system:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
+    build: !reset null
   redis-proxy-do:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
+    build: !reset null
   scheduler:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
+    build: !reset null
   workflows:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
+    build: !reset null
   user-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   system-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   gateway:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   d1-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   d1-runtime-a:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   d1-runtime-b:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   d1-runtime-c:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   do-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   do-runtime-a:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   do-runtime-b:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null
   do-runtime-c:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
+    build: !reset null

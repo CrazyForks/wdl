@@ -36,6 +36,13 @@ Scheduler owns runtime delivery:
 - Cron code lives under `rust/scheduler/src/cron/`.
 - Queue registry, consume, delayed delivery, DLQ, and orphan handling live under
   `rust/scheduler/src/queue/`.
+- Before constructing a cron runtime worker id, scheduler revalidates the projection's
+  route namespace, worker name, and version with the canonical `wdl-rust-common`
+  grammar. Invalid cron refs are removed before slot advance or runtime dispatch, and
+  cron sweep does not recreate refs from malformed worker metadata. Queue consumer
+  dispatch identities are also revalidated before use. A noncanonical identity makes
+  the projection unusable and follows absent-consumer handling, so queued backlog may
+  move to the orphan stream.
 - Scheduler defaults to one replica in deployment, and current dispatch paths are
   multi-replica safe. Extra replicas improve runtime concurrency but do not imply
   zero-gap deployment: production rollout may still use stop-before-start semantics and
@@ -91,7 +98,9 @@ Cron uses wall-clock minute slots:
    computes each entry's next fire time with croner and the configured timezone, rounds
    it to the minute slot, and writes refs into slot buckets. This is repair logic, not
    the authority. Control uses JavaScript `croner` only for the initial promote-time
-   slot placement; scheduler uses Rust `croner` for repair and advancement.
+   slot placement; scheduler uses Rust `croner` for repair and advancement. Worker
+   hashes without canonical identity or metadata are skipped instead of reseeding
+   invalid refs, and emit a bounded `invalid_identity` or `invalid_meta` reason.
 3. Cron refs carry the entry generation. At fire time scheduler re-reads
    `crons:<ns>:<worker>` and compares `gen`; missing metadata, corrupt JSON, or
    generation mismatch makes the ref stale and removes it from the slot.
@@ -177,6 +186,9 @@ queue-orphaned:<ns>:<queue>       Stream, messages whose consumer disappeared
 queue-delayed-wake                Stream, wake signal for delayed ZSET dispatcher
 ```
 
+`wdl-rust-common::queue_keys` owns the wake stream and its `delayed_key` / `visible_at`
+entry fields so the redis-proxy producer and scheduler consumer cannot drift.
+
 Indexes are not authority. Writers add index entries, and scheduler reconcile owns stale
 cleanup after proving the referenced key is absent.
 
@@ -257,8 +269,10 @@ Important cron signals:
 - `cron_queue_lag_ms{outcome=...}`
 - `cron_bucket_size`
 - `cron_stale_refs_cleaned`
+- `cron_sweep_entries_skipped`
+- `cron_sweep_workers_skipped`
 - Logs: `cron_fired`, `cron_lease_lost`, `cron_ref_stale`, `cron_ref_stale_advanced`,
-  `cron_reconcile`
+  `cron_sweep_entry_skipped`, `cron_sweep_worker_skipped`, `cron_reconcile`
 
 Important queue signals:
 
@@ -294,6 +308,8 @@ Representative test anchors:
   consumers.
 - `tests/unit/control-lifecycle-indexes.test.js`: JS cron/queue key helpers and
   projection staging.
+- `tests/fixtures/queue-key-parse.json`: shared JS/Rust queue discovery-key parser
+  contract.
 - `tests/unit/runtime-lib.test.js`: internal dispatch body normalization.
 - `tests/unit/runtime-dispatch-handlers.test.js`: scheduled and queue dispatch behavior, tail
   event envelope behavior.
@@ -317,6 +333,6 @@ Representative test anchors:
 - Main queue streams are intentionally untrimmed; backlog is an operational signal.
 - Scheduler multi-replica safety is covered by integration tests for cron due-ref
   claiming, cron sweep recovery, queue reconcile plus consumer-group delivery, delayed
-  queue promotion, PEL reap, and workflow ticks. Durable Object alarms are now driven
-  by the Workflows service, not scheduler. Any new scheduler dispatch path must still
-  be audited for its own Redis lease/fence semantics before assuming replica safety.
+  queue promotion, PEL reap, and workflow ticks. The Workflows service drives Durable
+  Object alarms; scheduler does not. Any new scheduler dispatch path must be audited for
+  its own Redis lease/fence semantics before assuming replica safety.

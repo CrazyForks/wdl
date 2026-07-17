@@ -5,14 +5,15 @@ import { bundleToWorkerCode } from "runtime-lib";
 import { formatError } from "shared-observability";
 import { withInternalAuth } from "shared-internal-auth";
 import { discardResponseBody } from "shared-respond";
-import { parseRuntimeLoadWorkerId } from "shared-worker-id";
+import { formatWorkerId, parseRuntimeLoadWorkerId } from "shared-worker-id";
+import { evictSiblings, recordLoadedWorker } from "runtime-state";
 import {
   analyzeRuntimeMeta,
   injectRuntimeModulesForHostBindings,
 } from "runtime-load-code-budget";
 import { RUNTIME_INJECTION_SOURCES } from "runtime-load-injection-sources";
 import { buildWorkerEnv } from "runtime-load-env-build";
-export { buildWorkerEnv } from "runtime-load-env-build";
+export { buildWorkerEnv, doAlarmBindingProps } from "runtime-load-env-build";
 
 const REDIS_PROXY_LOAD_TIMEOUT_MS = 8000;
 
@@ -347,4 +348,57 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
       Date.now() - loadStartedAt));
     return workerCode;
   };
+}
+
+/**
+ * @template TStub
+ * @param {{
+ *   requestId: string | null,
+ *   env: RuntimeLoaderEnv & { LOADER: { get(id: string, factory: () => Promise<WorkerCodeShape>): TStub } },
+ *   ctx: { waitUntil(promise: Promise<unknown>): void },
+ *   ns: string,
+ *   worker: string,
+ *   version: string,
+ *   workerId?: string,
+ *   metrics?: RuntimeLoaderMetrics | null,
+ *   log?: ((level: string, event: string, fields?: Record<string, unknown>) => void) | null,
+ *   evictOnLoad?: boolean,
+ * }} options
+ * @returns {{ workerId: string, stub: TStub }}
+ */
+export function getLoadedWorkerStub({
+  requestId,
+  env,
+  ctx,
+  ns,
+  worker,
+  version,
+  workerId = formatWorkerId({ namespace: ns, worker, version }),
+  metrics = null,
+  log = null,
+  evictOnLoad = false,
+}) {
+  const baseCallback = createLoaderCallback({
+    requestId,
+    env,
+    ctx,
+    ns,
+    worker,
+    version,
+    workerId,
+    metrics,
+    log,
+  });
+  const stub = env.LOADER.get(workerId, async () => {
+    const code = await baseCallback();
+    recordLoadedWorker(workerId);
+    if (evictOnLoad) {
+      ctx.waitUntil(
+        evictSiblings({ env, workerId, log })
+          .catch(() => {})
+      );
+    }
+    return code;
+  });
+  return { workerId, stub };
 }

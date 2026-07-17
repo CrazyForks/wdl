@@ -1,8 +1,11 @@
 import {
+  R2_HTTP_METADATA_FIELDS,
   R2_OBJECT_MAX_BUFFER_BYTES,
   assertR2BufferSize,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
+  r2CacheExpiryFromHeaders,
+  setR2CacheExpiryHeader,
 } from "./_wdl-r2-utils.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
@@ -19,6 +22,9 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
  */
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicWeakMapGet = WeakMap.prototype.get;
+const intrinsicWeakMapSet = WeakMap.prototype.set;
 
 /** @param {unknown} value */
 function dateFromUnknown(value) {
@@ -40,6 +46,13 @@ function bytesToArrayBuffer(bytes) {
   );
 }
 
+/** @param {ReadableStreamDefaultReader<Uint8Array>} reader @param {unknown} reason */
+function cancelReaderBestEffort(reader, reason) {
+  try {
+    void reader.cancel(reason).catch(() => {});
+  } catch {}
+}
+
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
 async function readStreamWithLimit(stream, operation) {
   const reader = stream.getReader();
@@ -53,9 +66,10 @@ async function readStreamWithLimit(stream, operation) {
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
-        await reader.cancel(
+        cancelReaderBestEffort(
+          reader,
           `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
-        ).catch(() => {});
+        );
         assertR2BufferSize(total, operation);
       }
       chunks.push(chunk);
@@ -94,9 +108,10 @@ function cappedReadableStream(stream, operation) {
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
-        await reader.cancel(
+        cancelReaderBestEffort(
+          reader,
           `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
-        ).catch(() => {});
+        );
         try { reader.releaseLock(); } catch {}
         try {
           assertR2BufferSize(total, operation);
@@ -119,15 +134,17 @@ function cappedReadableStream(stream, operation) {
 
 /** @param {Headers} headers */
 function headersToHttpMetadata(headers) {
-  const expires = headers.get("expires");
-  return {
-    contentType: headers.get("content-type") || undefined,
-    contentLanguage: headers.get("content-language") || undefined,
-    contentDisposition: headers.get("content-disposition") || undefined,
-    contentEncoding: headers.get("content-encoding") || undefined,
-    cacheControl: headers.get("cache-control") || undefined,
-    cacheExpiry: expires ? new Date(expires).getTime() : undefined,
-  };
+  /** @type {AnyRecord} */
+  const out = {};
+  for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
+    out[field] = headers.get(header) || undefined;
+  }
+  const cacheExpiry = r2CacheExpiryFromHeaders(headers, { canonical: true });
+  if (headers.has("expires") && cacheExpiry === undefined) {
+    throw new TypeError("R2 httpMetadata Expires header must be canonical IMF-fixdate");
+  }
+  out.cacheExpiry = cacheExpiry;
+  return out;
 }
 
 /** @param {unknown} input */
@@ -140,14 +157,8 @@ function normalizeHttpMetadata(input) {
   /** @type {AnyRecord} */
   const out = {};
   const record = /** @type {AnyRecord} */ (input);
-  for (const key of [
-    "contentType",
-    "contentLanguage",
-    "contentDisposition",
-    "contentEncoding",
-    "cacheControl",
-  ]) {
-    if (record[key] != null) out[key] = String(record[key]);
+  for (const [field] of R2_HTTP_METADATA_FIELDS) {
+    if (record[field] != null) out[field] = String(record[field]);
   }
   if (record.cacheExpiry != null) {
     const ms = record.cacheExpiry instanceof Date
@@ -280,9 +291,19 @@ function metaWithDates(meta) {
 /** @type {WeakMap<R2Bucket, R2BucketState>} */
 const bucketState = new WeakMap();
 
+/** @param {WeakMap<object, unknown>} map @param {object} key */
+function weakMapGet(map, key) {
+  return intrinsicReflectApply(intrinsicWeakMapGet, map, [key]);
+}
+
+/** @param {WeakMap<object, unknown>} map @param {object} key @param {unknown} value */
+function weakMapSet(map, key, value) {
+  intrinsicReflectApply(intrinsicWeakMapSet, map, [key, value]);
+}
+
 /** @param {R2Bucket} bucket */
 function bucketRequestMeta(bucket) {
-  const state = bucketState.get(bucket);
+  const state = /** @type {R2BucketState | undefined} */ (weakMapGet(bucketState, bucket));
   if (!state) return {};
   const requestId = requestIdFromOptions(state.requestIdOptions);
   return requestId ? { requestId } : {};
@@ -320,17 +341,11 @@ export class R2Object {
   /** @param {Headers} headers */
   writeHttpMetadata(headers) {
     const h = this.httpMetadata || {};
-    const contentType = stringOrUndefined(h.contentType);
-    const contentLanguage = stringOrUndefined(h.contentLanguage);
-    const contentDisposition = stringOrUndefined(h.contentDisposition);
-    const contentEncoding = stringOrUndefined(h.contentEncoding);
-    const cacheControl = stringOrUndefined(h.cacheControl);
-    if (contentType) headers.set("content-type", contentType);
-    if (contentLanguage) headers.set("content-language", contentLanguage);
-    if (contentDisposition) headers.set("content-disposition", contentDisposition);
-    if (contentEncoding) headers.set("content-encoding", contentEncoding);
-    if (cacheControl) headers.set("cache-control", cacheControl);
-    if (h.cacheExpiry) headers.set("expires", dateFromUnknown(h.cacheExpiry).toUTCString());
+    for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
+      const value = stringOrUndefined(h[field]);
+      if (value) headers.set(header, value);
+    }
+    setR2CacheExpiryHeader(headers, h.cacheExpiry);
   }
 }
 
@@ -405,7 +420,7 @@ export class R2Bucket {
   constructor(stub, options = {}) {
     // Provider is used by class-style entrypoints where the same env wrapper
     // can serve different fetch/queue/scheduled invocations with different ids.
-    bucketState.set(this, {
+    weakMapSet(bucketState, this, {
       stub,
       requestIdOptions: options,
     });
@@ -413,7 +428,7 @@ export class R2Bucket {
 
   /** @param {string} key */
   async head(key) {
-    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.head !== "function") throw new TypeError("R2 stub head is not configured");
     const meta = await stub.head(normalizeR2ObjectKey(key), bucketRequestMeta(this));
     return meta ? new R2Object(meta) : null;
@@ -421,7 +436,7 @@ export class R2Bucket {
 
   /** @param {string} key @param {AnyRecord} [options] */
   async get(key, options) {
-    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.get !== "function") throw new TypeError("R2 stub get is not configured");
     const result = await stub.get(
       normalizeR2ObjectKey(key),
@@ -435,14 +450,15 @@ export class R2Bucket {
 
   /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
   async put(key, value, options) {
+    const normalizedOptions = normalizePutOptions(options);
     const bytes = await valueToBytes(value);
     assertR2BufferSize(bytes.byteLength, "put");
-    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");
     const meta = await stub.put(
       normalizeR2ObjectKey(key),
       bytes,
-      normalizePutOptions(options),
+      normalizedOptions,
       bucketRequestMeta(this)
     );
     return meta ? new R2Object(meta) : null;
@@ -460,7 +476,7 @@ export class R2Bucket {
 
   /** @param {string | string[]} keys */
   async delete(keys) {
-    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.delete !== "function") throw new TypeError("R2 stub delete is not configured");
     if (Array.isArray(keys)) {
       await stub.delete(
@@ -474,7 +490,7 @@ export class R2Bucket {
 
   /** @param {AnyRecord} [options] */
   async list(options = {}) {
-    const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
+    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.list !== "function") throw new TypeError("R2 stub list is not configured");
     const out = await stub.list({
       prefix: options.prefix == null ? undefined : String(options.prefix),

@@ -14,8 +14,15 @@ admin-host branch. It is not dynamically loaded by workerLoader.
 Main files:
 
 - `control/index.js`: request dispatcher.
-- `control/lib.js`: route parser and shared route utilities.
-- `control/shared.js`: auth wrapper, JSON responses, Redis singletons, publish helpers.
+- `control/lib.js`: pure route/key utilities, bundle metadata parsing, and referrer
+  shaping.
+- `control/shared.js`: auth wrapper, Redis singletons, publish helpers, state-bound
+  workflow transport wiring, and lifecycle helpers.
+- `control/errors.js`, `control/json-body.js`, `control/optimistic.js`: pure Control
+  response and request-body contracts plus the Control adapter over the shared
+  optimistic retry loop.
+- `control/workflows-client.js`: canonical internal Workflows POST transport with
+  explicit caller-owned timeout selection.
 - `control/handlers/*`: endpoint handlers.
 - `control/routing.js`: promote/reconcile WATCH/MULTI logic.
 - `auth/index.js`, `auth/lib.js`, `shared/auth-roles.js`: token store, role table,
@@ -43,7 +50,7 @@ Worker lifecycle:
 
 | Method | Path | Contract |
 |---|---|---|
-| `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, and secret-only workers. |
+| `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, secret-only, and workflow-definitions-only workers. Each result reports `hasSecrets` and `hasWorkflowDefs`. |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | Lists retained versions and active status. |
 | `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata. Python modules and upstream experimental compatibility flags are rejected before commit. |
 | `POST` | `/ns/<ns>/worker/<name>/promote` | Promotes `{"version":"vN"}` through the WATCH/MULTI routing path. Host declaration failures are 403; live pattern conflicts are 409; exhausted transaction contention is 503. |
@@ -96,8 +103,11 @@ Control lifecycle operations are split so each critical transition has one autho
   hash write; only secret-only workers with no retained versions defer their first
   load-time budget check to deploy. Secret PUT validates the plaintext size and shape,
   encrypts it into a `WDL-ENC:` envelope before the Redis mutation/WATCH retry loop,
-  and reuses the same envelope across retries. Runtime
-  therefore sees a new immutable version id instead of mutable in-place secret changes.
+  and reuses the same envelope across retries. Envelope JSON uses the fixed
+  `v,alg,kid,edek,iv,ct,tag` field order and each base64 field is canonical; Control and
+  redis-proxy both reject non-canonical persisted forms so malformed direct Redis writes
+  fail closed. Runtime therefore sees a new immutable
+  version id instead of mutable in-place secret changes.
   Secret DELETE removes the target field from the env estimate before decrypting the
   remaining secret hashes, so deleting the corrupt target can still succeed. Any corrupt
   remaining namespace or worker secret fails closed; direct Redis repair is not a
@@ -109,9 +119,15 @@ Control lifecycle operations are split so each critical transition has one autho
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
   S3 object cleanup is enqueued only after Redis commit succeeds.
-- Worker delete lock values and `s3cleanup:<id>` task ids are server-generated random
-  values. `x-request-id` is diagnostic only and may be reused by clients or retries; it
-  must not become a lock token or cleanup-task id.
+- Worker delete lock values are a `whole:` or `version:` operation kind followed by a
+  server-generated random token; `s3cleanup:<id>` task ids are also server-generated.
+  `x-request-id` is diagnostic only and may be reused by clients or retries; it must not
+  become a lock token or cleanup-task id. Delete, D1 migration, and delegated issue locks
+  use the token-fenced primitive in `shared/redis-lock.js`; release is token-scoped and
+  best-effort because TTL expiry bounds a leaked advisory lock and a release error must
+  not replace the operation's real result. Before a final lifecycle mutation, version
+  and whole-worker delete refresh the token once, then verify it inside the final WATCH
+  snapshot so an expired request cannot commit under a replacement holder's lock.
 - Auth is not a middleware convention. `parseControlRoute()` assigns an action, control
   sends that action and namespace to auth, and auth evaluates the stored token record
   against `shared/auth-roles.js`. Dispatcher code should not infer permissions from URL
@@ -131,9 +147,12 @@ Control lifecycle operations are split so each critical transition has one autho
   single `x-forwarded-proto` value of `http` or `https`, `/whoami` uses that protocol
   for `urls.control` and `urls.namespace`; otherwise it falls back to the request URL
   protocol seen by control. `urls.namespace` is returned only for tenant namespace
-  tokens; `urls.assets` is returned only when `ASSETS_CDN_BASE` is a safe absolute
-  `http`/`https` URL, with query and fragment stripped. The endpoint must not grow
-  into token list, token lookup, or secret-bearing diagnostics.
+  tokens when `PLATFORM_DOMAIN` is explicitly configured. The gate is grammar-only —
+  any valid DNS hostname passes and publicness is the operator's responsibility;
+  Control never advertises the unset `workers.local` fallback as a public URL.
+  `urls.assets` is returned only when `ASSETS_CDN_BASE` is a safe absolute `http`/`https`
+  URL, with query and fragment stripped. The endpoint must not grow into token list,
+  token lookup, or secret-bearing diagnostics.
 - A route shape has an `action` only when method, length, and verb exactly match an
   authorized shape. Missing action is deliberate: non-ops hit the auth unknown-action
   red line, while ops can still reach dispatcher/handler path and method validation
@@ -157,6 +176,10 @@ Control uses WATCH/MULTI/EXEC for active-version flips, routing changes, delete 
 and lifecycle index updates. Worker lifecycle indexes are authoritative; handlers should
 not add fallback scans of bundle state.
 
+Secret mutation validates env-var grammar, runtime-reserved names, and reserved
+`Object.prototype` keys before persistence so every accepted key can be materialized by
+the runtime env builder.
+
 Auth stores token records in Redis and evaluates against `shared/auth-roles.js`.
 
 Key families:
@@ -175,7 +198,7 @@ Key families:
 | `ns-hosts:<ns>` | Set | Control | Active host reverse index for a namespace. | Promote/reconcile maintains SADD/SREM deltas in the same EXEC. |
 | `patterns:<host>` | Hash | Control | Pattern-host route slots; values are compact `v2` tab-separated projections. | Reconcile/promote updates and publishes pattern invalidation. |
 | `worker-version-referrers:<ns>:<worker>:<version>` | Set | Control | Rebuildable service-binding referrer index. | Blocks version delete while callers reference the version. |
-| `worker-delete-lock:<ns>:<worker>` | String EX | Control | Per-worker delete critical-section lock. | Expires automatically; execute delete releases by completion. |
+| `worker-delete-lock:<ns>:<worker>` | String EX | Control | Per-worker delete critical-section lock; value is `whole:<token>` or `version:<token>`. | Expires automatically; execute delete releases by completion. Only `whole` fences new DO ownership. |
 | `secrets:<ns>`, `secrets:<ns>:<worker>` | Hash | Control | Namespace and worker secret stores; values are `WDL-ENC:` envelopes. Control encrypts writes; redis-proxy decrypts only during `/runtime/load`. | Deleted by secret lifecycle or worker delete. |
 | `queue:__system__:worker-delete-s3-cleanup:s` | DB 1 Stream | Control/s3-cleanup worker | Best-effort post-commit object cleanup queue; logical queue name is `worker-delete-s3-cleanup`. | Enqueued only after Redis delete commit succeeds; enqueue failure returns `cleanup_queue_failed` warning. |
 | `auth:token:<tokenId>` | Hash | Auth | Authoritative token record. | Revoke/expiry delete active record and write tombstone fields. |
@@ -218,10 +241,11 @@ Auth-specific contract:
   non-diagnostic action is `auth.delegated_token.issue`. A delegated issue request
   accepts only `{ template }`;
   caller-provided `kind`, `ns`, `label`, `expiresAt`, or template allowlist fields are
-  rejected. Auth re-reads the issuer token record, verifies it is active and has the
-  template allowlist entry, applies the code-defined Auth template registry, then
-  writes a target token with `created_by`, `issue_template`, and
-  `issue_template_version` metadata. Active quota is a live credential capacity guard
+  rejected. Auth re-reads the issuer token record under the final issue-lock WATCH,
+  verifies it is active and has the template allowlist entry, applies the code-defined
+  Auth template registry, then writes a target token with `created_by`,
+  `issue_template`, and `issue_template_version` metadata. Active quota is a live
+  credential capacity guard
   based on `created_by + issue_template + expires_at`; it is not an environment quota.
   Generated namespaces are ordinary tenant namespace strings embedded in the issued
   token record. Auth serializes issue for each issuer/template with
@@ -258,6 +282,20 @@ Auth-specific contract:
 - Details may add fields but must not override `error`, `message`, or legacy `reason`.
   Auth reject reason is the `error` machine code; logs may carry `reason` as diagnostic
   context.
+- `control/errors.js::ControlAbort` is the base in-Control coded abort contract.
+  Routing and Auth retain their boundary-specific error classes; Deploy may subclass
+  `ControlAbort` where commit cleanup requires a distinct catch boundary.
+- `control/json-body.js` owns bounded Control JSON parsing and its `400`/`413` wire
+  mapping. `control/optimistic.js` binds strict `WatchError` recognition and Redis
+  sessions to the retry loop owned by `shared/optimistic-retry.js`.
+- `control/lib.js::parseBundleMeta()` is the single parser for persisted bundle
+  `__meta__`. It requires a JSON object and accepts an error factory so routing,
+  workflows, delete, deploy, and env-budget paths retain their own catch boundaries.
+  Absence remains use-site-specific. Paths that need metadata to compute a correct
+  projection change, uniqueness proof, lifecycle cleanup, workflow view, or environment
+  budget fail closed while their authoritative route or index still names the bundle.
+  Deploy discovery/link preflight does not classify absence as `corrupt_meta`; the
+  watched commit rejects a missing pinned service target as `target_drift`.
 - Delegated issue 409 reasons have distinct retry meaning:
   `delegated_issue_busy` is retryable after the issuer/template lock clears,
   `active_quota_exceeded` is not retryable until existing delegated credentials expire
@@ -265,7 +303,8 @@ Auth-specific contract:
   candidate retry budget.
 - Control 5xx responses use generic/safe messages. Internal exception text, auth Redis
   diagnostics, backend messages, and provider errors belong in logs unless the endpoint
-  explicitly owns a diagnostic response field.
+  explicitly owns a diagnostic response field. Structured coded-error diagnostic strings
+  are truncated to 2,048 characters before log emission.
 - Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
   WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
   `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected
@@ -293,7 +332,11 @@ Auth-specific contract:
   beginning after a scheduler timeout. Each run processes one page, so very large
   prefixes drain across multiple cron or queue dispatches instead of holding one
   scheduler dispatch open for minutes.
-- Workflow lifecycle blockers are checked through workflows and fail closed on service
+- All Control-to-Workflows internal POSTs use the canonical transport in
+  `control/workflows-client.js`. Callers retain endpoint-specific timeout, non-2xx, and
+  response-body interpretation. Workflow management calls and the lifecycle delete scan
+  have no client-side timeout because the scan is unbounded by namespace size. DO-alarm
+  cleanup uses a five-second timeout. Workflow lifecycle blockers fail closed on service
   errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503
   fail-closed behavior, not tenant-visible authorization fallbacks.
@@ -331,6 +374,10 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - `tests/unit/control-delete-handler.test.js`
 - `tests/unit/control-deploy-watch.test.js`
 - `tests/unit/control-lifecycle-indexes.test.js`
+- `tests/unit/control-shared-stub.test.js`
+- `tests/unit/control-handlers-workflows.test.js`
+- `tests/unit/control-d1-migrations.test.js`
+- `tests/unit/redis-lock.test.js`
 - `tests/unit/auth-lib.test.js`
 - `tests/unit/auth-index.test.js`
 - `tests/integration/auth-worker.test.js`

@@ -82,7 +82,9 @@ Internal:
 
 Workflows exclusively owns Valkey DB 2 for instance execution state. Control owns
 `wf:defs:<ns>:<worker>` in DB 0 for deploy-time workflow key allocation and stable
-identity.
+identity. The hash retains retired names until whole-worker delete. Definition listing
+enumerates that retired history for currently active workers; deploy and single-workflow
+status/lifecycle paths read only the names they need.
 
 Key concepts:
 
@@ -117,6 +119,7 @@ Key families:
 | `wf:by-worker:<ns>:<worker>` | Set | workflows | Instance discovery by worker. | Used by list/delete checks; entries are removed by retention/delete cleanup. |
 | `wf:by-workflow:<ns>:<worker>:<workflowKey>` | ZSET | workflows | Per-workflow instance list index ordered for bounded pagination. | Retention/delete cleanup removes the sorted-set member. |
 | `wf:by-version:<ns>:<worker>:<version>` | Set | workflows | Frozen-version referrer index. | Blocks version delete while live instances reference the version. |
+| `wf:pending-version:<ns>:<worker>:<version>` | ZSET | workflows | Short-lived restart target-version blockers, scored by expiry time. | Version-delete checks active members; restart atomically validates its marker before creating the durable `wf:by-version` referrer. Members expire after 30 seconds, and the ZSET has a 60-second key TTL for physical cleanup. |
 | `wf:retention` | ZSET | workflows | Terminal retention due index. | Retention tick deletes expired terminal instances. |
 | `wf:internal:do-alarm:{<jobId>}:state` | Hash | workflows | Authoritative backend job state for one Durable Object SQLite alarm row. | Successful delivery, retry exhaustion, explicit delete, and worker cleanup remove the job. |
 | `wf:internal:do-alarm:due:<shard>` | ZSET | workflows | DO alarm due index. Score is due timestamp in milliseconds. | Tick promotion moves eligible jobs to ready. |
@@ -128,11 +131,25 @@ Key families:
 
 - Workflows are same-worker only in V2.
 - Instances freeze the worker version/class identity they were created with.
+- Control fails closed on malformed active workflow entries and malformed `wf:defs`
+  records encountered by an operation; management paths return `corrupt_meta`, while
+  deploy returns `workflow_definition_corrupt` when reusing a damaged historical
+  definition. Damaged authoritative metadata is not exposed as a normal missing or
+  retired workflow. Normal deploy and single-workflow paths do not scan unrelated
+  historical definitions.
 - Scheduler only wakes workflows; workflows owns admission, fairness, shard ticks,
   ready/due movement, and runtime dispatch.
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
   `/internal/workflows/tick` endpoint; scheduler never reads or writes DO alarm state
   directly.
+- Workflows rejects non-canonical DO alarm identity before persisting jobs, revalidates
+  persisted alarm identity before dispatch, and validates an active route
+  version before using it as a retarget. Namespace, worker, and version checks reuse
+  `wdl-rust-common`; do-runtime protocol grammar and identity helpers own the canonical
+  alarm-specific fields and aggregate 512-byte DO host-id contract. Workflows mirrors
+  and revalidates that contract before persistence and dispatch.
+  Runtime run dispatch and progress callbacks share one system-vs-user runtime endpoint
+  selector inside the workflows crate.
 - 32 scheduling shards partition ready/due work.
 - Ready tokens are deduplicated hints; instance hash state is authority.
 - Execution commits are fenced by `generation`, `runToken`, active instance status, and
@@ -154,9 +171,13 @@ Key families:
   (`step.sleep`, `step.sleepUntil`, `step.waitForEvent`) remain exclusive and must not
   overlap another in-flight step because they suspend the whole workflow run.
 - Termination is an explicit non-success terminal outcome and uses error retention.
-- Per-instance aggregate payload cap is 16 MiB. Step/event over-cap writes fail the
-  request; over-cap runtime terminal results transition the instance to failed in the
-  same transaction.
+- `Workflow.createBatch()` accepts at most 100 entries per call. Runtime prevalidation
+  and Rust admission share this pinned limit.
+- A single workflow result is capped at 1 MiB and a runtime-to-workflows backend JSON
+  request at 2 MiB. Runtime prevalidation and the Rust backend share the pinned
+  `workflow_payload_too_large` contract. The per-instance aggregate payload cap is
+  16 MiB. Step/event over-cap writes fail the request; over-cap runtime terminal
+  results transition the instance to failed in the same transaction.
 - Workflows semantic request caps use `request_too_large`; this is distinct from
   HTTP-body parser `request_body_too_large` in control/runtime protocols. Workflow
   errors otherwise use the platform `{ error, message }` envelope on HTTP boundaries.
@@ -178,6 +199,13 @@ canonicalizes against the current active route before writing DB 2, so new durab
 business processes start on the active version. Existing instances replay against their
 stored `frozenVersion`; promotion does not change their code. Worker-version delete is
 blocked by `wf:by-version` while non-expired instances still reference the version.
+Before restart revalidates the active export, it publishes a short-lived target-version
+blocker. Its final DB 2 transition atomically creates the durable referrer and removes
+that blocker, so version delete cannot pass between active-version resolution and the
+restart commit.
+Runtime validates every dispatched `frozenVersion` with the same positive
+JavaScript-safe-integer version parser used by bundle keys; malformed persisted tags
+fail before worker loading.
 
 Scheduling is hint-based but state-authoritative:
 

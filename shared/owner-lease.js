@@ -1,4 +1,5 @@
 import { envValueOr } from "shared-env";
+import { withOptimisticRetries } from "shared-optimistic-retry";
 
 const utf8Decoder = new TextDecoder();
 const OWNER_GENERATION_COUNTER = /^(?:0|[1-9]\d*)$/;
@@ -44,7 +45,7 @@ export function parseOwnerRecord(raw) {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = /** @type {Record<string, unknown>} */ (parsed);
-  if (!Number.isInteger(record.generation) || /** @type {number} */ (record.generation) < 0) {
+  if (!Number.isSafeInteger(record.generation) || /** @type {number} */ (record.generation) <= 0) {
     return null;
   }
   if (
@@ -127,7 +128,11 @@ export async function currentOwnerGenerationCounter(session, generationKey) {
  */
 export async function nextOwnerGeneration(session, generationKey, currentGeneration = 0) {
   const currentCounter = await currentOwnerGenerationCounter(session, generationKey);
-  return Math.max(currentCounter + 1, currentGeneration + 1);
+  const previousGeneration = Math.max(currentCounter, currentGeneration);
+  if (!Number.isSafeInteger(previousGeneration) || previousGeneration >= Number.MAX_SAFE_INTEGER) {
+    throw new Error(`Owner generation counter is exhausted: ${generationKey}`);
+  }
+  return previousGeneration + 1;
 }
 
 /**
@@ -164,16 +169,14 @@ export async function withOwnerWatchRetries(operation, {
   exhaustedMessage,
 }) {
   const maxAttempts = Number.isInteger(retries) && retries > 0 ? retries : 1;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (err) {
-      if (typeof isWatchError === "function" && isWatchError(err)) {
-        if (attempt < maxAttempts - 1) continue;
+  return await withOptimisticRetries(
+    async () => await operation(),
+    {
+      attempts: maxAttempts,
+      isRetryableError: (err) => typeof isWatchError === "function" && isWatchError(err),
+      onExhausted: () => {
         throw createError(503, exhaustedCode, exhaustedMessage);
-      }
-      throw err;
+      },
     }
-  }
-  throw createError(503, exhaustedCode, exhaustedMessage);
+  );
 }

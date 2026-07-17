@@ -165,12 +165,6 @@ variable "d1_test_hooks_enabled" {
   description = "Enable D1 internal test hooks in d1-runtime. Keep false outside disposable/test environments."
 }
 
-variable "do_test_hooks_enabled" {
-  type        = bool
-  default     = false
-  description = "Enable DO internal test hooks in do-runtime. Keep false outside disposable/test environments."
-}
-
 variable "gateway_cpu" {
   type    = number
   default = 512

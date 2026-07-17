@@ -10,7 +10,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const SHARED_ENV_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/env.js")).href;
 const SHARED_ERRORS_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/errors.js")).href;
+const SHARED_BASE64_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/base64.js")).href;
+const SHARED_NS_PATTERN_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/ns-pattern.js")).href;
+const WORKER_CONTRACT_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/worker-contract.js")).href;
 const SHARED_HEX_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/hex.js")).href;
+const SHARED_OPTIMISTIC_RETRY_URL = pathToFileURL(
+  path.resolve(REPO_ROOT, "shared/optimistic-retry.js")
+).href;
 const SHARED_WORKERD_COMPAT_FLAGS_URL = pathToFileURL(
   path.resolve(REPO_ROOT, "shared/workerd-compat-flags.js")
 ).href;
@@ -87,6 +93,9 @@ export function repositoryModuleDataUrl(relativePath, replacements = []) {
 
 export function runtimeLibModuleDataUrl() {
   return repositoryModuleDataUrl("runtime/lib.js", importSpecifierReplacements({
+    "shared-base64": SHARED_BASE64_URL,
+    "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+    "shared-worker-contract": WORKER_CONTRACT_URL,
     "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
   }));
 }
@@ -123,6 +132,7 @@ export async function importRepositoryModuleFresh(relativePath, replacements = [
 export function sharedModuleDataUrl(relativePath) {
   const src = applyModuleReplacements(readRepositoryFile(relativePath), [
     [/from "shared-env";?/g, `from ${JSON.stringify(SHARED_ENV_URL)};`],
+    [/from "shared-optimistic-retry";?/g, `from ${JSON.stringify(SHARED_OPTIMISTIC_RETRY_URL)};`],
     [/from "\.\/errors\.js";?/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "\.\/hex\.js";?/g, `from ${JSON.stringify(SHARED_HEX_URL)};`],
   ]);

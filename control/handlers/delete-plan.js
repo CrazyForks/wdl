@@ -1,6 +1,5 @@
 import {
   referrersKey,
-  doStorageIdKey,
   workflowDefsKey,
 } from "control-lib";
 import {
@@ -12,7 +11,14 @@ import {
   stageWorkerHidden,
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
-import { bundleKey, patternsKey, routesKey } from "shared-version";
+import {
+  NAMESPACES_KEY,
+  bundleKey,
+  doStorageIdKey,
+  nsHostsKey,
+  patternsKey,
+  routesKey,
+} from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
 
 /**
@@ -35,6 +41,7 @@ import { workerSecretsKey } from "shared-secret-keys";
  *   hostsLosingNsOwnership: string[],
  *   namespaceStillActive: boolean,
  *   hasWorkerSecrets: boolean,
+ *   hasWorkflowDefs: boolean,
  * }} DeleteInputs
  * @typedef {import("control-lifecycle-indexes").RedisMulti} RedisMulti
  * @typedef {{ routes: string, routesFlush: string, patterns: string }} DeleteChannels
@@ -88,10 +95,10 @@ export function stageWorkerDelete(multi, { collected, channels }) {
     multi.hDel(routesKey(ns), name);
   }
   if (collected.hostsLosingNsOwnership.length) {
-    multi.sRem(`ns-hosts:${ns}`, collected.hostsLosingNsOwnership);
+    multi.sRem(nsHostsKey(ns), collected.hostsLosingNsOwnership);
   }
   if (!collected.namespaceStillActive) {
-    multi.sRem("namespaces", ns);
+    multi.sRem(NAMESPACES_KEY, ns);
   }
 
   multi.del(cronWorkerKey(ns, name));

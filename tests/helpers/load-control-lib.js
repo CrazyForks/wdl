@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const moduleRequire = createRequire(path.resolve(__dirname, "../../package.json"));
 const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_QUEUE_KEYS_URL = repositoryFileUrl("shared/queue-keys.js");
-const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_ROUTE_PROJECTION_URL = repositoryFileUrl("shared/route-projection.js");
 const SHARED_WORKERD_COMPAT_FLAGS_URL = repositoryFileUrl("shared/workerd-compat-flags.js");
@@ -41,7 +41,8 @@ export async function compileControlGraph(opts = {}) {
   const libUrl = freshRepositoryModuleDataUrl("control/lib.js", [
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
-    [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
+    [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
+    [/from "shared-route-projection"/g, `from ${JSON.stringify(SHARED_ROUTE_PROJECTION_URL)}`],
   ]);
 
   const bindingsUrl = freshRepositoryModuleDataUrl("control/bindings.js", [
@@ -61,6 +62,7 @@ export async function compileControlGraph(opts = {}) {
   const lifecycleIndexesUrl = freshRepositoryModuleDataUrl("control/lifecycle-indexes.js", [
     [/from "control-lib"/g, `from ${JSON.stringify(libUrl)}`],
     [/from "shared-queue-keys"/g, `from ${JSON.stringify(SHARED_QUEUE_KEYS_URL)}`],
+    [/from "shared-worker-contract"/g, `from ${JSON.stringify(WORKER_CONTRACT_URL)}`],
   ]);
 
   const cronIndexUrl = freshRepositoryModuleDataUrl("control/cron-index.js", [
@@ -78,6 +80,7 @@ export async function compileControlGraph(opts = {}) {
     ...importSpecifierReplacements({
       "shared-ns-pattern": SHARED_NS_URL,
       "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
+      "control-lib": libUrl,
     }),
     [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
     [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],
@@ -88,7 +91,7 @@ export async function compileControlGraph(opts = {}) {
     sharedAuthRolesUrl,
     sharedAuthRoles,
     sharedQueueKeysUrl: SHARED_QUEUE_KEYS_URL,
-    sharedVersionUrl: SHARED_VERSION_URL,
+    workerContractUrl: WORKER_CONTRACT_URL,
     sharedErrorsUrl: SHARED_ERRORS_URL,
     sharedRouteProjectionUrl: SHARED_ROUTE_PROJECTION_URL,
     sharedCronTimeUrl,

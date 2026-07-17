@@ -1,11 +1,13 @@
 import {
   BINDING_NAME_RE,
+  D1_DATABASE_ID_RE,
   RESERVED_OBJECT_KEYS,
   WDL_RESERVED_BINDING_RE,
   WDL_RESERVED_ENTRYPOINT_RE,
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
+import { parseVersion } from "shared-worker-contract";
 
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
@@ -88,11 +90,18 @@ function materializeQueueBinding({ name, spec, ns, ctx }) {
   };
 }
 
+// The estimated control-side copy of the do-runtime alarm binding env value
+// must serialize like the real one; both build their props here.
+/** @param {{ ns: string, worker: string, version: string, doStorageId: string }} identity */
+export function doAlarmBindingProps({ ns, worker, version, doStorageId }) {
+  return { ns, worker, version, doStorageId };
+}
+
 /** @param {RuntimeBindingMaterializerArgs} args */
 function materializeD1Binding({ name, spec, ns, ctx }) {
   const databaseId = spec.databaseId;
-  if (typeof databaseId !== "string" || !databaseId) {
-    throw new Error(`Binding "${name}" is a D1 binding but missing databaseId`);
+  if (typeof databaseId !== "string" || !D1_DATABASE_ID_RE.test(databaseId)) {
+    throw new Error(`Binding "${name}" is a D1 binding but has invalid databaseId`);
   }
   return {
     value: ctx.exports.D1Database({
@@ -164,6 +173,9 @@ function materializeServiceBinding({ name, spec, ns, worker, nsSecrets, workerSe
       `Binding "${name}" is a service binding but missing service/version (control should have pinned these at deploy time)`
     );
   }
+  if (parseVersion(spec.version) == null) {
+    throw new Error(`Binding "${name}" is a service binding but has invalid version (redeploy ${ns}/${worker})`);
+  }
   if (spec.ns != null && (typeof spec.ns !== "string" || !spec.ns)) {
     throw new Error(`Binding "${name}" is a service binding but has invalid ns (redeploy ${ns}/${worker})`);
   }
@@ -178,11 +190,16 @@ function materializeServiceBinding({ name, spec, ns, worker, nsSecrets, workerSe
   // Secrets-only (not vars): a credential moved from secrets → vars
   // stops reaching the target instead of silently continuing.
   // Missing keys are dropped; control warned at deploy.
+  const requiredCallerSecrets = Array.isArray(spec.requiredCallerSecrets)
+    ? spec.requiredCallerSecrets
+    : [];
   /** @type {Record<string, string> | undefined} */
-  let callerSecrets;
-  if (Array.isArray(spec.requiredCallerSecrets) && spec.requiredCallerSecrets.length) {
-    callerSecrets = {};
-    for (const k of spec.requiredCallerSecrets) {
+  const callerSecrets = requiredCallerSecrets.length
+    // workerd's JSRPC props serializer rejects null-prototype objects.
+    ? {}
+    : undefined;
+  if (callerSecrets) {
+    for (const k of requiredCallerSecrets) {
       if (typeof k !== "string") continue;
       if (Object.hasOwn(workerSecrets, k)) {
         callerSecrets[k] = workerSecrets[k];

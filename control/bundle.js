@@ -12,8 +12,13 @@ import {
   isValidJsClassDeclarationName,
   validateModulePath,
 } from "shared-ns-pattern";
-import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
+import {
+  LEGACY_ERROR_SERIALIZATION_FLAG,
+  MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  firstWorkerdExperimentalCompatFlag,
+} from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
+import { parseWorkerdDependencyVersion } from "control-lib";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
 export class BundleConfigError extends Error {
@@ -26,22 +31,12 @@ export class BundleConfigError extends Error {
 }
 
 const COMPATIBILITY_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-const WORKERD_VERSION_RE = /^1\.(\d{4})(\d{2})(\d{2})\.\d+$/;
 
 /** @param {string} source */
 export function maxWorkerCompatibilityDateFromPackageJson(source) {
-  let parsed;
-  try {
-    parsed = JSON.parse(source);
-  } catch {
-    return null;
-  }
-  const raw = parsed?.dependencies?.workerd;
-  if (typeof raw !== "string") return null;
-  const version = raw.replace(/^[~^]/, "");
-  const match = WORKERD_VERSION_RE.exec(version);
-  if (!match) return null;
-  const max = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + 7));
+  const version = parseWorkerdDependencyVersion(source);
+  if (!version) return null;
+  const max = new Date(Date.UTC(version.year, version.month - 1, version.day + 7));
   return utcDateString(max);
 }
 
@@ -87,6 +82,11 @@ export function validateCompatibilityDate(value, today = new Date()) {
     parsed.getUTCDate() !== day
   ) {
     throw new Error(`compatibilityDate must be a real calendar date, got ${JSON.stringify(value)}`);
+  }
+  if (value < MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE) {
+    throw new Error(
+      `compatibilityDate ${value} is older than WDL supports (${MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE})`
+    );
   }
   const todayUtc = utcDateString(today);
   if (value > todayUtc) {
@@ -171,6 +171,13 @@ function validateCompatibilityFlags(flags) {
       400,
       "experimental_compat_flag_unsupported",
       `compatibilityFlags contains experimental workerd flag ${JSON.stringify(experimentalFlag)}, which WDL does not support for tenant workers`
+    );
+  }
+  if (flags.includes(LEGACY_ERROR_SERIALIZATION_FLAG)) {
+    throw new BundleConfigError(
+      400,
+      "compatibility_flag_unsupported",
+      `${JSON.stringify(LEGACY_ERROR_SERIALIZATION_FLAG)} is not supported because WDL requires enhanced error serialization`
     );
   }
 }

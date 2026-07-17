@@ -1,52 +1,93 @@
-// Name grammar predicates, lifecycle Redis key helpers, referrer-index
-// encode/decode, URL → {gate, ns} classifier, and secret-key validator.
+// Lifecycle Redis key helpers, bundle metadata parsing, referrer-index
+// encode/decode, URL → {gate, ns} classifier, and secret-key validation.
 // Pure data-shaping only.
 
 import {
   NS_PATTERN,
+  RESERVED_OBJECT_KEYS,
   isReservedNs,
   RESERVED_TENANT_NS,
-  WORKER_NAME_RE,
-  WORKFLOW_NAME_RE,
-  QUEUE_NAME_RE,
   WDL_RESERVED_BINDING_RE,
-  KV_ID_RE,
-  validateModulePath,
 } from "shared-ns-pattern";
+import { decodePatternProjection } from "shared-route-projection";
 import { PLATFORM_TIER_RESERVED_NS, ROLES } from "shared-auth-roles";
-import { doStorageIdKey, routesKey, workerVersionsKey } from "shared-version";
-export { doStorageIdKey, routesKey, workerVersionsKey };
-export { validateModulePath };
-export { WORKER_NAME_RE };
-export { WORKFLOW_NAME_RE };
-
+import { errorMessage } from "shared-errors";
 export const NS_RE = new RegExp(`^${NS_PATTERN}$`);
 export const MAX_QUEUE_DELAY_SECONDS = 86_400;
+const WORKERD_DEPENDENCY_VERSION_RE = /^1\.(\d{4})(\d{2})(\d{2})\.(\d+)$/;
 
 /**
  * @typedef {{ callerNs: string, callerWorker: string, callerVersion: string, binding: string }} ReferrerMember
  * @typedef {{ kind?: string, ns?: string }} AccessPrincipal
  * @typedef {{ referrers: ReferrerMember[], crossNamespaceReferrerCount?: number }} ReferrerBlocker
+ * @typedef {{ namespace: string, worker: string, version: string, message: string, reason: string, cause: unknown }} BundleMetaFailure
  */
 
-/** @param {unknown} name */
-export function isValidWorkerName(name) {
-  return typeof name === "string" && WORKER_NAME_RE.test(name);
+export class BundleMetaError extends Error {
+  /** @param {{ namespace: string, worker: string, version: string, message: string, cause: unknown }} failure */
+  constructor({ namespace, worker, version, message, cause }) {
+    super(message, { cause });
+    this.name = "BundleMetaError";
+    this.status = 500;
+    this.code = "corrupt_meta";
+    this.details = { namespace, worker, version };
+  }
 }
 
-/** @param {unknown} name */
-export function isValidWorkflowName(name) {
-  return typeof name === "string" && WORKFLOW_NAME_RE.test(name);
+/**
+ * @param {unknown} raw
+ * @param {{ ns: string, worker: string, version: string, makeError?: (failure: BundleMetaFailure) => Error }} options
+ * @returns {Record<string, unknown>}
+ */
+export function parseBundleMeta(raw, { ns, worker, version, makeError }) {
+  /** @param {unknown} cause @returns {never} */
+  const fail = (cause) => {
+    const failure = {
+      namespace: ns,
+      worker,
+      version,
+      message: `Corrupt __meta__ for ${ns}/${worker}/${version}`,
+      reason: errorMessage(cause),
+      cause,
+    };
+    throw makeError ? makeError(failure) : new BundleMetaError(failure);
+  };
+
+  if (typeof raw !== "string") {
+    fail(new TypeError("__meta__ must be a JSON string"));
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail(new SyntaxError("__meta__ is not valid JSON"));
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    fail(new TypeError("__meta__ must be a JSON object"));
+  }
+  return /** @type {Record<string, unknown>} */ (parsed);
 }
 
-/** @param {unknown} name */
-export function isValidQueueName(name) {
-  return typeof name === "string" && QUEUE_NAME_RE.test(name);
+/**
+ * @param {unknown} raw
+ * @param {{ host: string, slot: string, makeError: (details: { host: string, slot: string }) => Error }} options
+ */
+export function parsePatternProjection(raw, { host, slot, makeError }) {
+  const projection = decodePatternProjection(raw);
+  if (!projection) throw makeError({ host, slot });
+  return projection;
 }
 
-/** @param {unknown} id */
-export function isValidKvId(id) {
-  return typeof id === "string" && KV_ID_RE.test(id);
+/**
+ * @param {Record<string, unknown>} meta
+ * @returns {string | null}
+ */
+export function bundleAssetPrefix(meta) {
+  const assets = meta.assets;
+  if (!assets || typeof assets !== "object" || Array.isArray(assets)) return null;
+  const prefix = /** @type {Record<string, unknown>} */ (assets).prefix;
+  return typeof prefix === "string" ? prefix : null;
 }
 
 // Relaxes NS_PATTERN to also accept reserved `__<x>__` ns (so JSRPC-only
@@ -77,14 +118,6 @@ export function projectAccessPrincipal(principal) {
 }
 
 /** @param {unknown} value */
-export function configuredHostname(value) {
-  if (typeof value !== "string" || !value.trim()) return null;
-  const host = value.trim().replace(/\.+$/, "").toLowerCase();
-  if (!host || host.includes("/") || host.includes(":") || /\s/.test(host)) return null;
-  return host;
-}
-
-/** @param {unknown} value */
 export function configuredPublicUrl(value) {
   if (typeof value !== "string" || !value.trim()) return null;
   let parsed;
@@ -100,18 +133,35 @@ export function configuredPublicUrl(value) {
   return parsed.href.replace(/\/+$/, "");
 }
 
-/** @param {string} source */
-export function platformVersionFromPackageJson(source) {
+/**
+ * @param {string} source
+ * @returns {{ version: string, year: number, month: number, day: number, patch: number } | null}
+ */
+export function parseWorkerdDependencyVersion(source) {
   let parsed;
   try {
     parsed = JSON.parse(source);
   } catch {
-    return "wdl.unknown";
+    return null;
   }
   const raw = parsed?.dependencies?.workerd;
-  if (typeof raw !== "string") return "wdl.unknown";
+  if (typeof raw !== "string") return null;
   const version = raw.replace(/^[~^]/, "");
-  return /^1\.\d{8}\.\d+$/.test(version) ? `wdl.${version.slice(2)}` : "wdl.unknown";
+  const match = WORKERD_DEPENDENCY_VERSION_RE.exec(version);
+  if (!match) return null;
+  return {
+    version,
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    patch: Number(match[4]),
+  };
+}
+
+/** @param {string} source */
+export function platformVersionFromPackageJson(source) {
+  const parsed = parseWorkerdDependencyVersion(source);
+  return parsed ? `wdl.${parsed.version.slice(2)}` : "wdl.unknown";
 }
 
 // ─── Referrer index ────────────────────────────────────────────────
@@ -266,11 +316,6 @@ export function referrersKey(ns, worker, version) {
   return `worker-version-referrers:${ns}:${worker}:${version}`;
 }
 
-/** @param {string} ns @param {string} worker */
-export function deleteLockKey(ns, worker) {
-  return `worker-delete-lock:${ns}:${worker}`;
-}
-
 /** @param {string} ns */
 export function workersIndexKey(ns) {
   return `workers:${ns}`;
@@ -309,11 +354,6 @@ export function d1DatabaseTombstoneKey(ns, databaseId) {
 /** @param {string} ns */
 export function d1DatabaseTombstonesKey(ns) {
   return `d1:database-tombstones:${ns}`;
-}
-
-/** @param {string} storageId */
-export function doOwnerScopeScanPatternForStorage(storageId) {
-  return `do:owner:scope:${encodeURIComponent(`${storageId}:`)}*`;
 }
 
 /** @param {string} storageId */
@@ -622,6 +662,9 @@ export function validateSecretKey(key) {
   }
   if (WDL_RESERVED_BINDING_RE.test(key)) {
     throw new Error("secret key is reserved for runtime-internal bindings");
+  }
+  if (RESERVED_OBJECT_KEYS.has(key)) {
+    throw new Error("secret key is a reserved Object.prototype key");
   }
   if (key.length > 128) throw new Error("secret key too long (max 128)");
 }

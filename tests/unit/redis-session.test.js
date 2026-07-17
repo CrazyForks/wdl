@@ -331,6 +331,42 @@ test("RedisSession.getWithTime batches GET and TIME on its held socket", async (
   );
 });
 
+test("RedisSession.getManyWithTime batches related GETs and TIME on its held socket", async () => {
+  const socket = makeFakeSocket([
+    bytes("$5\r\nowner\r\n$11\r\nwhole:token\r\n*2\r\n$10\r\n1700000000\r\n$6\r\n654321\r\n"),
+  ]);
+  const { connect, state } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+
+  const result = await client.session((/** @type {any} */ s) => (
+    s.getManyWithTime(["owner-key", "delete-lock"])
+  ));
+
+  assert.equal(state.count, 1);
+  assert.deepEqual(result, {
+    values: ["owner", "whole:token"],
+    nowMs: 1_700_000_000_654,
+  });
+  assert.equal(
+    decode(socket._writes[0]),
+    "*2\r\n$3\r\nGET\r\n$9\r\nowner-key\r\n" +
+      "*2\r\n$3\r\nGET\r\n$11\r\ndelete-lock\r\n" +
+      "*1\r\n$4\r\nTIME\r\n"
+  );
+});
+
+test("RedisSession.getManyWithTime rejects an empty key set before opening IO", async () => {
+  const session = new RedisSession("x", {
+    connect() {
+      throw new Error("unexpected connection");
+    },
+  });
+  await assert.rejects(
+    session.getManyWithTime([]),
+    /getManyWithTime requires at least one key/
+  );
+});
+
 test("RedisSession.hSet supports object form", async () => {
   const socket = makeFakeSocket([bytes(":2\r\n")]);
   const { connect } = scriptedConnect(socket);
@@ -341,6 +377,17 @@ test("RedisSession.hSet supports object form", async () => {
     decode(socket._writes[0]),
     "*6\r\n$4\r\nHSET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n"
   );
+});
+
+test("RedisSession.set supports atomic lock options on the held socket", async () => {
+  const socket = makeFakeSocket([bytes("+OK\r\n")]);
+  const { connect } = scriptedConnect(socket);
+  const session = new RedisSession("x", { connect });
+  await session.open();
+
+  assert.equal(await session.set("lock", "token", { nx: true, ttl: 30 }), "OK");
+  assert.match(decode(socket._writes[0]), /SET\r\n.*lock\r\n.*token\r\n.*EX\r\n.*30\r\n.*NX\r\n/s);
+  await session.close();
 });
 
 test("RedisSession.sAdd/sRem accept scalar or array", async () => {

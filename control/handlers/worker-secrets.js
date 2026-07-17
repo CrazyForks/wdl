@@ -3,17 +3,16 @@ import {
   jsonError,
   ControlAbort,
   controlAbortResponse,
+  errMessage,
   requireControlLog,
   requireControlRedis,
   runOptimistic,
   stringEnv,
+  codedErrorLogFields,
   codedErrorResponse,
+  secretEnvelopeErrorResponse,
 } from "control-shared";
-import {
-  deleteLockKey,
-  routesKey,
-  workerVersionsKey,
-} from "control-lib";
+import { workflowDefsKey } from "control-lib";
 import {
   invalidSecretMutationKeyResponse,
   readEncryptedSecretPutValue,
@@ -21,6 +20,7 @@ import {
 import { stageWorkerHidden, stageWorkerVisible } from "control-lifecycle-indexes";
 import { bumpActiveAndPromote, RoutingError } from "control-routing";
 import {
+  BundleMetaError,
   WorkerEnvBudgetError,
   assertWorkerVersionsUserEnvBudget,
   decryptMutatedSecretHashForBudget,
@@ -28,6 +28,7 @@ import {
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
+import { deleteLockKey, routesKey, workerVersionsKey } from "shared-worker-contract";
 
 const MAX_SECRET_ATTEMPTS = 5;
 
@@ -47,6 +48,61 @@ const MAX_SECRET_ATTEMPTS = 5;
 
 class SecretAbort extends ControlAbort {}
 class SecretNoop extends Error {}
+
+function secretMutationContentionAbort() {
+  return new SecretAbort(503, "secret_mutation_contention", {
+    message: "active version changed during secret mutation; retry later",
+  });
+}
+
+/**
+ * @param {{
+ *   abort: ControlAbort,
+ *   requestId: string,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: string,
+ *   log: (level: string, event: string, fields: Record<string, unknown>) => void,
+ * }} args
+ */
+function rejectSecretMutation({ abort, requestId, ns, name, key, method, log }) {
+  log(abort.status >= 500 ? "error" : "warn", "secret_mutation_rejected", {
+    request_id: requestId,
+    namespace: ns,
+    worker: name,
+    key,
+    method,
+    ...codedErrorLogFields(abort),
+  });
+  return controlAbortResponse(abort);
+}
+
+/**
+ * @param {{
+ *   err: SecretEnvelopeError,
+ *   requestId: string,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: string,
+ *   log: (level: string, event: string, fields: Record<string, unknown>) => void,
+ * }} args
+ */
+function rejectSecretEnvelopeMutation({ err, requestId, ns, name, key, method, log }) {
+  return secretEnvelopeErrorResponse({
+    err,
+    log,
+    event: "secret_mutation_rejected",
+    fields: {
+      request_id: requestId,
+      namespace: ns,
+      worker: name,
+      key,
+      method,
+    },
+  });
+}
 
 /**
  * @param {{
@@ -78,12 +134,20 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
     let storedValue = null;
     let putPlaintext = null;
     if (method === "PUT") {
-      const put = await readEncryptedSecretPutValue({
-        request,
-        env,
-        hashKey: secretsKey,
-        fieldName: key,
-      });
+      let put;
+      try {
+        put = await readEncryptedSecretPutValue({
+          request,
+          env,
+          hashKey: secretsKey,
+          fieldName: key,
+        });
+      } catch (err) {
+        if (err instanceof SecretEnvelopeError) {
+          return rejectSecretEnvelopeMutation({ err, requestId, ns, name, key, method, log });
+        }
+        throw err;
+      }
       if ("response" in put) return put.response;
       storedValue = put.encrypted;
       putPlaintext = put.plaintext;
@@ -173,57 +237,54 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         else payload.deleted = true;
         return jsonResponse(200, payload);
       }
-      throw new SecretAbort(503, "secret_mutation_contention", {
-        message: `active version changed during secret mutation; retry later`,
-      });
+      throw secretMutationContentionAbort();
     } catch (err) {
       if (err instanceof SecretAbort) {
-        log("warn", "secret_mutation_rejected", {
+        return rejectSecretMutation({ abort: err, requestId, ns, name, key, method, log });
+      }
+      if (err instanceof BundleMetaError) {
+        log("error", "secret_mutation_rejected", {
           request_id: requestId,
           namespace: ns,
           worker: name,
           key,
           method,
-          status: err.status,
-          reason: err.code,
+          ...codedErrorLogFields(err, err.code, { errorDetail: errMessage(err.cause) }),
         });
-        return controlAbortResponse(err);
+        return codedErrorResponse(err, err.code);
       }
       if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
       if (err instanceof RoutingError) {
         if (err.code === "bump_contention") {
-          const abort = new SecretAbort(503, "secret_mutation_contention", {
-            message: `active version changed during secret mutation; retry later`,
-          });
-          log("warn", "secret_mutation_rejected", {
-            request_id: requestId,
-            namespace: ns,
-            worker: name,
+          return rejectSecretMutation({
+            abort: secretMutationContentionAbort(),
+            requestId,
+            ns,
+            name,
             key,
             method,
-            status: abort.status,
-            reason: abort.code,
+            log,
           });
-          return controlAbortResponse(abort);
         }
         if (err.code === "caller_deleting") {
           const abort = new SecretAbort(409, "deleting", {
             namespace: ns, worker: name,
           });
-          log("warn", "secret_mutation_rejected", {
-            request_id: requestId,
-            namespace: ns,
-            worker: name,
-            key,
-            method,
-            status: abort.status,
-            reason: abort.code,
-          });
-          return controlAbortResponse(abort);
+          return rejectSecretMutation({ abort, requestId, ns, name, key, method, log });
         }
+        log(err.status >= 500 ? "error" : "warn", "secret_mutation_rejected", {
+          request_id: requestId,
+          namespace: ns,
+          worker: name,
+          key,
+          method,
+          ...codedErrorLogFields(err, "routing_error"),
+        });
         return codedErrorResponse(err, err.code);
       }
-      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+      if (err instanceof SecretEnvelopeError) {
+        return rejectSecretEnvelopeMutation({ err, requestId, ns, name, key, method, log });
+      }
       throw err;
     }
   }
@@ -396,7 +457,6 @@ async function stageWorkerSecretForBump({
     nsSecrets,
     workerSecrets,
     assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
-    retryMissingVersions: true,
   });
 
   stageWorkerSecretMutation(multi, {
@@ -427,6 +487,7 @@ async function stageWorkerSecretForBump({
 async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
   const secretsKey = workerSecretsKey(ns, name);
   const nsSecretHashKey = nsSecretsKey(ns);
+  const defsKey = workflowDefsKey(ns, name);
   return await runOptimistic(redis, {
     attempts: MAX_SECRET_ATTEMPTS,
     onExhausted: () => {
@@ -442,6 +503,7 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       routesKey(ns),
       workerVersionsKey(ns, name),
     ];
+    if (method === "DELETE") watches.push(defsKey);
     await iso.watch(...watches);
 
     const callerLock = await iso.get(deleteLockKey(ns, name));
@@ -463,7 +525,7 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       }
       if (hkeys.length === 1 && hkeys[0] === key) {
         if (retainedVersions.length === 0) {
-          removeFromWorkersIndex = true;
+          removeFromWorkersIndex = (await iso.exists(defsKey)) === 0;
         }
       }
     }
@@ -488,7 +550,6 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       nsSecrets,
       workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
-      retryMissingVersions: true,
     });
 
     const multi = iso.multi();

@@ -3,25 +3,41 @@ import {
   DO_INVOKE_URL,
   connectHeaders,
   doOwnerHintCacheKey,
-  dispatchDoRequestWithOwnerHint,
+  dispatchDoConnectWithHintCache,
+  dispatchDoInvokeWithHintCache,
   fetchInvokeInit,
   isWebSocketUpgrade,
-  retryableOwnerRaceResponse,
+  replayOwnerUnavailableForFetch,
   rpcInvokeInit,
   rpcResultFromResponse,
-  staleDoOwnerHintResponse,
-  stripOwnerHintHeaders,
-  withoutOwnerHintOptIn,
 } from "./_wdl-do-transport.js";
 import { createOwnerHintCache } from "./_wdl-owner-hint-cache.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const ownerHintCache = createOwnerHintCache();
+const intrinsicObjectHasOwn = Object.hasOwn;
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicStringIsWellFormed = String.prototype.isWellFormed;
 
-/** @param {Request} request */
-function replayOwnerUnavailableForFetch(request) {
-  const method = request.method.toUpperCase();
-  return method === "GET" || method === "HEAD";
+/** @param {object} object @param {PropertyKey} key */
+function objectHasOwn(object, key) {
+  return intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [object, key]);
+}
+
+/** @param {string} value */
+function isWellFormedUnicodeString(value) {
+  return intrinsicReflectApply(intrinsicStringIsWellFormed, value, []);
+}
+
+/** @param {unknown} value @param {string} method */
+function requireObjectIdString(value, method) {
+  if (typeof value !== "string" || !value) {
+    throw new TypeError(`DurableObjectNamespace.${method}() requires a non-empty string`);
+  }
+  if (!isWellFormedUnicodeString(value)) {
+    throw new TypeError(`DurableObjectNamespace.${method}() requires well-formed Unicode`);
+  }
+  return value;
 }
 
 /**
@@ -84,7 +100,7 @@ class DurableObjectStub {
         const real = Reflect.get(target, prop, receiver);
         if (real !== undefined) return real;
         /** @param {...unknown} args */
-        const method = (...args) => target.namespace.rpcObject(target.id.name, prop, args, target.namespace.requestId());
+        const method = (...args) => target.namespace.rpcObject(target.id.name, prop, args);
         return method;
       },
     });
@@ -93,7 +109,7 @@ class DurableObjectStub {
   /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
   async fetch(input, init = undefined) {
     const request = new Request(input, init);
-    return await this.namespace.fetchObject(this.id.name, request, this.namespace.requestId());
+    return await this.namespace.fetchObject(this.id.name, request);
   }
 }
 
@@ -147,12 +163,12 @@ export class DurableObjectNamespace {
    */
   constructor(binding, options = {}) {
     const isMetadataBinding = binding && typeof binding === "object" && (
-      Object.hasOwn(binding, "ns") ||
-      Object.hasOwn(binding, "worker") ||
-      Object.hasOwn(binding, "version") ||
-      Object.hasOwn(binding, "doStorageId") ||
-      Object.hasOwn(binding, "binding") ||
-      Object.hasOwn(binding, "className")
+      objectHasOwn(binding, "ns") ||
+      objectHasOwn(binding, "worker") ||
+      objectHasOwn(binding, "version") ||
+      objectHasOwn(binding, "doStorageId") ||
+      objectHasOwn(binding, "binding") ||
+      objectHasOwn(binding, "className")
     );
     if (binding && !isMetadataBinding) {
       this.#setBindingProxy(/** @type {DurableObjectBindingProxy} */ (binding));
@@ -179,12 +195,13 @@ export class DurableObjectNamespace {
     }
   }
 
-  requestId() {
-    return requestIdFromOptions(this.#requestIdOptions, { providerFirst: false });
+  #currentRequestId() {
+    return requestIdFromOptions(this.#requestIdOptions);
   }
 
-  /** @param {string} objectName @param {Request} request @param {string | null} [requestId] */
-  async fetchObject(objectName, request, requestId = null) {
+  /** @param {string} objectName @param {Request} request */
+  async fetchObject(objectName, request) {
+    const requestId = this.#currentRequestId();
     if (this.#bindingFetchObject && !isWebSocketUpgrade(request)) {
       return await this.#bindingFetchObject(objectName, request, requestId);
     }
@@ -201,32 +218,29 @@ export class DurableObjectNamespace {
         method: "GET",
         headers: connectHeaders(props, objectName, request, requestId),
       };
-      const response = await this.#fetchWithOwnerHint(
+      return await this.#dispatchWithOwnerHint(
+        dispatchDoConnectWithHintCache,
         DO_CONNECT_URL,
         "/internal/do/connect",
         init,
         doOwnerHintCacheKey(props, objectName),
         false
       );
-      return stripOwnerHintHeaders(response);
     }
     const init = await fetchInvokeInit(props, objectName, request, requestId);
-    const response = await this.#fetchWithOwnerHint(
+    return await this.#dispatchWithOwnerHint(
+      dispatchDoInvokeWithHintCache,
       DO_INVOKE_URL,
       "/internal/do/invoke",
       init,
       doOwnerHintCacheKey(props, objectName),
       replayOwnerUnavailableForFetch(request)
     );
-    if (await retryableOwnerRaceResponse(response)) {
-      ownerHintCache.delete(doOwnerHintCacheKey(props, objectName));
-      return stripOwnerHintHeaders(await backend.fetch(DO_INVOKE_URL, withoutOwnerHintOptIn(init)));
-    }
-    return stripOwnerHintHeaders(response);
   }
 
-  /** @param {string} objectName @param {string} method @param {unknown[]} args @param {string | null} [requestId] */
-  async rpcObject(objectName, method, args, requestId = null) {
+  /** @param {string} objectName @param {string} method @param {unknown[]} args */
+  async rpcObject(objectName, method, args) {
+    const requestId = this.#currentRequestId();
     if (this.#bindingRpcObject) {
       return await this.#bindingRpcObject(objectName, method, args, requestId);
     }
@@ -236,32 +250,26 @@ export class DurableObjectNamespace {
     }
     const props = requireBindingProps(this.#props);
     const init = rpcInvokeInit(props, objectName, method, args, requestId);
-    const response = await this.#fetchWithOwnerHint(
+    const response = await this.#dispatchWithOwnerHint(
+      dispatchDoInvokeWithHintCache,
       DO_INVOKE_URL,
       "/internal/do/invoke",
       init,
       doOwnerHintCacheKey(props, objectName),
       false
     );
-    let routed = response;
-    if (await retryableOwnerRaceResponse(response)) {
-      // Owner-hint following already happened above. This retry is only for
-      // generation races after reaching an owner, so it falls back through the
-      // router with hint opt-in disabled.
-      ownerHintCache.delete(doOwnerHintCacheKey(props, objectName));
-      routed = await backend.fetch(DO_INVOKE_URL, withoutOwnerHintOptIn(init));
-    }
-    return await rpcResultFromResponse(stripOwnerHintHeaders(routed));
+    return await rpcResultFromResponse(response);
   }
 
   /**
+   * @param {typeof dispatchDoInvokeWithHintCache | typeof dispatchDoConnectWithHintCache} dispatch
    * @param {string} routerUrl
    * @param {string} ownerPath
    * @param {RequestInit} init
    * @param {string} hintKey
    * @param {boolean} replayOwnerUnavailable
    */
-  async #fetchWithOwnerHint(routerUrl, ownerPath, init, hintKey, replayOwnerUnavailable) {
+  async #dispatchWithOwnerHint(dispatch, routerUrl, ownerPath, init, hintKey, replayOwnerUnavailable) {
     const backend = this.#backend;
     const ownerNetwork = this.#ownerNetwork;
     if (!backend || typeof backend.fetch !== "function") {
@@ -273,36 +281,26 @@ export class DurableObjectNamespace {
       : null;
     /** @type {import("./_wdl-do-transport.js").DoFetch} */
     const routerFetch = (url, requestInit) => backend.fetch(url, requestInit);
-    return await dispatchDoRequestWithOwnerHint({
+    return await dispatch({
       routerFetch,
       routerUrl,
       ownerFetch,
       ownerPath,
       init,
-      cachedHint: /** @type {import("./_wdl-do-transport.js").DoOwnerHint | null} */ (
-        ownerHintCache.get(hintKey)
-      ),
-      rememberHint: (hint) => ownerHintCache.set(hintKey, hint),
-      clearHint: () => ownerHintCache.delete(hintKey),
-      staleCachedResponse: staleDoOwnerHintResponse,
+      cache: ownerHintCache,
+      hintKey,
       replayOwnerUnavailable,
     });
   }
 
   /** @param {string} name */
   idFromName(name) {
-    if (typeof name !== "string" || !name) {
-      throw new TypeError("DurableObjectNamespace.idFromName() requires a non-empty string");
-    }
-    return new DurableObjectId(name);
+    return new DurableObjectId(requireObjectIdString(name, "idFromName"));
   }
 
   /** @param {string} value */
   idFromString(value) {
-    if (typeof value !== "string" || !value) {
-      throw new TypeError("DurableObjectNamespace.idFromString() requires a non-empty string");
-    }
-    return new DurableObjectId(value);
+    return new DurableObjectId(requireObjectIdString(value, "idFromString"));
   }
 
   newUniqueId() {

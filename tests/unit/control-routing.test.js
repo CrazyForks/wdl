@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
 import { loadControlRouting } from "../helpers/load-control-routing.js";
 import { loadControlLib } from "../helpers/load-control-lib.js";
-import { bundleKey as productionBundleKey } from "../../shared/version.js";
+import { bundleKey as productionBundleKey } from "../../shared/worker-contract.js";
 
 const { promoteWithRoutes, bumpActiveAndPromote, reconcileHosts } =
   await loadControlRouting();
@@ -116,6 +116,42 @@ test("promoteWithRoutes removes queue consumer discovery index entries for remov
   ));
 });
 
+for (const [label, rawMeta] of [
+  ["missing", null],
+  ["empty", ""],
+]) {
+  test(`promoteWithRoutes rejects ${label} active bundle metadata before changing projections`, async () => {
+    const redis = makeRedis();
+    seedBundle(redis, "v2", { routes: [], queueConsumers: [] });
+    if (rawMeta !== null) {
+      redis.state.hashes.set(productionBundleKey("demo", "worker", "v1"), {
+        __meta__: rawMeta,
+      });
+    }
+    redis.state.hashes.set("routes:demo", { worker: "v1" });
+    redis.state.hashes.set("patterns:api.example", {
+      "/": patternProjection("demo", "worker", "v1", "exact", "/"),
+    });
+    redis.state.hashes.set("queue-consumer:demo:jobs", {
+      worker: "worker",
+      version: "v1",
+    });
+
+    await assert.rejects(
+      promoteWithRoutes(redis, "demo", "worker", "v2"),
+      (err) => {
+        assertRoutingErrorShape(err, 500, "corrupt_meta");
+        return true;
+      }
+    );
+
+    assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+    assert.equal(redis.state.hashes.get("queue-consumer:demo:jobs")?.version, "v1");
+    assert.equal(redis.state.hashes.get("patterns:api.example")?.["/"],
+      patternProjection("demo", "worker", "v1", "exact", "/"));
+  });
+}
+
 test("promoteWithRoutes skips empty platform route versions while checking exported as names", async () => {
   const redis = makeRedis();
   redis.state.hashes.set(productionBundleKey("__platform__", "api", "v1"), {
@@ -132,6 +168,131 @@ test("promoteWithRoutes skips empty platform route versions while checking expor
   assert.deepEqual(
     redis.state.commands.find((op) => op[0] === "hGetMany"),
     ["hGetMany", [[productionBundleKey("__platform__", "other", "v2"), "__meta__"]]]
+  );
+});
+
+test("promoteWithRoutes rejects a platform route whose active metadata is missing", async () => {
+  const redis = makeRedis();
+  redis.state.hashes.set(productionBundleKey("__platform__", "api", "v1"), {
+    __meta__: JSON.stringify({ exports: [{ entrypoint: "default", as: "demo" }] }),
+  });
+  redis.state.hashes.set("routes:__platform__", { other: "v2" });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "__platform__", "api", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      return true;
+    }
+  );
+
+  assert.equal(redis.state.hashes.get("routes:__platform__")?.api, undefined);
+});
+
+test("promoteWithRoutes retries from the new active when the prior bundle is deleted", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", { routes: [], queueConsumers: [] });
+  seedBundle(redis, "v2", { routes: [], queueConsumers: [] });
+  seedBundle(redis, "v3", { routes: [], queueConsumers: [consumerWithoutOptions] });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+
+  const originalSession = redis.session.bind(redis);
+  let attempts = 0;
+  redis.session = async (fn) => {
+    attempts += 1;
+    return await originalSession(async (iso) => {
+      if (attempts !== 1) return await fn(iso);
+      const originalHGet = iso.hGet.bind(iso);
+      let raced = false;
+      return await fn({
+        ...iso,
+        async hGet(key, field) {
+          const value = await originalHGet(key, field);
+          if (!raced && key === "routes:demo" && field === "worker") {
+            raced = true;
+            redis.state.hashes.set("routes:demo", { worker: "v3" });
+            redis.state.hashes.set("queue-consumer:demo:jobs", {
+              worker: "worker",
+              version: "v3",
+              max_batch_size: "5",
+              max_batch_timeout_ms: "2000",
+              max_retries: "3",
+            });
+            redis.state.sets.set(
+              "queue:index:consumers",
+              new Set(["queue-consumer:demo:jobs"])
+            );
+            redis.state.hashes.delete(productionBundleKey("demo", "worker", "v1"));
+          }
+          return value;
+        },
+      });
+    });
+  };
+
+  await promoteWithRoutes(redis, "demo", "worker", "v2");
+
+  assert.equal(attempts, 2);
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v2");
+  assert.equal(redis.state.hashes.has("queue-consumer:demo:jobs"), false);
+  assert.equal(
+    redis.state.sets.get("queue:index:consumers")?.has("queue-consumer:demo:jobs") ?? false,
+    false
+  );
+});
+
+test("promoteWithRoutes retries when a platform route is deleted during as validation", async () => {
+  const redis = makeRedis();
+  redis.state.hashes.set(productionBundleKey("__platform__", "api", "v1"), {
+    __meta__: JSON.stringify({ exports: [{ entrypoint: "default", as: "demo" }] }),
+  });
+  redis.state.hashes.set(productionBundleKey("__platform__", "other", "v2"), {
+    __meta__: JSON.stringify({ exports: [{ entrypoint: "default", as: "other" }] }),
+  });
+  redis.state.hashes.set("routes:__platform__", { other: "v2" });
+
+  const originalSession = redis.session.bind(redis);
+  let attempts = 0;
+  redis.session = async (fn) => {
+    attempts += 1;
+    return await originalSession(async (iso) => {
+      if (attempts !== 1) return await fn(iso);
+      const originalHGetMany = iso.hGetMany.bind(iso);
+      let raced = false;
+      return await fn({
+        ...iso,
+        async hGetMany(pairs) {
+          if (!raced && pairs.some(([key]) =>
+            key === productionBundleKey("__platform__", "other", "v2")
+          )) {
+            raced = true;
+            delete redis.state.hashes.get("routes:__platform__")?.other;
+            redis.state.hashes.delete(productionBundleKey("__platform__", "other", "v2"));
+          }
+          return await originalHGetMany(pairs);
+        },
+      });
+    });
+  };
+
+  await promoteWithRoutes(redis, "__platform__", "api", "v1");
+
+  assert.equal(attempts, 2);
+  assert.equal(redis.state.hashes.get("routes:__platform__")?.api, "v1");
+});
+
+test("promoteWithRoutes rejects non-object candidate bundle metadata", async () => {
+  const redis = makeRedis();
+  redis.state.hashes.set(productionBundleKey("demo", "worker", "v1"), {
+    __meta__: "[]",
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      return true;
+    }
   );
 });
 
@@ -223,6 +384,31 @@ test("promoteWithRoutes watches and rejects missing service-binding target bundl
   assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
 });
 
+test("promoteWithRoutes rejects empty service-binding target metadata", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    bindings: {
+      TARGET: {
+        type: "service",
+        ns: "other",
+        service: "api",
+        version: "v3",
+      },
+    },
+  });
+  redis.state.hashes.set(productionBundleKey("other", "api", "v3"), { __meta__: "" });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      const shaped = assertRoutingErrorShape(err, 409, "service_binding_dependency_missing");
+      assert.equal(shaped.details.broken_dependency.targetNs, "other");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
 test("promoteWithRoutes batches service-binding dependency watches", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {
@@ -278,6 +464,77 @@ test("bumpActiveAndPromote also rewrites full queue consumer projection", async 
     max_batch_timeout_ms: "2000",
     max_retries: "3",
   });
+});
+
+test("bumpActiveAndPromote batches pattern projection reads across hosts", async () => {
+  const redis = makeRedis();
+  const routes = ["api.example", "admin.example"].map((host) => ({
+    host,
+    slot: "/*",
+    kind: "prefix",
+    value: "/",
+  }));
+  seedBundle(redis, "v1", { routes });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.sets.set("hosts:demo", new Set(routes.map((route) => route.host)));
+  for (const route of routes) {
+    redis.state.hashes.set(`patterns:${route.host}`, {
+      [route.slot]: patternProjection("demo", "worker", "v1", route.kind, route.value),
+    });
+  }
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.deepEqual(
+    redis.state.commands.filter(([command]) => command === "hGetAllMany"),
+    [["hGetAllMany", ["patterns:api.example", "patterns:admin.example"]]]
+  );
+  assert.equal(
+    redis.state.commands.some(([command, key]) =>
+      command === "hGetAll" && typeof key === "string" && key.startsWith("patterns:")
+    ),
+    false
+  );
+});
+
+test("bumpActiveAndPromote retries when active changes before source metadata read", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {});
+  seedBundle(redis, "v3", {});
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "3");
+
+  const originalSession = redis.session.bind(redis);
+  let attempts = 0;
+  redis.session = async (fn) => {
+    attempts += 1;
+    return await originalSession(async (iso) => {
+      if (attempts !== 1) return await fn(iso);
+      const originalHGet = iso.hGet.bind(iso);
+      let raced = false;
+      return await fn({
+        ...iso,
+        async hGet(key, field) {
+          const value = await originalHGet(key, field);
+          if (!raced && key === "routes:demo" && field === "worker") {
+            raced = true;
+            redis.state.hashes.set("routes:demo", { worker: "v3" });
+            redis.state.hashes.delete(productionBundleKey("demo", "worker", "v1"));
+          }
+          return value;
+        },
+      });
+    });
+  };
+
+  const result = await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.equal(attempts, 2);
+  assert.equal(result.previousVersion, "v3");
+  assert.equal(result.version, "v4");
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v4");
+  assert.ok(redis.state.hashes.has(productionBundleKey("demo", "worker", "v4")));
 });
 
 test("promoteWithRoutes rejects missing D1 dependency databases", async () => {
@@ -381,6 +638,21 @@ test("bumpActiveAndPromote aborts copy and route flip when staged writes fail", 
   assert.ok(redis.state.watched.includes("secrets:demo:worker"));
 });
 
+test("bumpActiveAndPromote preserves bundle_copy_failed for a missing source bundle", async () => {
+  const redis = makeRedis();
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await assert.rejects(
+    bumpActiveAndPromote(redis, "demo", "worker"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "bundle_copy_failed");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
+});
+
 test("bumpActiveAndPromote rejects active routes that no longer declare their hosts", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {
@@ -402,6 +674,33 @@ test("bumpActiveAndPromote rejects active routes that no longer declare their ho
       return true;
     }
   );
+});
+
+test("bumpActiveAndPromote fails closed on malformed held pattern projections", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    routes: [{
+      host: "app.workers.example",
+      slot: "/*",
+      kind: "prefix",
+      value: "/",
+    }],
+  });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.hashes.set("patterns:app.workers.example", { "/*": "not-a-projection" });
+  redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await assert.rejects(
+    bumpActiveAndPromote(redis, "demo", "worker"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_pattern_projection");
+      return true;
+    }
+  );
+
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
 });
 
 test("bumpActiveAndPromote rejects malformed cron metadata", async () => {
@@ -516,6 +815,30 @@ test("promoteWithRoutes rejects a custom host already owned by another namespace
       assert.equal(shaped.details.host, "app.workers.example");
       assert.equal(shaped.details.slot, "/*");
       assert.equal(Object.hasOwn(shaped.details, "held"), false);
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
+test("promoteWithRoutes fails closed on malformed occupied pattern projections", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    routes: [{
+      host: "app.workers.example",
+      slot: "/*",
+      kind: "prefix",
+      value: "/",
+    }],
+  });
+  redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
+  redis.state.hashes.set("patterns:app.workers.example", { "/*": "not-a-projection" });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      const shaped = assertRoutingErrorShape(err, 500, "corrupt_pattern_projection");
+      assert.deepEqual(shaped.details, { host: "app.workers.example", slot: "/*" });
       return true;
     }
   );

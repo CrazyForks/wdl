@@ -1,7 +1,40 @@
 export const DO_ALARM_SHIM_SOURCE = `
 const ALARM_HEADER = "x-wdl-do-internal-alarm";
+const RPC_HEADER = "x-wdl-do-internal-rpc";
 const ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const ALARM_TABLE = "_wdl_do_alarms";
+
+// This module is evaluated before tenant code. Keep the small set of intrinsics
+// that controls alarm classification, state transitions, and facade installation
+// stable after tenant top-level evaluation mutates the shared isolate realm.
+const NativeDate = Date;
+const NativeNumber = Number;
+const NativePromise = Promise;
+const NativeProxy = Proxy;
+const NativeResponse = Response;
+const NativeString = String;
+const nativeCrypto = crypto;
+const arrayAt = Array.prototype.at;
+const arrayIsArray = Array.isArray;
+const arrayPush = Array.prototype.push;
+const cryptoRandomUUID = crypto.randomUUID;
+const dateGetTime = Date.prototype.getTime;
+const dateNow = Date.now;
+const headersGet = Headers.prototype.get;
+const mapForEach = Map.prototype.forEach;
+const mathTrunc = Math.trunc;
+const numberIsFinite = Number.isFinite;
+const numberIsInteger = Number.isInteger;
+const objectDefineProperty = Object.defineProperty;
+const promiseResolve = Promise.resolve;
+const reflectApply = Reflect.apply;
+const reflectGet = Reflect.get;
+const requestHeadersGetter = Object.getOwnPropertyDescriptor(Request.prototype, "headers").get;
+const requestJson = Request.prototype.json;
+const responseJson = Response.json;
+const stringReplaceAll = String.prototype.replaceAll;
+const stringStartsWith = String.prototype.startsWith;
+const stringToLowerCase = String.prototype.toLowerCase;
 
 function withoutInternalEnv(env) {
   if (!env || typeof env !== "object" || !(ALARMS_BINDING in env)) return env;
@@ -11,57 +44,87 @@ function withoutInternalEnv(env) {
 }
 
 function objectNameFromCtx(ctx) {
-  return String(ctx.id);
+  return NativeString(ctx.id);
 }
 
 function scheduledTimeFromInput(value) {
-  const scheduledTime = value instanceof Date ? value.getTime() : Number(value);
-  if (!Number.isFinite(scheduledTime) || scheduledTime <= 0) {
+  let scheduledTime;
+  try {
+    scheduledTime = reflectApply(dateGetTime, value, []);
+  } catch {
+    scheduledTime = NativeNumber(value);
+  }
+  if (!numberIsFinite(scheduledTime) || scheduledTime <= 0) {
     throw new TypeError("setAlarm() cannot be called with an alarm time <= 0");
   }
   return scheduledTime;
 }
 
 function retryCountFromInput(value) {
-  const retryCount = Number(value ?? 0);
-  if (!Number.isInteger(retryCount) || retryCount < 0) {
+  const retryCount = NativeNumber(value ?? 0);
+  if (!numberIsInteger(retryCount) || retryCount < 0) {
     throw new TypeError("DO alarm retryCount must be a non-negative integer");
   }
   return retryCount;
 }
 
 function alarmFieldsFromRow(row) {
-  const scheduledTime = Number(row.scheduled_time);
-  const retryCount = Number(row.retry_count);
-  if (!Number.isFinite(scheduledTime) || scheduledTime <= 0) return null;
-  if (!Number.isInteger(retryCount) || retryCount < 0) return null;
+  const scheduledTime = NativeNumber(row.scheduled_time);
+  const retryCount = NativeNumber(row.retry_count);
+  if (!numberIsFinite(scheduledTime) || scheduledTime <= 0) return null;
+  if (!numberIsInteger(retryCount) || retryCount < 0) return null;
   return { scheduledTime, retryCount };
 }
 
 function alarmToken() {
-  return crypto.randomUUID();
+  return reflectApply(cryptoRandomUUID, nativeCrypto, []);
+}
+
+function safeErrorField(err, field) {
+  try {
+    return err == null ? undefined : err[field];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeErrorString(value) {
+  try {
+    return value == null ? null : NativeString(value);
+  } catch {
+    return null;
+  }
 }
 
 function formatWrappedError(err) {
-  const out = {
-    error_name: err?.name || "Error",
-    error_message: err instanceof Error ? err.message : String(err),
-  };
-  if (err?.code != null) out.error_code = String(err.code);
-  return out;
+  try {
+    const out = {
+      error_name: safeErrorString(safeErrorField(err, "name")) || "Error",
+      error_message: safeErrorString(safeErrorField(err, "message")) || safeErrorString(err) || "Unknown error",
+    };
+    const code = safeErrorString(safeErrorField(err, "code"));
+    if (code != null) out.error_code = code;
+    return out;
+  } catch {
+    return { error_name: "Error", error_message: "Unknown error" };
+  }
 }
 
 function logStructured(level, event, fields = {}) {
-  const payload = {
-    ts: new Date().toISOString(),
-    service: "do-runtime",
-    level,
-    event,
-    ...fields,
-  };
-  const line = JSON.stringify(payload);
-  if (level === "error") console.error(line);
-  else console.log(line);
+  try {
+    const payload = {
+      ts: new Date().toISOString(),
+      service: "do-runtime",
+      level,
+      event,
+      ...fields,
+    };
+    const line = JSON.stringify(payload);
+    if (level === "error") console.error(line);
+    else console.log(line);
+  } catch {
+    // Tenant mutations must not turn best-effort logging into storage behavior.
+  }
 }
 
 function ensureAlarmTable(storage) {
@@ -79,9 +142,11 @@ function ensureAlarmTable(storage) {
 
 function readAlarmRow(storage) {
   ensureAlarmTable(storage);
-  return [...storage.sql.exec(
+  const result = storage.sql.exec(
     "SELECT scheduled_time, retry_count, in_flight, token FROM " + ALARM_TABLE + " WHERE id = 1"
-  )][0] || null;
+  );
+  const rows = arrayIsArray(result) ? result : [...result];
+  return rows[0] || null;
 }
 
 function writeAlarmRow(storage, row) {
@@ -95,11 +160,11 @@ function writeAlarmRow(storage, row) {
       "in_flight = excluded.in_flight, " +
       "token = excluded.token, " +
       "last_error = excluded.last_error",
-    Math.trunc(scheduledTimeFromInput(row.scheduledTime)),
+    mathTrunc(scheduledTimeFromInput(row.scheduledTime)),
     retryCountFromInput(row.retryCount),
     row.inFlight ? 1 : 0,
-    String(row.token),
-    row.lastError == null ? null : String(row.lastError)
+    NativeString(row.token),
+    row.lastError == null ? null : NativeString(row.lastError)
   );
 }
 
@@ -109,13 +174,13 @@ function deleteAlarmRow(storage, token = null) {
     storage.sql.exec("DELETE FROM " + ALARM_TABLE + " WHERE id = 1");
     return;
   }
-  storage.sql.exec("DELETE FROM " + ALARM_TABLE + " WHERE id = 1 AND token = ?", String(token));
+  storage.sql.exec("DELETE FROM " + ALARM_TABLE + " WHERE id = 1 AND token = ?", NativeString(token));
 }
 
 async function flushAlarmSideEffects(sideEffects) {
   // One object has one alarm row. Transactional alarm updates coalesce to the
   // final SQLite row, so only the final backend index side effect should run.
-  const finalEffect = sideEffects.at(-1);
+  const finalEffect = reflectApply(arrayAt, sideEffects, [-1]);
   if (finalEffect) await finalEffect();
 }
 
@@ -136,7 +201,7 @@ async function setStorageAlarm(storage, alarmBinding, className, objectName, sch
     token,
   });
   if (sideEffects) {
-    sideEffects.push(async () => {
+    reflectApply(arrayPush, sideEffects, [async () => {
       try {
         await effect();
       } catch (err) {
@@ -145,7 +210,7 @@ async function setStorageAlarm(storage, alarmBinding, className, objectName, sch
         deleteAlarmRow(storage, token);
         throw err;
       }
-    });
+    }]);
   } else {
     try {
       await effect();
@@ -163,12 +228,12 @@ async function deleteStorageAlarm(storage, alarmBinding, className, objectName, 
   deleteAlarmRow(storage);
   const token = sideEffects?.baselineAlarmToken != null
     ? sideEffects.baselineAlarmToken
-    : row?.token == null ? null : String(row.token);
+    : row?.token == null ? null : NativeString(row.token);
   const effect = () => token
     ? alarmBinding.deleteAlarmIndex({ className, objectName, token })
-    : Promise.resolve("skipped");
+    : reflectApply(promiseResolve, NativePromise, ["skipped"]);
   if (sideEffects) {
-    sideEffects.push(async () => {
+    reflectApply(arrayPush, sideEffects, [async () => {
       try {
         await effect();
       } catch (err) {
@@ -176,13 +241,13 @@ async function deleteStorageAlarm(storage, alarmBinding, className, objectName, 
           writeAlarmRow(storage, {
             scheduledTime: row.scheduled_time,
             retryCount: row.retry_count,
-            inFlight: Number(row.in_flight) === 1,
+            inFlight: NativeNumber(row.in_flight) === 1,
             token: row.token,
           });
         }
         throw err;
       }
-    });
+    }]);
   } else {
     try {
       await effect();
@@ -191,7 +256,7 @@ async function deleteStorageAlarm(storage, alarmBinding, className, objectName, 
         writeAlarmRow(storage, {
           scheduledTime: row.scheduled_time,
           retryCount: row.retry_count,
-          inFlight: Number(row.in_flight) === 1,
+          inFlight: NativeNumber(row.in_flight) === 1,
           token: row.token,
         });
       }
@@ -202,7 +267,7 @@ async function deleteStorageAlarm(storage, alarmBinding, className, objectName, 
 
 async function getStorageAlarm(storage, alarmBinding, className, objectName) {
   const row = readAlarmRow(storage);
-  if (!row || Number(row.in_flight) === 1) return null;
+  if (!row || NativeNumber(row.in_flight) === 1) return null;
   const fields = alarmFieldsFromRow(row);
   if (!fields) {
     deleteAlarmRow(storage);
@@ -214,7 +279,7 @@ async function getStorageAlarm(storage, alarmBinding, className, objectName) {
       objectName,
       scheduledTime: fields.scheduledTime,
       retryCount: fields.retryCount,
-      token: String(row.token),
+      token: NativeString(row.token),
     });
   } catch (err) {
     logStructured("warn", "do_alarm_index_repair_failed", {
@@ -234,11 +299,11 @@ function claimStorageAlarm(storage, alarm) {
     deleteAlarmRow(storage);
     return null;
   }
-  const rowToken = String(row.token);
-  const alarmTokenValue = alarm?.token == null ? null : String(alarm.token);
+  const rowToken = NativeString(row.token);
+  const alarmTokenValue = alarm?.token == null ? null : NativeString(alarm.token);
   if (alarmTokenValue && alarmTokenValue !== rowToken) return null;
   const retryCount = retryCountFromInput(alarm?.retryCount ?? fields.retryCount);
-  if (Number(row.in_flight) !== 1 && fields.scheduledTime > Date.now()) return null;
+  if (NativeNumber(row.in_flight) !== 1 && fields.scheduledTime > reflectApply(dateNow, NativeDate, [])) return null;
   writeAlarmRow(storage, {
     scheduledTime: fields.scheduledTime,
     retryCount,
@@ -253,14 +318,17 @@ function completeStorageAlarm(storage, token) {
 }
 
 function quoteSqlIdentifier(name) {
-  return '"' + String(name).replaceAll('"', '""') + '"';
+  return '"' + reflectApply(stringReplaceAll, NativeString(name), ['"', '""']) + '"';
 }
 
 function sqlObjectDropStatement(row) {
-  const type = String(row.type);
-  const name = String(row.name);
-  const lowerName = name.toLowerCase();
-  if (lowerName.startsWith("sqlite_") || lowerName.startsWith("_cf_")) return null;
+  const type = NativeString(row.type);
+  const name = NativeString(row.name);
+  const lowerName = reflectApply(stringToLowerCase, name, []);
+  if (
+    reflectApply(stringStartsWith, lowerName, ["sqlite_"]) ||
+    reflectApply(stringStartsWith, lowerName, ["_cf_"])
+  ) return null;
   if (type === "table") return "DROP TABLE IF EXISTS " + quoteSqlIdentifier(name);
   if (type === "view") return "DROP VIEW IF EXISTS " + quoteSqlIdentifier(name);
   if (type === "trigger") return "DROP TRIGGER IF EXISTS " + quoteSqlIdentifier(name);
@@ -270,22 +338,27 @@ function sqlObjectDropStatement(row) {
 
 async function deleteAllKvStorage(storage) {
   const entries = await storage.list();
-  const keys = [...entries.keys()];
+  const keys = [];
+  reflectApply(mapForEach, entries, [(_value, key) => {
+    reflectApply(arrayPush, keys, [key]);
+  }]);
   if (keys.length) await storage.delete(keys);
 }
 
 function deleteAllSqlStorage(storage, deleteAlarm) {
-  const rows = [...storage.sql.exec(
+  const result = storage.sql.exec(
     "SELECT type, name FROM sqlite_master " +
       "WHERE type IN ('trigger', 'view', 'table', 'index') " +
       "ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'table' THEN 2 ELSE 3 END"
-  )];
+  );
+  const rows = arrayIsArray(result) ? result : [...result];
   // workerd permits this connection-level PRAGMA; integration coverage pins it
   // because database-level PRAGMA writes are not part of the public DO SQL API.
   storage.sql.exec("PRAGMA foreign_keys = OFF");
   try {
-    for (const row of rows) {
-      if (String(row.name) === ALARM_TABLE && !deleteAlarm) continue;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (NativeString(row.name) === ALARM_TABLE && !deleteAlarm) continue;
       const statement = sqlObjectDropStatement(row);
       if (statement) storage.sql.exec(statement);
     }
@@ -298,7 +371,7 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
   if (!storage || !alarmBinding) return storage;
   let syncTransactionSideEffects = null;
   const activeSideEffects = () => syncTransactionSideEffects || sideEffects;
-  return new Proxy(storage, {
+  return new NativeProxy(storage, {
     get(target, prop, receiver) {
       if (prop === "setAlarm") {
         return (scheduledTime, _options = undefined) => {
@@ -325,11 +398,11 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
         return async (callback, ...rest) => {
           const txSideEffects = [];
           const baselineAlarm = readAlarmRow(alarmStorage);
-          txSideEffects.baselineAlarmToken = baselineAlarm?.token == null ? null : String(baselineAlarm.token);
+          txSideEffects.baselineAlarmToken = baselineAlarm?.token == null ? null : NativeString(baselineAlarm.token);
           const wrapped = typeof callback === "function"
             ? (txn) => callback(wrapStorage(txn, alarmBinding, className, objectName, txSideEffects, target))
             : callback;
-          const result = await Reflect.apply(Reflect.get(target, prop, receiver), target, [wrapped, ...rest]);
+          const result = await reflectApply(reflectGet(target, prop, receiver), target, [wrapped, ...rest]);
           await flushAlarmSideEffects(txSideEffects);
           return result;
         };
@@ -347,7 +420,7 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
               syncTransactionSideEffects = previousSideEffects;
             }
           } : callback;
-          const result = Reflect.apply(Reflect.get(target, prop, receiver), target, [wrapped, ...rest]);
+          const result = reflectApply(reflectGet(target, prop, receiver), target, [wrapped, ...rest]);
           return result;
         };
       }
@@ -357,8 +430,8 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
             throw new TypeError("deleteAll() cannot be used inside transactionSync(); use transaction()");
           }
           return (async () => {
-            const [options, ...rest] = args;
-            if (rest.length) throw new TypeError("deleteAll() accepts at most one options argument");
+            if (args.length > 1) throw new TypeError("deleteAll() accepts at most one options argument");
+            const options = args[0];
             const deleteAlarm = options?.deleteAlarm !== false;
             const alarmRow = readAlarmRow(alarmStorage);
             const preservedAlarm = deleteAlarm ? null : alarmRow;
@@ -370,25 +443,25 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
               const sideEffects = activeSideEffects();
               const token = sideEffects?.baselineAlarmToken != null
                 ? sideEffects.baselineAlarmToken
-                : alarmRow?.token == null ? null : String(alarmRow.token);
+                : alarmRow?.token == null ? null : NativeString(alarmRow.token);
               const effect = () => token
                 ? alarmBinding.deleteAlarmIndex({ className, objectName, token })
-                : Promise.resolve("skipped");
-              if (sideEffects) sideEffects.push(effect);
+                : reflectApply(promiseResolve, NativePromise, ["skipped"]);
+              if (sideEffects) reflectApply(arrayPush, sideEffects, [effect]);
               else await effect();
             } else if (preservedAlarm) {
               writeAlarmRow(alarmStorage, {
                 scheduledTime: preservedAlarm.scheduled_time,
                 retryCount: preservedAlarm.retry_count,
-                inFlight: Number(preservedAlarm.in_flight) === 1,
+                inFlight: NativeNumber(preservedAlarm.in_flight) === 1,
                 token: preservedAlarm.token,
               });
             }
           })();
         };
       }
-      const value = Reflect.get(target, prop, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
+      const value = reflectGet(target, prop, receiver);
+      return typeof value === "function" ? (...args) => reflectApply(value, target, args) : value;
     },
   });
 }
@@ -397,15 +470,15 @@ function wrapCtx(ctx, alarmBinding, className) {
   if (!ctx || !alarmBinding) return ctx;
   const objectName = objectNameFromCtx(ctx);
   let storageProxy = null;
-  return new Proxy(ctx, {
+  return new NativeProxy(ctx, {
     get(target, prop, receiver) {
       if (prop === "storage") {
-        const storage = Reflect.get(target, prop, receiver);
+        const storage = reflectGet(target, prop, receiver);
         if (!storageProxy) storageProxy = wrapStorage(storage, alarmBinding, className, objectName);
         return storageProxy;
       }
-      const value = Reflect.get(target, prop, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
+      const value = reflectGet(target, prop, receiver);
+      return typeof value === "function" ? (...args) => reflectApply(value, target, args) : value;
     },
   });
 }
@@ -415,7 +488,7 @@ function installStorageProxy(ctx, alarmBinding, className) {
   const objectName = objectNameFromCtx(ctx);
   const storageProxy = wrapStorage(ctx.storage, alarmBinding, className, objectName);
   try {
-    Object.defineProperty(ctx, "storage", {
+    objectDefineProperty(ctx, "storage", {
       value: storageProxy,
       configurable: true,
     });
@@ -440,9 +513,12 @@ export function wrapDurableObjectClass(Base, className) {
       // only the alarm binding here so __WDL_HOST_BINDINGS_WRAPPED can survive
       // through the two-layer wrapper contract.
       super(constructorCtx, withoutInternalEnv(env));
+      // Resolve once through the host wrapper after construction so prototype
+      // methods, class fields, and accessors retain the real instance receiver.
+      const tenantFetch = reflectGet(this, "fetch", this);
       const wrappedCtx = wrapCtx(constructorCtx, alarmBinding, className);
       try {
-        Object.defineProperty(this, "ctx", {
+        objectDefineProperty(this, "ctx", {
           value: wrappedCtx,
           configurable: true,
           writable: true,
@@ -450,26 +526,57 @@ export function wrapDurableObjectClass(Base, className) {
       } catch {
         this.ctx = wrappedCtx;
       }
-    }
-
-    async fetch(request) {
-      if (request.headers.get(ALARM_HEADER) === "1") {
-        const alarm = await request.json();
-        const claim = claimStorageAlarm(this.ctx.storage, alarm);
-        if (!claim) return Response.json({ ok: true, ignored: true });
-        if (typeof super.alarm === "function") {
-          await super.alarm({
-            retryCount: claim.retryCount,
-            isRetry: claim.retryCount > 0,
-          });
-        }
-        completeStorageAlarm(this.ctx.storage, claim.token);
-        return Response.json({ ok: true });
-      }
-      if (typeof super.fetch !== "function") {
-        return new Response("Durable Object class has no fetch handler", { status: 500 });
-      }
-      return await super.fetch(request);
+      // workerd wraps instance handlers after construction, so this platform
+      // dispatch must remain writable and configurable after replacing class fields.
+      objectDefineProperty(this, "fetch", {
+        value: async function(request) {
+          const headers = reflectApply(requestHeadersGetter, request, []);
+          if (reflectApply(headersGet, headers, [ALARM_HEADER]) === "1") {
+            const alarm = await reflectApply(requestJson, request, []);
+            const claim = claimStorageAlarm(this.ctx.storage, alarm);
+            if (!claim) return reflectApply(responseJson, NativeResponse, [{ ok: true, ignored: true }]);
+            // Alarm accessors may depend on initialized instance state.
+            const tenantAlarm = reflectGet(this, "alarm", this);
+            if (typeof tenantAlarm === "function") {
+              await reflectApply(tenantAlarm, this, [{
+                retryCount: claim.retryCount,
+                isRetry: claim.retryCount > 0,
+              }]);
+            }
+            completeStorageAlarm(this.ctx.storage, claim.token);
+            return reflectApply(responseJson, NativeResponse, [{ ok: true }]);
+          }
+          if (reflectApply(headersGet, headers, [RPC_HEADER]) === "1") {
+            const rpc = await reflectApply(requestJson, request, []);
+            try {
+              const tenantMethod = reflectGet(this, rpc.method, this);
+              if (typeof tenantMethod !== "function") {
+                return reflectApply(responseJson, NativeResponse, [{
+                  error: "do_rpc_method_not_found",
+                  message: "Durable Object RPC method " + rpc.method + " was not found",
+                }, { status: 404 }]);
+              }
+              const result = await reflectApply(tenantMethod, this, rpc.args);
+              return reflectApply(responseJson, NativeResponse, [{ ok: true, result }]);
+            } catch (err) {
+              const formatted = formatWrappedError(err);
+              const stack = safeErrorString(safeErrorField(err, "stack"));
+              return reflectApply(responseJson, NativeResponse, [{
+                error: "do_rpc_error",
+                name: formatted.error_name,
+                message: formatted.error_message,
+                ...(stack ? { stack } : {}),
+              }, { status: 500 }]);
+            }
+          }
+          if (typeof tenantFetch !== "function") {
+            return new NativeResponse("Durable Object class has no fetch handler", { status: 500 });
+          }
+          return await reflectApply(tenantFetch, this, [request]);
+        },
+        configurable: true,
+        writable: true,
+      });
     }
   };
 }

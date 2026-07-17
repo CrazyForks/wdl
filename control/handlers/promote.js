@@ -2,13 +2,14 @@ import {
   jsonResponse,
   jsonError,
   readJsonBody,
-  formatError,
+  codedErrorLogFields,
   codedErrorResponse,
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 import { promoteWithRoutes, RoutingError } from "control-routing";
+import { platformDomainFromEnv } from "shared-ns-pattern";
 
 /**
  * @param {{ request: Request, env: Record<string, unknown>, ns: string, name: string, requestId: string }} args
@@ -27,9 +28,7 @@ export async function handle({ request, env, ns, name, requestId }) {
   }
 
   try {
-    const platformDomain = typeof env.PLATFORM_DOMAIN === "string" && env.PLATFORM_DOMAIN
-      ? env.PLATFORM_DOMAIN
-      : "workers.local";
+    const platformDomain = platformDomainFromEnv(env);
     const result = await promoteWithRoutes(redis, ns, name, body.version, { log, requestId });
     log("info", "worker_promoted", {
       request_id: requestId,
@@ -48,13 +47,12 @@ export async function handle({ request, env, ns, name, requestId }) {
     });
   } catch (err) {
     if (err instanceof RoutingError) {
-      log("warn", "worker_promote_rejected", {
+      log(err.status >= 500 ? "error" : "warn", "worker_promote_rejected", {
         request_id: requestId,
         namespace: ns,
         worker: name,
         version: body.version,
-        status: err.status,
-        ...formatError(err),
+        ...codedErrorLogFields(err, "routing_error"),
         ...(err.details.attempts ? { attempts: err.details.attempts } : {}),
       });
       return codedErrorResponse(err, "routing_error");

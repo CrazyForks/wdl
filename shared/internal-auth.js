@@ -1,18 +1,21 @@
 export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
 export const INTERNAL_AUTH_ENV = "WDL_INTERNAL_AUTH_TOKEN";
 export const INTERNAL_AUTH_PREVIOUS_ENV = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN";
+export const INTERNAL_AUTH_FAILURE_CODE = "internal_auth_failed";
+export const INTERNAL_AUTH_FAILURE_MESSAGE = "Internal authentication failed";
 
 /**
  * @param {string} name
  * @param {string} token
  */
-function assertAsciiToken(name, token) {
+function assertHeaderToken(name, token) {
   if (token === "") {
-    throw new Error(`${name} must be configured as a non-empty ASCII string`);
+    throw new Error(`${name} must be configured as visible ASCII without whitespace or commas`);
   }
   for (let i = 0; i < token.length; i++) {
-    if (token.charCodeAt(i) > 127) {
-      throw new Error(`${name} must be configured as a non-empty ASCII string`);
+    const code = token.charCodeAt(i);
+    if (code < 0x21 || code > 0x7e || code === 0x2c) {
+      throw new Error(`${name} must be configured as visible ASCII without whitespace or commas`);
     }
   }
   return token;
@@ -26,7 +29,7 @@ export function internalAuthToken(env) {
   if (typeof token !== "string" || token === "") {
     throw new Error(`${INTERNAL_AUTH_ENV} must be configured`);
   }
-  return assertAsciiToken(INTERNAL_AUTH_ENV, token);
+  return assertHeaderToken(INTERNAL_AUTH_ENV, token);
 }
 
 /**
@@ -34,7 +37,7 @@ export function internalAuthToken(env) {
  */
 export function internalAuthPreviousToken(env) {
   const token = env?.[INTERNAL_AUTH_PREVIOUS_ENV];
-  return typeof token === "string" && token !== "" ? assertAsciiToken(INTERNAL_AUTH_PREVIOUS_ENV, token) : null;
+  return typeof token === "string" && token !== "" ? assertHeaderToken(INTERNAL_AUTH_PREVIOUS_ENV, token) : null;
 }
 
 /**
@@ -117,7 +120,7 @@ export function stripInternalAuthHeader(headers) {
 
 export function internalAuthFailureResponse() {
   return Response.json({
-    error: "internal_auth_failed",
-    message: "Internal authentication failed",
+    error: INTERNAL_AUTH_FAILURE_CODE,
+    message: INTERNAL_AUTH_FAILURE_MESSAGE,
   }, { status: 401 });
 }

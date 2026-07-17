@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importRepositoryModuleFresh } from "../helpers/load-shared-module.js";
+import {
+  importRepositoryModuleFresh,
+  repositoryFileUrl,
+} from "../helpers/load-shared-module.js";
+import { compileSharedAuthRoles } from "../helpers/load-auth-roles.js";
 import { delay, waitUntil } from "../helpers/timing.js";
+
+const { sharedAuthRolesUrl } = await compileSharedAuthRoles();
+const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
 
 /** @param {{ keepaliveMs?: number }} [options] */
 function loadLogsTailHandler(options = {}) {
@@ -44,19 +51,17 @@ function loadLogsTailHandler(options = {}) {
       const redisDbFromEnv = (env, name) => Number(env?.[name] || 0);`,
     ],
     [
-      /import \{ PLATFORM_TIER_RESERVED_NS \} from "shared-auth-roles";/,
-      "const PLATFORM_TIER_RESERVED_NS = new Set(['__platform__']);",
+      /from "shared-auth-roles";/,
+      `from ${JSON.stringify(sharedAuthRolesUrl)};`,
     ],
     [
-      /import \{ isReservedNs \} from "shared-ns-pattern";/,
-      "const isReservedNs = (ns) => ns === '__system__' || ns === '__platform__';",
+      /from "shared-ns-pattern";/,
+      `from ${JSON.stringify(SHARED_NS_PATTERN_URL)};`,
     ],
     [
-      /import \{\n {2}WORKER_NAME_RE,\n {2}compareStreamIds,\n {2}isValidResumeId,\n {2}isValidWorkerName,\n\} from "control-lib";/,
-      `const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-       const compareStreamIds = () => 0;
-       const isValidResumeId = () => true;
-       const isValidWorkerName = (name) => WORKER_NAME_RE.test(name);`,
+      /import \{ compareStreamIds, isValidResumeId \} from "control-lib";/,
+      `const compareStreamIds = () => 0;
+       const isValidResumeId = () => true;`,
     ],
     [
       /import \{ controlTailRedis, errMessage, jsonError, requireControlLog \} from "control-shared";/,

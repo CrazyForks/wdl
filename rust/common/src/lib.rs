@@ -4,9 +4,10 @@
 //! environment parsing, log-level parsing and common log-line formatting, HTTP
 //! health probes, shutdown/in-flight tracking, metric storage/formatting, FNV hashing,
 //! request-id sanitization, internal-auth constants/token matching, identity grammar,
-//! version and queue-key helpers, Redis connection and EVAL command helpers, time
-//! helpers, structured error fields, and UTF-8-safe text helpers. It should not own
-//! service protocols, Redis schemas, dispatch policy, or lifecycle behavior.
+//! worker contract and queue-key helpers, Redis connection and EVAL command helpers, time
+//! helpers, structured error fields, test-only process-environment overrides, and
+//! UTF-8-safe text helpers. It should not own service protocols, Redis schemas,
+//! dispatch policy, or lifecycle behavior.
 
 pub mod env;
 pub mod hash;
@@ -21,12 +22,21 @@ pub mod redis_conn;
 pub mod redis_eval;
 pub mod request_id;
 pub mod shutdown;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_env;
 pub mod text;
 pub mod time;
-pub mod version;
+pub mod worker_contract;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures {
+    pub(crate) fn observability_contract() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/observability-contract.json"
+        ))
+        .expect("observability contract fixture parses")
+    }
+
     pub(crate) fn identity_cases(field: &str) -> Vec<(String, bool)> {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/cross-language-identity.json"

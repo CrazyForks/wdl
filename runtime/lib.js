@@ -1,10 +1,20 @@
 // Pure helpers for the runtime worker.
 
-import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
+import { base64ToBytes, bytesToBase64 } from "shared-base64";
+import { WORKER_NAME_RE, isValidRouteNs } from "shared-ns-pattern";
+import { parseVersion } from "shared-worker-contract";
+import {
+  DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE,
+  ENHANCED_ERROR_SERIALIZATION_FLAG,
+  LEGACY_ERROR_SERIALIZATION_FLAG,
+  MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  isWorkerdExperimentalCompatFlag,
+} from "shared-workerd-compat-flags";
 
-const BASE64_CHUNK_SIZE = 0x8000;
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+
 
 // Coerce a KV.put value into Uint8Array. ReadableStream is handled by the
 // caller (await body); here we stick to sync inputs.
@@ -17,23 +27,6 @@ export function toBytes(value) {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   throw new Error("KV put: value must be string | ArrayBuffer | typed array | ReadableStream");
-}
-
-/** @param {Uint8Array} bytes @returns {string} */
-export function bytesToBase64(bytes) {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
-  }
-  return btoa(binary);
-}
-
-/** @param {string} value @returns {Uint8Array} */
-export function base64ToBytes(value) {
-  const binary = atob(value);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
-  return out;
 }
 
 export const MAX_QUEUE_DELAY_SECONDS = 86_400;
@@ -110,7 +103,7 @@ export function workerQueueAttempts(internalAttempts) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) + 1 : 1;
 }
 
-// Mirror of control/lib.js#deepFreeze — bundle meta is immutable on the
+// Mirror of control/bundle.js#deepFreeze — bundle meta is immutable on the
 // wire, so the post-parse object should be too.
 /** @template T @param {T} obj @returns {T} */
 function deepFreeze(obj) {
@@ -120,17 +113,9 @@ function deepFreeze(obj) {
   return Object.freeze(obj);
 }
 
-const DEFAULT_COMPATIBILITY_DATE = "2026-04-24";
-const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
-const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
-const ROUTE_NS_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|__system__)$/;
-const RESERVED_TENANT_NS = new Set(["admin"]);
-const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
-const VERSION_RE = /^v[1-9][0-9]*$/;
-
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
-// where workerd made it the default; newer dates reject the explicit flag.
+// where workerd made it the default; workerd owns later flag compatibility.
 /** @param {string} compatibilityDate */
 function platformFloorCompatFlags(compatibilityDate) {
   const out = [];
@@ -164,6 +149,11 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
     if (isWorkerdExperimentalCompatFlag(f)) {
       throw new Error(
         `meta.compatibilityFlags contains experimental workerd flag ${JSON.stringify(f)}, which WDL does not support for tenant workers`
+      );
+    }
+    if (f === LEGACY_ERROR_SERIALIZATION_FLAG) {
+      throw new Error(
+        `meta.compatibilityFlags contains unsupported flag ${JSON.stringify(f)}; WDL requires enhanced error serialization`
       );
     }
     out.push(f);
@@ -240,7 +230,12 @@ export function bundleToWorkerCode(hash) {
   // methods cannot shadow RPC method names on bindings.
   const compatibilityDate = typeof meta.compatibilityDate === "string" && meta.compatibilityDate
     ? meta.compatibilityDate
-    : DEFAULT_COMPATIBILITY_DATE;
+    : DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE;
+  if (compatibilityDate < MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE) {
+    throw new Error(
+      `meta.compatibilityDate ${compatibilityDate} is older than WDL supports (${MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE})`
+    );
+  }
 
   return {
     compatibilityDate,
@@ -313,8 +308,8 @@ function requiredPatternString(body, field, pattern, description) {
 
 /** @param {Record<string, unknown> | null} body */
 function requiredRouteNs(body) {
-  const ns = requiredPatternString(body, "ns", ROUTE_NS_RE, "a route namespace");
-  if (RESERVED_TENANT_NS.has(ns)) {
+  const ns = requiredString(body, "ns");
+  if (!isValidRouteNs(ns)) {
     throw new Error("ns must be a route namespace");
   }
   return ns;
@@ -327,7 +322,11 @@ function requiredWorkerName(body) {
 
 /** @param {Record<string, unknown> | null} body */
 function requiredVersion(body) {
-  return requiredPatternString(body, "frozenVersion", VERSION_RE, "an immutable worker version");
+  const version = requiredString(body, "frozenVersion");
+  if (parseVersion(version) == null) {
+    throw new Error("frozenVersion must be an immutable worker version");
+  }
+  return version;
 }
 
 /** @param {Record<string, unknown> | null} body @param {string} field */

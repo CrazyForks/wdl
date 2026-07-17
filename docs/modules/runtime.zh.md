@@ -15,6 +15,7 @@ Runtime 从 Redis 加载不可变 worker version，构建 tenant-facing `env` bi
 - `runtime/dispatch.js` 和 `runtime/dispatch/*`：fetch/scheduled/queue/workflow dispatch helper。
 
 Worker 通过不可变 id `<ns>:<worker>:<version>` 加载。Promote 会生成新的 id，因此 active-version 变化自然触发 fresh isolate cold-load。
+`runtime/load.js` 也统一持有 `workerLoader.get()` wrapper：每次 cache miss 都会登记供后续 eviction 使用，只有 active-version dispatch path 会请求 sibling eviction；service binding 加载 pinned version 时不会驱逐 sibling。
 
 两个 runtime pool 使用同一个 image 和源码，但 capnp config 不同：
 
@@ -40,7 +41,7 @@ Tenant 可见 binding 包括 KV、R2、D1、Durable Objects、Queues、ASSETS、
 workerd 提供 isolate、module evaluation、named entrypoint 和 JSRPC 机制。Cloudflare 生产平台通常在外部服务里实现的 binding 后端，则由 WDL 自己补齐。因此 runtime 把 binding 当作 adapter：
 
 - KV、queue producer 这类纯数据 binding 调 colocated redis-proxy sidecar。Loaded worker 看到 Cloudflare-shaped object，但 method call 会先通过 workerd JSRPC 回到 runtime，再经 HTTP 调 redis-proxy。
-- Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 过程中用留有 headroom 的预算估算完整 workerLoader env，包括用户 vars/secrets、runtime 注入的 binding/workflow env value，以及 platform/service binding props 中复制的 required caller secret，避免超限配置拖到 runtime cold-load 才失败。
+- Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 过程中用 shape-only factory 调用 cold-load 同一个 `buildWorkerEnv()` materializer，再用留有 headroom 的预算估算完整 workerLoader env，包括用户 vars/secrets、runtime 注入的 binding/workflow env value，以及 platform/service binding props 中复制的 required caller secret，避免超限配置拖到 runtime cold-load 才失败。
 - D1、Durable Objects、Workflows 这类 stateful binding 调专门 backend service。Hidden backend Fetcher 留在 runtime 内部，并在 tenant code 观察 `env` 前被删除。
 - R2 是 S3-compatible object-storage adapter：runtime 使用平台 credential 签名请求，并发送到配置的 endpoint。
 - ASSETS 是 deploy artifact URL helper：control 在 deploy 时把 assets 上传到 S3-compatible storage；runtime 读取 `__meta__.assets` 和 `ASSETS_CDN_BASE`，只暴露 `env.ASSETS.url(path)` 用来生成 tokenized CDN URL。
@@ -52,13 +53,13 @@ KV 是最直接的例子。Runtime 把 `KV` 导出成 named entrypoint，并用 
 
 KV 支持常用 `KVNamespace` 调用：`get`、batch `get`、`getWithMetadata`、batch `getWithMetadata`、`put`、`delete` 和 `list`。`get` 支持 text、JSON、arrayBuffer 和 stream 形状；batch read 支持 text 和 JSON。Runtime shim 在 proxy 前把 value 限制到 25 MiB，stream value 也用同一个 cap 读取。所有 KV 操作的 key 都在 redis-proxy 边界限制为 512 个 UTF-8 字节，包括 list prefix 和 batch read。`list()` 基于 Redis `HSCAN`，不是 Cloudflare 有序 B-tree：key 不排序，cursor 是 opaque WDL cursor，并发写可能乱序出现或被再次看到。`limit` 上限是 1000。`cacheTtl` 只是 API shape；没有 Cloudflare edge read cache 或 global eventual-consistency window。
 
-R2 binding 把 `bucket_name` 映射到平台 S3-compatible bucket 下的 namespace-scoped virtual bucket：`r2/<ns>/<bucket_name>/<object-key>`。同一个 namespace 中使用同一 `bucket_name` 的 worker 会有意共享数据；不同 namespace 通过前缀隔离。Runtime 支持常用 `head`、`get`、`put`、`delete` 和 `list` 路径。`get()` 返回 streaming body，便捷 reader 执行 25 MiB cap。`put(stream, ...)` 目前会先 buffer，再发单个 S3 PUT，并使用同一个 cap；不支持 multipart upload、SSE-C 和 checksum selection。Conditional requests 和 range GET 实现常用 R2 行为。`list({ include: [...] })` 为 metadata fields 额外执行 HEAD，并使用并发 cap。Tenant-facing R2 error 只暴露 operation/status，以及有帮助的 virtual object key；不会暴露原始 S3 response body 或 physical `r2/<ns>/<bucket>/...` key。Control-plane R2 admin error 可以为 operator 保留 backend detail。
+R2 binding 把 `bucket_name` 映射到平台 S3-compatible bucket 下的 namespace-scoped virtual bucket：`r2/<ns>/<bucket_name>/<object-key>`。同一个 namespace 中使用同一 `bucket_name` 的 worker 会有意共享数据；不同 namespace 通过前缀隔离。Runtime 支持常用 `head`、`get`、`put`、`delete` 和 `list` 路径。`get()` 返回 streaming body，便捷 reader 执行 25 MiB cap。`put(stream, ...)` 目前会先 buffer，再发单个 S3 PUT，并使用同一个 cap；不支持 multipart upload、SSE-C 和 checksum selection。Conditional requests 和 range GET 实现常用 R2 行为。`list({ include: [...] })` 为 metadata fields 额外执行 HEAD，并使用并发 cap。Tenant 提供的 `Headers` metadata 如果包含 `Expires`，其值必须是 canonical IMF-fixdate；malformed write metadata 会在 host binding call 前被拒绝。Tenant-facing R2 error 只暴露 operation/status，以及有帮助的 virtual object key；不会暴露原始 S3 response body 或 physical `r2/<ns>/<bucket>/...` key。Control-plane R2 admin error 可以为 operator 保留 backend detail。
 
 ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline。Control 把文件上传到 `assets/<ns>/<worker>/<token>/<path>`，注入 `ASSETS` binding，runtime 暴露同步的 `env.ASSETS.url(path)`。该方法在 runtime 中不做 IO，并用 `ASSETS_CDN_BASE` 返回浏览器可访问的 CDN URL。Path 按 `/` 切段，空段、`.` 和 `..` 被拒绝，每段会 percent-encode。Version 在 load 时绑定，因此 rollback 会切换 asset URL。需要对静态文件做 auth 或 rewrite 的 worker 应把文件留在 bundle 里，而不是使用 declared `assets`。
 
 R2 和 ASSETS 生命周期语义故意不同。ASSETS 是 deploy artifact，version/worker delete 会 stage `worker-delete-s3-cleanup` work。R2 是 tenant runtime data，worker delete 永远不删除 R2 object。
 
-Service binding 在 caller deploy 时冻结。Control 解析 target namespace、worker、version 和 entrypoint，存入 caller metadata，runtime 第一次使用时加载该精确 target version。之后 target promote 不会移动已有 caller；caller redeploy 才是 refresh 边界。这种 version pinning 让 rollback 和 version delete referrer check 都是确定的。
+Service binding 在 caller deploy 时冻结。Control 解析 target namespace、worker、version 和 entrypoint，存入 caller metadata，runtime 第一次使用时加载该精确 target version。之后 target promote 不会移动已有 caller；caller redeploy 才是 refresh 边界。这种 version pinning 让 rollback 和 version delete referrer check 都是确定的。Runtime 会在 materialize binding 前用 canonical positive JavaScript-safe-integer grammar 重新校验 persisted pinned version。
 
 Cross-namespace service binding 要求 target 为被绑定的 entrypoint 声明 `[[exports]]` entry；default export 也要声明 `entrypoint = "default"`。该 entry 的 `allowed_callers` 控制 cross-namespace 访问；`["*"]` 对所有 namespace 开放，空数组则关闭 cross-namespace caller。没有 `[[exports]]` 的 target 只向 same-namespace caller 暴露 default entrypoint。Same-namespace caller 绕过 ACL，但 target 一旦声明 `[[exports]]`，仍受 strict entrypoint visibility 约束。ACL 变化是 deploy-time，不是 call-time；既有 caller 会保持 pin，直到 redeploy。
 
@@ -74,16 +75,17 @@ Runtime 通过 `redis-proxy` 从 DB 0 读取不可变 bundle 和 metadata。Data
 - D1 和 DO binding 调用专门 runtime service。
 - R2/ASSETS 使用 S3-compatible object storage。
 
-Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含 Python module entry 或上游 experimental compatibility flag，也会 fail closed；否则这些形态会在当前 stock workerd binary 下变成 opaque cold-load failure。
+Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含早于 `2026-04-01` 的 `compatibilityDate`、Python module entry、上游 experimental compatibility flag、禁用 WDL 要求的 enhanced error serialization，或违反其他由 WDL 拥有的 metadata contract，也会 fail closed。日期下限与 enhanced serialization 要求是 WDL 的 forward-only policy；冗余或其他不兼容的上游 flag 仍由 workerd 在 cold load 时拒绝。
 
 ## Ownership / 并发 / 失败语义
 
 - workerLoader cache 没有 LRU。Runtime 给每个 loaded worker 注入 `__WdlAbort__`，并在 active-version cold-load 时 evict sibling historical versions。
 - Service-binding cold load 会记录 loaded version，但不 evict sibling，因为 service binding 可能有意指向 frozen historical version。
 - Internal active-version scheduled/queue dispatch 会 opt into sibling eviction；frozen workflow dispatch 不会。
-- 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。
-- Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。
-- Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body。
+- 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。Host-wrapper runtime 会在 tenant module 前执行，并捕获参与 handler/env wrapping 决策的 intrinsic，因此 tenant 顶层 prototype mutation 不能绕过 env 边界。
+- Generated wrapper 会把 request id 直接传给每次请求创建的 facade。持久 class instance 使用一个小型 mutable diagnostic context，并在 wrapped handler 开始时刷新；并发或有意重入的调用因此可能观察到另一次 invocation 的 id。该传播只属于 best-effort observability，不是安全或正确性边界，Runtime 也不会为它重写 tenant compatibility flags。Request id 不能用于授权、fence 或去重；其语法仍由 injected canonical request-id module 拥有。
+- Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。do-runtime alarm 和 RPC 通过携带外层 request id 的私有 fetch dispatch 进入，不会把平台 metadata 加入 tenant method argument。
+- Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body；throwable 自身无法转成字符串时，tail formatting 也不能反向覆盖原始异常。
 - Internal scheduled、queue 和 workflow dispatch route 使用 result envelope 表达 handler outcome。Tenant handler error 是 scheduler/workflow 协议中的 outcome state，不是 generic platform transport error。
 - Runtime 没有 route-cache invalidation protocol。`workerLoader` cache key 是不可变 worker id，因此 promote 后的新 version 是新 key，会自然 cold-load。
 - `runtime/tail-worker.js` 通过 `workerCode.tails` 附加到每次 dynamic load。它总是输出结构化 stdout；只有 shared tail forwarder 看到 active subscription 后，才转发到 `wdl tail`。
@@ -104,11 +106,11 @@ Runtime 为 loading、binding operation、`redis-proxy` call、workflow replay c
 
 - 修改 bundle metadata、wrapper generation 或 binding shape 时，runtime 和 control 应一起滚。
 - 如果 scheduler/workflows 依赖新的 `:8088` internal path 或 dispatch body，runtime 必须先滚。
-- Runtime 不再为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 仍然注入 `__WdlAbort__`，但当前 bundled workerd baseline 中 `abortIsolate()` 已经不需要该 flag。
-- 移除 loaded worker 的宽泛 `experimental` flag 会有意收紧 tenant 对非 GA experimental-only surface 的访问，例如不可撤销的长期 stub storage。不要为了兼容绕过而重新打开它，除非先完成明确的功能设计。
+- Runtime 不为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 会注入 `__WdlAbort__`；当前 bundled workerd baseline 的 `abortIsolate()` 不需要该 flag。
+- Loaded worker 不能访问非 GA experimental-only surface，例如不可撤销的长期 stub storage。除非先完成明确的功能设计，否则不要为兼容绕过打开宽泛 `experimental` flag。
 - Control 会在 deploy 时拒绝上游 `$experimental` compatibility enable flags，runtime 也会拒绝仍带有这些 flags 的 retained metadata。`no_*` 这类 disable-style flag 不属于这个 mirror，除非上游把对应 enable flag 本身标为 experimental。
 - Python Workers modules 不受支持。Control 会拒绝新的 `py` module manifest，runtime/do-runtime 会拒绝 retained metadata 中的 `py` module，而不是让 workerd 之后抛 mixed JS/Python bundle error。
-- Runtime workerd 进程仍需要进程级 `--experimental`，因为上游 workerd 2026-07-01 仍用它 gate `workerLoader` binding。不要重新给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
+- Runtime workerd 进程需要进程级 `--experimental`，因为上游 workerd 2026-07-01 用它 gate `workerLoader` binding。不要给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
 - 上游 workerd 2026-07-01 把 dynamic worker code 限制为 64 MiB、serialized dynamic env 限制为 1 MiB。Control 会在分配 version 前和 commit metadata materialization 之后估算最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules、workflow import rewrite 和生成的 workflow keys；vars、namespace/worker secrets、runtime 注入的 binding/workflow env value 会在 Redis WATCH commit 和 secret mutation 路径里按 headroomed `workerLoader` env budget 做权威检查。Deploy 和 namespace-secret mutation 使用它们实际会加载的 version；worker-secret mutation 还会在 WATCH/COPY bump 事务内重新检查 forced bump，确保 routing flip 前覆盖已分配的 bump version。估算以 JSON bytes 为基底，并对非 Latin-1 字符串补上 V8 two-byte string overhead，因此 ASCII 混 CJK 或 emoji 的 secret 不会绕过 control 后在 cold-load 才失败。
 - 当前 stock workerd 中，客户端在 async `ReadableStream` response body 中途断开时，不一定调用 stream source 的 `cancel()`。Tenant streaming/SSE worker 应使用自己的 heartbeat、timeout 或应用层 close path，不要把 disconnect-driven `cancel()` 当成唯一资源清理信号。
 - workerd 升级仍可能改变默认或 compatibility-flagged runtime surface；升级时要审 exposed surface，而不只审 loader/abort path。

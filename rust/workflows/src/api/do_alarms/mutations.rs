@@ -1,14 +1,14 @@
 use serde_json::json;
 use wdl_rust_common::redis_eval::append_eval_cmd;
 use wdl_rust_common::time::{now_ms, random_hex_64};
-use wdl_rust_common::version::do_storage_id_key;
+use wdl_rust_common::worker_contract::do_storage_id_key;
 
 use crate::{AppState, LogLevel, WorkflowResult, do_alarm_by_worker_key, log};
 
 use super::super::eval_script;
 use super::model::{
     DoAlarmCleanupRequest, DoAlarmDeleteRequest, DoAlarmMutationResponse, DoAlarmSetRequest,
-    job_keys_for_identity, validate_delete_request, validate_non_empty, validate_set_request,
+    job_keys_for_identity, validate_cleanup_request, validate_delete_request, validate_set_request,
 };
 use super::scripts::{
     CLEANUP_DO_ALARM_FOR_STORAGE_SCRIPT, DELETE_DO_ALARM_SCRIPT, SET_DO_ALARM_SCRIPT,
@@ -177,9 +177,7 @@ pub(crate) async fn cleanup_do_alarms_for_worker(
     app: &AppState,
     req: DoAlarmCleanupRequest,
 ) -> WorkflowResult<DoAlarmMutationResponse> {
-    validate_non_empty(&req.ns, "ns")?;
-    validate_non_empty(&req.worker, "worker")?;
-    validate_non_empty(&req.do_storage_id, "doStorageId")?;
+    validate_cleanup_request(&req)?;
     let by_worker = do_alarm_by_worker_key(&req.ns, &req.worker);
     let snapshot_key = format!("{by_worker}:cleanup-snapshot:{}", random_hex_64());
     let mut cursor = 0_u64;

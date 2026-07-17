@@ -7,14 +7,12 @@
 import {
   NS_RE,
   parseControlRoute,
-  configuredHostname,
   configuredPublicUrl,
   platformVersionFromPackageJson,
   projectAccessPrincipal,
   isAdminAcceptableNs,
-  isValidWorkerName,
-  WORKER_NAME_RE,
 } from "control-lib";
+import { configuredHostname, isValidWorkerName, WORKER_NAME_RE } from "shared-ns-pattern";
 import {
   ensureInit,
   authorizeControlRequest,

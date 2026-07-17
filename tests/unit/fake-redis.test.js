@@ -1,7 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { redisConformanceCases } from "../helpers/redis-conformance-cases.js";
-import { createFakeRedis, FakeRedisWatchError } from "../helpers/mocks/fake-redis.js";
+import {
+  createFakeRedis,
+  FakeRedisWatchError,
+  sharedRedisStubUrl,
+} from "../helpers/mocks/fake-redis.js";
+
+test("shared Redis test modules use the fake WatchError and production bulk decoder", async () => {
+  const { WatchError, decodeBulk } = await import(sharedRedisStubUrl());
+  assert.equal(WatchError, FakeRedisWatchError);
+  assert.equal(decodeBulk(undefined), undefined);
+  assert.equal(decodeBulk(null), null);
+  assert.equal(decodeBulk("value"), "value");
+  assert.equal(decodeBulk(new TextEncoder().encode("bytes")), "bytes");
+  assert.equal(decodeBulk(42), "42");
+});
 
 /**
  * @param {ReturnType<typeof createFakeRedis>} redis
@@ -92,6 +106,16 @@ test("fake redis session records single and batched hash reads", async () => {
     ["hGet", "hash:b", "two"],
     ["hMGet", "hash:b", ["two", "missing"]],
   ]);
+});
+
+test("fake redis getManyWithTime matches the production empty-input contract", async () => {
+  const redis = createFakeRedis();
+  await redis.session(async (session) => {
+    await assert.rejects(
+      session.getManyWithTime([]),
+      /getManyWithTime requires at least one key/
+    );
+  });
 });
 
 test("fake redis supports hash existence and key reads on clients and sessions", async () => {

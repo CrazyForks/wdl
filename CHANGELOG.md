@@ -3,6 +3,15 @@
 ## Unreleased
 
 - Updated maintenance dependencies and image baselines: workerd runtime images now use distroless `base-debian13`, local and Kubernetes Valkey use `valkey/valkey:9.1-alpine`, and root development tooling moved to current patch/minor releases.
+- Consolidated duplicated Control request/error/retry paths, Redis locks and key grammars, queue and cron projections, S3 retry policy, observability helpers, and Rust sidecar contracts into canonical owners with shared behavioral and cross-language fixture coverage.
+- Hardened the tenant/runtime boundary: gateway strips private `x-wdl-*` headers, generated wrappers and D1/R2/DO facades resist tenant prototype mutation at capability boundaries, owner records and forwarding targets require service-specific private endpoints, generated wrappers propagate diagnostic request ids on a best-effort basis, and DO ownership retries rely on private do-runtime markers without replaying unknown-outcome non-idempotent requests.
+- Tightened forward-only input contracts: dynamic Workers reject explicit `compatibility_date` values earlier than `2026-04-01`, upstream experimental flags, and flags that disable WDL's required enhanced error serialization; internal auth tokens must be visible ASCII without whitespace or commas, request ids are visible ASCII, secret names reject reserved `Object.prototype` keys, runtime-reserved module-name collisions require redeployment under a non-reserved name, DO class names are capped so every shard fits the host-id limit, and `Headers`-form R2 metadata requires a canonical IMF-fixdate `Expires` value.
+- Made required bundle metadata, queue base64 bodies, and persisted secret envelopes fail closed under their owning contracts; JavaScript and Rust now share the secret-envelope, queue-key, request-id, internal-auth, worker-version, scheduler-projection, and workflow-limit fixtures.
+- Normalized `PLATFORM_DOMAIN` across routing tiers, made the published-image Compose overlay pull-only, and limited Kubernetes user-runtime loader ingress to gateway.
+- Removed the unreachable DO inline worker-code test hook and its Terraform switch; do-runtime invoke paths now accept only canonical persisted bundle identities and reject non-canonical or oversized host ids.
+- Aligned scheduler and Workflows Compose, Kubernetes, and ECS stop windows with their 25-second application drain so rollout and scale-in do not terminate in-flight work before the configured drain completes.
+- Upgraded `@wdl-dev/aws-sigv4` to 3.0.1; WDL's S3-only URL-input paths preserve their existing signatures while adopting stable request snapshots, fail-closed redirects, lowercase region validation, and non-blocking response cleanup.
+- Closed workflow restart/version-delete races, made malformed workflow and pattern projections fail closed, and ensured whole-worker delete removes orphan workflow definitions.
 
 ## wdl.20260701.1 - 2026-07-08
 

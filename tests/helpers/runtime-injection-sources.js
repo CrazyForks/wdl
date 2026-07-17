@@ -15,7 +15,7 @@ const REAL_RUNTIME_INJECTION_SOURCE_PATHS = Object.freeze({
   r2UtilsSource: "runtime/r2-utils.js",
   doClientSource: "runtime/do-client.js",
   doTransportSource: "runtime/_wdl-do-transport.js",
-  ownerEndpointSource: "runtime/_wdl-owner-endpoint.js",
+  ownerEndpointSource: "shared/owner-endpoint.js",
   ownerHintCacheSource: "runtime/_wdl-owner-hint-cache.js",
   requestIdSource: "runtime/_wdl-request-id.js",
   workflowsClientSource: "runtime/workflows-client.js",
@@ -61,7 +61,7 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
   ownerHintCacheSource:
     "export function createOwnerHintCache() { return {}; }",
   requestIdSource:
-    "export function requestIdFromOptions() { return null; }",
+    "export function requestIdFromOptions() { return null; } export function sanitizeRequestId() { return null; }",
   workflowsClientSource:
     "export class Workflow { constructor(metadata) { this.metadata = metadata; } }",
 });

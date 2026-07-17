@@ -4,20 +4,19 @@ import {
   importRepositoryModule,
   importSpecifierReplacements,
   moduleDataUrl,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 /** @type {any} */ (globalThis).__controlIndexState = null;
 
+const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 const controlLibUrl = moduleDataUrl(`
 export const NS_RE = /^[a-z0-9-]+$/;
-export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-export function configuredHostname(value) { return typeof value === "string" && value ? value : null; }
 export function configuredPublicUrl() { return null; }
 export function platformVersionFromPackageJson() { return "wdl.test"; }
 export function projectAccessPrincipal(principal) { return principal || null; }
 export function isAdminAcceptableNs(ns) { return typeof ns === "string" && !ns.includes("_"); }
-export function isValidWorkerName() { return true; }
 function withAction(route, action) { return action ? { ...route, action } : route; }
 export function parseControlRoute(pathname, method) {
   if (pathname === "/reload") return withAction({ kind: "reload", scopeRoute: "reload" }, method === "POST" ? "system.reload" : null);
@@ -73,6 +72,7 @@ export async function handle(args) {
 const controlIndex = (await importRepositoryModule("control/index.js", importSpecifierReplacements({
   "control-lib": controlLibUrl,
   "control-shared": controlSharedUrl,
+  "shared-ns-pattern": sharedNsPatternUrl,
   "shared-request-scope": requestScopeUrl,
   "wdl-package-json-source": packageJsonUrl,
   "control-handlers-reload": handlerUrl,
@@ -170,6 +170,20 @@ test("control whoami uses sanitized forwarded proto for public URL hints", async
     control: "https://control.example",
     namespace: "https://tenant-a.workers.example",
   });
+});
+
+test("control whoami omits namespace URL when no public platform domain is configured", async () => {
+  const state = resetControlIndexState();
+  state.authResult.principal = { kind: "ns", ns: "tenant-a" };
+
+  const response = await controlIndex.fetch(
+    new Request("http://control.example/whoami"),
+    {},
+    /** @type {ExecutionContext} */ ({})
+  );
+
+  const body = await readJsonResponse(response, 200);
+  assert.deepEqual(body.urls, { control: "http://control.example" });
 });
 
 test("control whoami ignores malformed forwarded proto values", async () => {

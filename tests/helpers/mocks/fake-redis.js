@@ -1,3 +1,16 @@
+import {
+  moduleDataUrl,
+  repositoryFileUrl,
+  repositoryModuleDataUrl,
+} from "../load-shared-module.js";
+
+const SHARED_OBSERVABILITY_URL = repositoryFileUrl("shared/observability.js");
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_REDIS_RESP_URL = repositoryModuleDataUrl("shared/redis-resp.js", [
+  [/from "shared-observability";/, `from ${JSON.stringify(SHARED_OBSERVABILITY_URL)};`],
+  [/from "\.\/errors\.js";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
+]);
+
 /** @typedef {Map<string, string>} FakeRedisStrings */
 /** @typedef {Map<string, Record<string, string>>} FakeRedisHashes */
 /** @typedef {Map<string, Set<string>>} FakeRedisSets */
@@ -24,6 +37,20 @@ export class FakeRedisWatchError extends Error {
     super(message);
     this.name = "WatchError";
   }
+}
+
+/**
+ * Canonical `shared-redis` test surface. Callers may append only the
+ * state-bound exports their module graph needs.
+ * @param {string} [extraSource]
+ */
+export function sharedRedisStubUrl(extraSource = "") {
+  return moduleDataUrl(`
+import { FakeRedisWatchError as WatchError } from ${JSON.stringify(import.meta.url)};
+import { decodeBulk } from ${JSON.stringify(SHARED_REDIS_RESP_URL)};
+export { WatchError, decodeBulk };
+${extraSource}
+`);
 }
 
 /** @returns {FakeRedisState} */
@@ -286,6 +313,18 @@ export function createFakeRedisSession(state, options = {}) {
     /** @param {string} key */
     async getWithTime(key) {
       return { value: await this.get(key), nowMs: await this.time() };
+    },
+    /** @param {string[]} keys */
+    async getManyWithTime(keys) {
+      if (keys.length === 0) throw new Error("getManyWithTime requires at least one key");
+      state.commands.push(["getManyWithTime", [...keys]]);
+      return {
+        values: keys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return state.strings.get(key) ?? null;
+        }),
+        nowMs: await this.time(),
+      };
     },
     async time() {
       return currentFakeRedisTimeMs(state, options);

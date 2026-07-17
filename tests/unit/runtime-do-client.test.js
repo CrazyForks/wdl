@@ -6,12 +6,31 @@ import {
   clearDoOwnerHintsForTest,
   setDoOwnerHintMaxEntriesForTest,
 } from "../../runtime/do-client.js";
-import { requestSpec } from "../../runtime/_wdl-do-transport.js";
+import {
+  MAX_DO_REQUEST_HEADER_BYTES,
+  dispatchDoInvokeWithHintCache,
+  fetchInvokeInit,
+  isWebSocketUpgrade,
+  ownerHintFromHeaders,
+  replayOwnerUnavailableForFetch,
+  requestSpec,
+  rpcInvokeBody,
+} from "../../runtime/_wdl-do-transport.js";
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
-import { doOwnerHintHeaders, doOwnerHintResponse } from "../helpers/do-owner-hint.js";
+import { loadDoProtocol } from "../helpers/load-do-protocol.js";
+import {
+  doOwnerHintHeaders,
+  doOwnerHintResponse,
+  doOwnershipErrorHeaders,
+} from "../helpers/do-owner-hint.js";
 import { makeRecordingFetch } from "../helpers/mock-fetch.js";
-import { withMockedProperty } from "../helpers/mock-global.js";
+import {
+  withMockedProperty,
+  withMockedPropertyDescriptor,
+} from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
+
+const { normalizeDoInvokeRequest } = await loadDoProtocol();
 
 test.afterEach(() => {
   clearDoOwnerHintsForTest();
@@ -22,7 +41,48 @@ function headerValue(headers, name) {
   return new Headers(headers).get(name);
 }
 
-test("DurableObjectNamespace facade forwards fetch with object name and request id", async () => {
+/**
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {string} message
+ */
+async function withTestTimeout(promise, message) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), 1000);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+/** @param {UnderlyingSourceCancelCallback} onCancel @param {ResponseInit} [init] */
+function cancellableResponse(onCancel, init = {}) {
+  return new Response(new ReadableStream({
+    pull(controller) {
+      controller.error(new Error("discarded response body was read"));
+    },
+    cancel: onCancel,
+  }, { highWaterMark: 0 }), init);
+}
+
+/**
+ * @param {UnderlyingSourceCancelCallback} onCancel
+ * @param {Parameters<typeof doOwnerHintHeaders>[0]} [options]
+ */
+function cancellableDoOwnerHintResponse(onCancel, options = {}) {
+  return cancellableResponse(onCancel, {
+    status: 409,
+    headers: doOwnerHintHeaders(options),
+  });
+}
+
+test("DurableObjectNamespace fetch uses its private request-id provider", async () => {
   /** @type {any[]} */
   const calls = [];
   const ns = new DurableObjectNamespace({
@@ -31,6 +91,7 @@ test("DurableObjectNamespace facade forwards fetch with object name and request 
       return new Response("ok", { status: 201 });
     },
   }, { requestIdProvider: () => "rid-1" });
+  Reflect.set(ns, "requestId", () => "tenant-rid");
 
   const id = ns.idFromName("room-a");
   const response = await ns.get(id).fetch("https://demo.workers.example/chat", {
@@ -99,6 +160,27 @@ test("DurableObjectNamespace metadata host proxy handles normal fetch while webs
   assert.equal(backendCalls[0].url, "http://do-runtime/internal/do/connect");
 });
 
+test("DurableObjectNamespace classifies metadata with a captured Object.hasOwn", async () => {
+  await withMockedProperty(Object, "hasOwn", () => {
+    throw new Error("tenant Object.hasOwn was called");
+  }, async () => {
+    const namespace = new DurableObjectNamespace({
+      ns: "tenant",
+      worker: "worker",
+      version: "v1",
+      doStorageId: "storage",
+      className: "Room",
+      hostProxy: {
+        async fetchObject() {
+          return new Response("ok");
+        },
+      },
+    });
+    const response = await namespace.get(namespace.idFromName("room")).fetch("https://example.test/");
+    assert.equal(await response.text(), "ok");
+  });
+});
+
 test("DurableObjectNamespace direct backend keeps binding/backend in private fields", async () => {
   /** @type {any[]} */
   const calls = [];
@@ -120,6 +202,7 @@ test("DurableObjectNamespace direct backend keeps binding/backend in private fie
 
   const response = await ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
     method: "POST",
+    headers: { "x-request-id": "tenant-forged" },
     body: "hello",
   });
 
@@ -136,6 +219,8 @@ test("DurableObjectNamespace direct backend keeps binding/backend in private fie
   assert.equal(body.doStorageId, "do_0123456789abcdef0123456789abcdef");
   assert.equal(body.className, "Room");
   assert.equal(body.objectName, "room-a");
+  const forwardedRequest = /** @type {{ headers: HeadersInit }} */ (body.request);
+  assert.equal(new Headers(forwardedRequest.headers).get("x-request-id"), "rid-1");
   assert.equal(Buffer.from(bodyBytes).toString("utf8"), "hello");
 });
 
@@ -238,7 +323,7 @@ test("DurableObjectNamespace fetch rejects oversized invoke envelopes before tra
   );
 });
 
-test("DurableObjectNamespace stub forwards arbitrary RPC methods", async () => {
+test("DurableObjectNamespace RPC uses its private request-id provider", async () => {
   /** @type {any[]} */
   const calls = [];
   const backend = {
@@ -252,6 +337,7 @@ test("DurableObjectNamespace stub forwards arbitrary RPC methods", async () => {
     binding: "ROOM",
     className: "Room",
   }, { backend, requestIdProvider: () => "rid-rpc" });
+  Reflect.set(ns, "requestId", () => "tenant-rid");
 
   const stub = ns.get(ns.idFromName("room-a"));
   const result = await Reflect.get(stub, "addMessage")("hi", { role: "user" });
@@ -324,11 +410,23 @@ test("DurableObjectNamespace RPC rejects non-JSON data before transport", async 
   const stub = ns.get(ns.idFromName("room-a"));
   const circular = {};
   circular.self = circular;
+  const sparse = new Array(1);
+  const sparsePrototype = Object.create(Array.prototype);
+  let inheritedSlotReads = 0;
+  Object.defineProperty(sparsePrototype, "0", {
+    get() {
+      inheritedSlotReads += 1;
+      return "inherited";
+    },
+  });
+  Object.setPrototypeOf(sparse, sparsePrototype);
 
   await assert.rejects(Reflect.get(stub, "save")(new Map([["key", "value"]])), /plain JSON object/);
   await assert.rejects(Reflect.get(stub, "save")(new Headers()), /plain JSON object/);
   await assert.rejects(Reflect.get(stub, "save")({ fn() {} }), /rpc\.args\[0\]\.fn must be JSON data/);
   await assert.rejects(Reflect.get(stub, "save")([undefined]), /rpc\.args\[0\]\[0\] must be JSON data/);
+  await assert.rejects(Reflect.get(stub, "save")(sparse), /rpc\.args\[0\] must not be sparse/);
+  assert.equal(inheritedSlotReads, 0);
   await assert.rejects(Reflect.get(stub, "save")(Number.NaN), /finite number/);
   await assert.rejects(Reflect.get(stub, "save")(circular), /must not be circular/);
 });
@@ -351,6 +449,85 @@ test("DurableObjectNamespace RPC rejects invalid and reserved methods before tra
 
   await assert.rejects(Reflect.get(stub, "not-valid-method")(), /rpc\.method is not valid/);
   await assert.rejects(Reflect.get(stub, "alarm")(), /rpc\.method is reserved/);
+});
+
+test("DO RPC validation uses captured JSON intrinsics", async () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+
+  await withMockedProperty(Object, "entries", () => [], () => {
+    assert.throws(
+      () => rpcInvokeBody(props, "room-a", "save", [{ fn() {} }]),
+      (error) => error instanceof TypeError && error.message === "rpc.args[0].fn must be JSON data"
+    );
+  });
+  await withMockedProperty(Number, "isFinite", () => true, () => {
+    assert.throws(
+      () => rpcInvokeBody(props, "room-a", "save", [Number.NaN]),
+      (error) => error instanceof TypeError && error.message === "rpc.args[0] must be a finite number"
+    );
+  });
+  await withMockedProperty(Object, "hasOwn", () => true, () => {
+    assert.throws(
+      () => rpcInvokeBody(props, "room-a", "save", [new Array(1)]),
+      (error) => error instanceof TypeError && error.message === "rpc.args[0] must not be sparse"
+    );
+  });
+});
+
+test("do-runtime owns the DO RPC method byte limit", () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+  for (const { method, valid } of [
+    { method: "save", valid: true },
+    { method: "m".repeat(256), valid: true },
+    { method: "m".repeat(257), valid: false },
+  ]) {
+    const envelope = rpcInvokeBody(props, "room-a", method, []);
+    if (!valid) {
+      assert.throws(
+        () => normalizeDoInvokeRequest(decodeDoEnvelope(envelope).metadata),
+        /rpc\.method is too large/
+      );
+      continue;
+    }
+    const invoke = normalizeDoInvokeRequest(decodeDoEnvelope(envelope).metadata);
+    assert.equal("rpc" in invoke ? invoke.rpc.method : null, method);
+  }
+});
+
+test("DO RPC snapshots tenant arguments once before sizing and encoding", () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+  let reads = 0;
+  const argument = {};
+  Object.defineProperty(argument, "payload", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? "stable" : "x".repeat(1_200_000);
+    },
+  });
+
+  const envelope = rpcInvokeBody(props, "room-a", "save", [argument]);
+  const { metadata } = decodeDoEnvelope(envelope);
+  assert.equal(reads, 1);
+  assert.equal(/** @type {any} */ (metadata).rpc.args[0].payload, "stable");
 });
 
 test("DurableObjectNamespace RPC rejects oversized args before transport", async () => {
@@ -411,7 +588,10 @@ test("DurableObjectNamespace RPC retries stale owner generation once", async () 
     fetch: makeRecordingFetch(calls, {
       response: () => {
         if (calls.length === 1) {
-          return Response.json({ error: "stale_owner_generation", message: "owner moved" }, { status: 503 });
+          return Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("stale_owner_generation"),
+          });
         }
         return Response.json({ ok: true, result: "rpc-ok" });
       },
@@ -438,10 +618,16 @@ test("DurableObjectNamespace RPC retries stale owner generation once", async () 
 test("DurableObjectNamespace RPC retries owner claim races once", async () => {
   /** @type {any[]} */
   const calls = [];
+  let cancellations = 0;
   const backend = {
     fetch: makeRecordingFetch(calls, {
       response: () => calls.length === 1
-        ? Response.json({ error: "owner_claim_raced", message: "retry" }, { status: 503 })
+        ? cancellableResponse(() => {
+            cancellations += 1;
+          }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("owner_claim_raced"),
+          })
         : Response.json({ ok: true, result: "claimed" }),
     }),
   };
@@ -453,12 +639,12 @@ test("DurableObjectNamespace RPC retries owner claim races once", async () => {
     binding: "ROOM",
     className: "Room",
   }, { backend });
-
   const result = await Reflect.get(ns.get(ns.idFromName("room-a")), "addMessage")("hello");
 
   assert.equal(result, "claimed");
   assert.equal(calls.length, 2);
   assert.equal(calls[1].init.headers.get("x-wdl-do-accept-owner-hint"), null);
+  assert.equal(cancellations, 1);
 });
 
 test("DurableObjectNamespace direct backend preserves binary request bodies", async () => {
@@ -492,7 +678,10 @@ test("DurableObjectNamespace direct backend retries stale owner generation once"
     fetch: makeRecordingFetch(calls, {
       response: () => {
         if (calls.length === 1) {
-          return Response.json({ error: "stale_owner_generation", message: "owner moved" }, { status: 503 });
+          return Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("stale_owner_generation"),
+          });
         }
         return new Response("ok");
       },
@@ -519,12 +708,15 @@ test("DurableObjectNamespace direct backend retries stale owner generation once"
   assert.equal(calls[1].init.headers.get("x-wdl-do-accept-owner-hint"), null);
 });
 
-test("DurableObjectNamespace direct backend does not retry tenant 503 responses", async () => {
+test("DurableObjectNamespace does not replay tenant responses that mimic ownership errors", async () => {
   /** @type {any[]} */
   const calls = [];
   const backend = {
     fetch: makeRecordingFetch(calls, {
-      response: Response.json({ error: "tenant_failure", message: "no retry" }, { status: 503 }),
+      response: Response.json({
+        error: "owner_fence_missing",
+        message: "tenant response after side effect",
+      }, { status: 503 }),
     }),
   };
   const ns = new DurableObjectNamespace({
@@ -536,13 +728,520 @@ test("DurableObjectNamespace direct backend does not retry tenant 503 responses"
     className: "Room",
   }, { backend });
 
-  const response = await ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
-    method: "POST",
-    body: "hello",
+  const originalGet = Headers.prototype.get;
+  await withMockedProperty(Headers.prototype, "get", /** @this {Headers} */ function get(name) {
+    if (String(name).toLowerCase() === "x-wdl-do-ownership-error") {
+      return "owner_fence_missing";
+    }
+    return originalGet.call(this, name);
+  }, async () => {
+    const response = await ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
+      method: "POST",
+      body: "hello",
+    });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "owner_fence_missing",
+      message: "tenant response after side effect",
+    });
+    assert.equal(calls.length, 1);
   });
+});
+
+test("DurableObjectNamespace owner-race classification uses the captured status getter", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const backend = {
+    fetch: makeRecordingFetch(calls, {
+      response: () => calls.length === 1
+        ? Response.json({ error: "owner_claim_raced", message: "retry" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("owner_claim_raced"),
+          })
+        : new Response("retried"),
+    }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend });
+
+  const response = await withMockedPropertyDescriptor(
+    Response.prototype,
+    "status",
+    { configurable: true, get: () => 200 },
+    () => ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send")
+  );
+
+  assert.equal(await response.text(), "retried");
+  assert.equal(calls.length, 2);
+});
+
+test("DurableObjectNamespace retry policy uses the captured Set membership check", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const backend = {
+    fetch: makeRecordingFetch(calls, {
+      response: () => calls.length === 1
+        ? Response.json({ error: "owner_unavailable", message: "outcome unknown" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("owner_unavailable"),
+          })
+        : new Response("replayed"),
+    }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend });
+
+  const response = await withMockedProperty(
+    Set.prototype,
+    "has",
+    function mockedHas() { return true; },
+    () => ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
+      method: "POST",
+      body: "side effect",
+    })
+  );
 
   assert.equal(response.status, 503);
   assert.equal(calls.length, 1);
+});
+
+test("DurableObjectNamespace retry policy uses the captured Request method getter", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const backend = {
+    fetch: makeRecordingFetch(calls, {
+      response: Response.json({ error: "owner_unavailable", message: "outcome unknown" }, {
+        status: 503,
+        headers: doOwnershipErrorHeaders("owner_unavailable"),
+      }),
+    }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend });
+  let reads = 0;
+
+  const response = await withMockedPropertyDescriptor(
+    Request.prototype,
+    "method",
+    {
+      configurable: true,
+      get() {
+        reads += 1;
+        return reads === 1 ? "POST" : "GET";
+      },
+    },
+    () => ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
+      method: "POST",
+      body: "side effect",
+    })
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(calls.length, 1);
+  assert.equal(reads, 0);
+  const { metadata } = decodeDoEnvelope(calls[0].init.body);
+  assert.equal(/** @type {any} */ (metadata.request).method, "POST");
+});
+
+test("DurableObjectNamespace strips owner metadata with patched Headers methods", async () => {
+  const backend = {
+    fetch: makeRecordingFetch([], {
+      response: new Response("ok", {
+        headers: doOwnershipErrorHeaders("owner_fence_missing", doOwnerHintHeaders()),
+      }),
+    }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend });
+
+  const iteratorSymbol = Symbol.iterator;
+  const arrayIterator = Array.prototype[Symbol.iterator];
+  const arrayIncludes = Array.prototype.includes;
+  const response = await withMockedProperty(
+    Headers.prototype,
+    "delete",
+    function mockedDelete() {},
+    () => withMockedProperty(
+      /** @type {any} */ (Array.prototype),
+      iteratorSymbol,
+      /** @this {unknown[]} */
+      function targetedIterator() {
+        if (Reflect.apply(arrayIncludes, this, ["x-wdl-do-owner-task-id"])) {
+          return {
+            next: () => ({ done: true, value: undefined }),
+            [iteratorSymbol]() { return this; },
+          };
+        }
+        return Reflect.apply(arrayIterator, this, []);
+      },
+      () => ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send")
+    )
+  );
+
+  assert.equal(await response.text(), "ok");
+  assert.equal(response.headers.get("x-wdl-do-owner-task-id"), null);
+  assert.equal(response.headers.get("x-wdl-do-owner-endpoint"), null);
+  assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+});
+
+test("DO requestSpec header budget uses captured TextEncoder.encode", async () => {
+  const textEncode = TextEncoder.prototype.encode;
+  let hostileEncodeCalls = 0;
+  const request = new Request("https://demo.workers.example/send", {
+    headers: { "x-oversized": "a".repeat(MAX_DO_REQUEST_HEADER_BYTES + 1) },
+  });
+
+  await withMockedProperty(
+    TextEncoder.prototype,
+    "encode",
+    /** @this {TextEncoder} */
+    function targetedEncode(value = "") {
+      if (value.length > MAX_DO_REQUEST_HEADER_BYTES) {
+        hostileEncodeCalls += 1;
+        return new Uint8Array();
+      }
+      return Reflect.apply(textEncode, this, [value]);
+    },
+    async () => {
+      await assert.rejects(
+        () => requestSpec(request, null),
+        /fetch headers exceed 65536 bytes/
+      );
+    }
+  );
+  assert.equal(hostileEncodeCalls, 0);
+});
+
+test("DO request method and upgrade decisions use captured string normalization", async () => {
+  const post = new Request("https://example.com/objects", {
+    method: "POST",
+    body: "payload",
+  });
+  const websocket = new Request("https://example.com/socket", {
+    headers: { Upgrade: "WebSocket" },
+  });
+  const ordinary = new Request("https://example.com/fetch");
+  const originalToLowerCase = String.prototype.toLowerCase;
+  const originalToUpperCase = String.prototype.toUpperCase;
+  /** @type {{ method: string, body: Uint8Array | null, replay: boolean, websocket: boolean, ordinary: boolean } | undefined} */
+  let observed;
+
+  await withMockedProperty(
+    String.prototype,
+    "toUpperCase",
+    /** @this {string} */ function hostileToUpperCase() {
+      const normalized = Reflect.apply(originalToUpperCase, this, []);
+      return normalized === "POST" ? "GET" : normalized;
+    },
+    () => withMockedProperty(
+      String.prototype,
+      "toLowerCase",
+      /** @this {string} */ function hostileToLowerCase() {
+        const normalized = Reflect.apply(originalToLowerCase, this, []);
+        return normalized === "" ? "websocket" : normalized;
+      },
+      async () => {
+        const { spec, bodyBytes } = await requestSpec(post, null);
+        observed = {
+          method: spec.method,
+          body: bodyBytes,
+          replay: replayOwnerUnavailableForFetch(post),
+          websocket: isWebSocketUpgrade(websocket),
+          ordinary: isWebSocketUpgrade(ordinary),
+        };
+      },
+    ),
+  );
+
+  assert.equal(observed?.method, "POST");
+  assert.equal(new TextDecoder().decode(observed?.body ?? undefined), "payload");
+  assert.equal(observed?.replay, false);
+  assert.equal(observed?.websocket, true);
+  assert.equal(observed?.ordinary, false);
+});
+
+function chunkedBodyRequest() {
+  return new Request("https://demo.workers.example/send", /** @type {RequestInit} */ (/** @type {unknown} */ ({
+    method: "POST",
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(1, 2));
+        controller.enqueue(Uint8Array.of(3, 4));
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  })));
+}
+
+test("DO requestSpec body copying uses captured Uint8Array.set", async () => {
+  const uint8ArraySet = Uint8Array.prototype.set;
+  let hostileSetCalls = 0;
+
+  const { bodyBytes } = await withMockedProperty(
+    Uint8Array.prototype,
+    "set",
+    /** @this {Uint8Array} */
+    function targetedSet(source, offset) {
+      if (this.length === 4 && source instanceof Uint8Array) {
+        hostileSetCalls += 1;
+        return;
+      }
+      return Reflect.apply(uint8ArraySet, this, [source, offset]);
+    },
+    () => requestSpec(chunkedBodyRequest(), null)
+  );
+
+  assert.equal(hostileSetCalls, 0);
+  assert.deepEqual(bodyBytes, Uint8Array.of(1, 2, 3, 4));
+});
+
+test("DO requestSpec body reading uses the captured Request body getter", async () => {
+  let hostileBodyGetterCalls = 0;
+  const request = chunkedBodyRequest();
+
+  const { bodyBytes } = await withMockedPropertyDescriptor(
+    Request.prototype,
+    "body",
+    {
+      configurable: true,
+      enumerable: true,
+      get() {
+        hostileBodyGetterCalls += 1;
+        return null;
+      },
+    },
+    () => requestSpec(request, null)
+  );
+
+  assert.equal(hostileBodyGetterCalls, 0);
+  assert.deepEqual(bodyBytes, Uint8Array.of(1, 2, 3, 4));
+});
+
+test("DO requestSpec body reading uses captured stream reader methods", async () => {
+  const getReader = ReadableStream.prototype.getReader;
+  const read = ReadableStreamDefaultReader.prototype.read;
+  const releaseLock = ReadableStreamDefaultReader.prototype.releaseLock;
+  let hostileMethodCalls = 0;
+
+  const { bodyBytes } = await withMockedProperty(
+    ReadableStream.prototype,
+    "getReader",
+    /** @type {any} */ (/** @this {ReadableStream<Uint8Array>} @param {ReadableStreamGetReaderOptions | undefined} options */
+    function targetedGetReader(options) {
+      hostileMethodCalls += 1;
+      return Reflect.apply(getReader, this, [options]);
+    }),
+    () => withMockedProperty(
+      ReadableStreamDefaultReader.prototype,
+      "read",
+      /** @this {ReadableStreamDefaultReader<Uint8Array>} */
+      function targetedRead() {
+        hostileMethodCalls += 1;
+        return Reflect.apply(read, this, []);
+      },
+      () => withMockedProperty(
+        ReadableStreamDefaultReader.prototype,
+        "releaseLock",
+        /** @this {ReadableStreamDefaultReader<Uint8Array>} */
+        function targetedReleaseLock() {
+          hostileMethodCalls += 1;
+          return Reflect.apply(releaseLock, this, []);
+        },
+        () => requestSpec(chunkedBodyRequest(), null)
+      )
+    )
+  );
+
+  assert.equal(hostileMethodCalls, 0);
+  assert.deepEqual(bodyBytes, Uint8Array.of(1, 2, 3, 4));
+});
+
+test("DO invoke envelope uses captured serialization intrinsics", async () => {
+  const jsonStringify = JSON.stringify;
+  const dataViewSetUint32 = DataView.prototype.setUint32;
+  const uint8ArraySet = Uint8Array.prototype.set;
+  let hostileJsonCalls = 0;
+  let hostileLengthCalls = 0;
+  let hostileSetCalls = 0;
+
+  const init = await withMockedProperty(
+    JSON,
+    "stringify",
+    /** @this {typeof JSON} */
+    function targetedStringify(value) {
+      if (value && typeof value === "object" && "doStorageId" in value) {
+        hostileJsonCalls += 1;
+        return "{}";
+      }
+      return Reflect.apply(jsonStringify, this, [value]);
+    },
+    () => withMockedProperty(
+      DataView.prototype,
+      "setUint32",
+      /** @this {DataView} */
+      function targetedSetUint32(offset, value, littleEndian) {
+        if (offset === 0) {
+          hostileLengthCalls += 1;
+          return;
+        }
+        return Reflect.apply(dataViewSetUint32, this, [offset, value, littleEndian]);
+      },
+      () => withMockedProperty(
+        Uint8Array.prototype,
+        "set",
+        /** @this {Uint8Array} */
+        function targetedSet(source, offset) {
+          if (offset === 4) {
+            hostileSetCalls += 1;
+            return;
+          }
+          return Reflect.apply(uint8ArraySet, this, [source, offset]);
+        },
+        () => fetchInvokeInit({
+          ns: "tenant",
+          worker: "chat",
+          version: "v1",
+          doStorageId: "do_0123456789abcdef0123456789abcdef",
+          className: "Room",
+        }, "room-a", new Request("https://demo.workers.example/send"), null)
+      )
+    )
+  );
+
+  assert.equal(hostileJsonCalls, 0);
+  assert.equal(hostileLengthCalls, 0);
+  assert.equal(hostileSetCalls, 0);
+  const { metadata } = decodeDoEnvelope(/** @type {Uint8Array} */ (init.body));
+  assert.equal(/** @type {any} */ (metadata).ns, "tenant");
+  assert.equal(/** @type {any} */ (metadata).objectName, "room-a");
+});
+
+test("DO invoke envelope ignores inherited object toJSON hooks", async () => {
+  const init = await withMockedProperty(
+    /** @type {any} */ (Object.prototype),
+    "toJSON",
+    function hostileToJSON() {
+      return {
+        ns: "attacker",
+        worker: "attacker",
+        version: "v9",
+        doStorageId: "do_ffffffffffffffffffffffffffffffff",
+        className: "Room",
+        objectName: "other",
+        request: { method: "GET", url: "https://evil.example/", headers: [] },
+      };
+    },
+    () => fetchInvokeInit({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+    }, "room-a", new Request("https://demo.workers.example/send"), null)
+  );
+
+  const { metadata } = decodeDoEnvelope(/** @type {Uint8Array} */ (init.body));
+  assert.equal(/** @type {any} */ (metadata).ns, "tenant");
+  assert.equal(/** @type {any} */ (metadata).objectName, "room-a");
+});
+
+test("DO invoke envelope ignores inherited array toJSON hooks", async () => {
+  const init = await withMockedProperty(
+    /** @type {any} */ (Array.prototype),
+    "toJSON",
+    function hostileToJSON() {
+      return [];
+    },
+    () => fetchInvokeInit({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+    }, "room-a", new Request("https://demo.workers.example/send", {
+      headers: { "x-proof": "preserved" },
+    }), null)
+  );
+
+  const { metadata } = decodeDoEnvelope(/** @type {Uint8Array} */ (init.body));
+  assert.deepEqual(/** @type {any} */ (metadata).request.headers, [["x-proof", "preserved"]]);
+});
+
+test("DO invoke envelope uses captured typed-array getters", async () => {
+  const typedArrayPrototype = /** @type {any} */ (Object.getPrototypeOf(Uint8Array.prototype));
+  let hostileGetterCalls = 0;
+  const request = new Request("https://demo.workers.example/send");
+
+  const init = await withMockedPropertyDescriptor(
+    typedArrayPrototype,
+    "length",
+    {
+      configurable: true,
+      get() {
+        hostileGetterCalls += 1;
+        return 0;
+      },
+    },
+    () => withMockedPropertyDescriptor(
+      typedArrayPrototype,
+      "byteLength",
+      {
+        configurable: true,
+        get() {
+          hostileGetterCalls += 1;
+          return 0;
+        },
+      },
+      () => withMockedPropertyDescriptor(
+        typedArrayPrototype,
+        "buffer",
+        {
+          configurable: true,
+          get() {
+            hostileGetterCalls += 1;
+            return new ArrayBuffer(0);
+          },
+        },
+        () => fetchInvokeInit({
+          ns: "tenant",
+          worker: "chat",
+          version: "v1",
+          doStorageId: "do_0123456789abcdef0123456789abcdef",
+          className: "Room",
+        }, "room-a", request, null)
+      )
+    )
+  );
+
+  assert.ok(hostileGetterCalls > 0);
+  const { metadata } = decodeDoEnvelope(/** @type {Uint8Array} */ (init.body));
+  assert.equal(/** @type {any} */ (metadata).ns, "tenant");
 });
 
 test("DurableObjectNamespace direct backend retries owner claim races once", async () => {
@@ -551,7 +1250,10 @@ test("DurableObjectNamespace direct backend retries owner claim races once", asy
   const backend = {
     fetch: makeRecordingFetch(calls, {
       response: () => calls.length === 1
-        ? Response.json({ error: "owner_claim_raced", message: "retry" }, { status: 503 })
+        ? Response.json({ error: "owner_claim_raced", message: "retry" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("owner_claim_raced"),
+          })
         : new Response("ok"),
     }),
   };
@@ -570,6 +1272,124 @@ test("DurableObjectNamespace direct backend retries owner claim races once", asy
   assert.equal(calls.length, 2);
 });
 
+test("DurableObjectNamespace direct backend ignores hints attached to owner-race responses", async () => {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, {
+      response: () => routerCalls.length === 1
+        ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders(
+              "stale_owner_generation",
+              doOwnerHintResponse().headers
+            ),
+          })
+        : new Response("ok"),
+    }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, { response: new Response("owner-should-not-be-called") }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend, ownerNetwork });
+
+  const response = await ns.get(ns.idFromName("room-race-hint")).fetch("https://demo.workers.example/send");
+
+  assert.equal(await response.text(), "ok");
+  assert.equal(routerCalls.length, 2);
+  assert.equal(ownerCalls.length, 0);
+  assert.equal(headerValue(routerCalls[0].init.headers, "x-wdl-do-accept-owner-hint"), "1");
+  assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
+});
+
+test("DO owner-race router retry failures do not trigger another replay", async (t) => {
+  const ownerMetadata = new Headers(doOwnerHintHeaders());
+  ownerMetadata.delete("x-wdl-do-owner-hint");
+  for (const { name, code, headers } of [
+    { name: "fresh owner response without metadata", code: "owner_claim_raced", headers: undefined },
+    { name: "fresh owner renew race with metadata", code: "owner_renew_raced", headers: ownerMetadata },
+  ]) {
+    await t.test(name, async () => {
+      let routerCalls = 0;
+      let ownerCalls = 0;
+
+      await assert.rejects(
+        dispatchDoInvokeWithHintCache({
+          routerFetch: async () => {
+            routerCalls += 1;
+            if (routerCalls === 1) return doOwnerHintResponse();
+            if (routerCalls === 2) throw new Error("owner-race router retry failed");
+            return new Response("unexpected replay");
+          },
+          routerUrl: "http://do-runtime/internal/do/invoke",
+          ownerFetch: async () => {
+            ownerCalls += 1;
+            return Response.json({ error: code, message: "retry" }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders(code, headers),
+            });
+          },
+          ownerPath: "/internal/do/invoke",
+          init: { method: "POST" },
+          cache: new Map(),
+          hintKey: "room-a",
+          replayOwnerUnavailable: false,
+        }),
+        /owner-race router retry failed/
+      );
+      assert.equal(ownerCalls, 1);
+      assert.equal(routerCalls, 2);
+    });
+  }
+
+  await t.test("cached endpoint fallback", async () => {
+    const hint = ownerHintFromHeaders(doOwnerHintResponse().headers);
+    assert.ok(hint);
+    const cache = new Map();
+    cache.set("room-a", hint);
+    let routerCalls = 0;
+    let ownerCalls = 0;
+
+    await assert.rejects(
+      dispatchDoInvokeWithHintCache({
+        routerFetch: async () => {
+          routerCalls += 1;
+          if (routerCalls === 1) {
+            return Response.json({ error: "owner_claim_raced", message: "retry" }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders("owner_claim_raced"),
+            });
+          }
+          if (routerCalls === 2) throw new Error("owner-race router retry failed");
+          return new Response("unexpected replay");
+        },
+        routerUrl: "http://do-runtime/internal/do/invoke",
+        ownerFetch: async () => {
+          ownerCalls += 1;
+          return new Response("owner timeout", { status: 504 });
+        },
+        ownerPath: "/internal/do/invoke",
+        init: { method: "GET" },
+        cache,
+        hintKey: "room-a",
+        replayOwnerUnavailable: true,
+      }),
+      /owner-race router retry failed/
+    );
+    assert.equal(ownerCalls, 1);
+    assert.equal(routerCalls, 2);
+  });
+});
+
 test("DurableObjectNamespace direct backend retries owner lease budget errors once", async () => {
   for (const error of ["owner_lease_expired", "owner_lease_too_short"]) {
     /** @type {any[]} */
@@ -577,7 +1397,10 @@ test("DurableObjectNamespace direct backend retries owner lease budget errors on
     const backend = {
       fetch: makeRecordingFetch(calls, {
         response: () => calls.length === 1
-          ? Response.json({ error, message: "owner lease unavailable" }, { status: 503 })
+          ? Response.json({ error, message: "owner lease unavailable" }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders(error),
+            })
           : new Response("ok"),
       }),
     };
@@ -634,6 +1457,121 @@ test("DurableObjectNamespace direct backend follows owner hints on the same requ
   assert.equal(ownerCalls.length, 1);
   assert.equal(ownerCalls[0].url, "http://do-runtime-a:8788/internal/do/invoke");
   assert.equal(ownerCalls[0].init.body, routerCalls[0].init.body);
+});
+
+test("DurableObjectNamespace replays a safe GET through the router after a second owner hint", async () => {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  /** @type {string[]} */
+  const cancellations = [];
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, {
+      response: () => routerCalls.length === 1
+        ? cancellableDoOwnerHintResponse(() => {
+            cancellations.push("router");
+          })
+        : new Response("router-ok"),
+    }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, {
+      response: () => cancellableDoOwnerHintResponse(
+        () => {
+          cancellations.push("direct");
+        },
+        {
+          taskId: "do-runtime-b",
+          endpoint: "do-runtime-b:8788",
+          generation: 4,
+        },
+      ),
+    }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend, ownerNetwork });
+  const streamCancel = ReadableStream.prototype.cancel;
+  const promiseThen = Promise.prototype.then;
+  let hostileCancelCalls = 0;
+  let hostileThenCalls = 0;
+  /** @type {ReadableStream | null} */
+  let leakedStream = null;
+
+  const response = await withMockedProperty(
+    ReadableStream.prototype,
+    "cancel",
+    /** @this {ReadableStream} @param {unknown} reason */
+    function hostileCancel(reason) {
+      hostileCancelCalls += 1;
+      leakedStream = this;
+      return Reflect.apply(streamCancel, this, [reason]);
+    },
+    () => withMockedProperty(
+      Promise.prototype,
+      "then",
+      /** @this {Promise<unknown>} @param {any} onFulfilled @param {any} onRejected */
+      function hostileThen(onFulfilled, onRejected) {
+        hostileThenCalls += 1;
+        return Reflect.apply(promiseThen, this, [onFulfilled, onRejected]);
+      },
+      () => ns.get(ns.idFromName("room-consecutive-hint"))
+        .fetch("https://demo.workers.example/send")
+    )
+  );
+  assert.equal(await response.text(), "router-ok");
+  assert.equal(response.headers.get("x-wdl-do-owner-key"), null);
+  assert.equal(routerCalls.length, 2);
+  assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
+  assert.equal(ownerCalls.length, 1);
+  assert.deepEqual(cancellations, ["router", "direct"]);
+  assert.equal(hostileCancelCalls, 0);
+  assert.equal(hostileThenCalls, 0);
+  assert.equal(leakedStream, null);
+});
+
+test("DurableObjectNamespace replays a POST after a trusted second owner hint", async () => {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, {
+      response: () => routerCalls.length === 1
+        ? doOwnerHintResponse()
+        : new Response("router-ok"),
+    }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, { response: doOwnerHintResponse({
+      taskId: "do-runtime-b",
+      endpoint: "do-runtime-b:8788",
+      generation: 4,
+    }) }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend, ownerNetwork });
+
+  const response = await ns.get(ns.idFromName("room-consecutive-post"))
+    .fetch("https://demo.workers.example/send", { method: "POST", body: "hello" });
+
+  assert.equal(await response.text(), "router-ok");
+  assert.equal(response.headers.get("x-wdl-do-owner-key"), null);
+  assert.equal(routerCalls.length, 2);
+  assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
+  assert.equal(ownerCalls.length, 1);
 });
 
 test("DurableObjectNamespace direct backend accepts Kubernetes headless owner endpoints", async () => {
@@ -823,8 +1761,43 @@ test("DurableObjectNamespace direct backend accepts VPC-local IPv4 owner hint en
   assert.equal(ownerCalls[1].url, "http://100.64.30.52:8788/internal/do/invoke");
 });
 
+test("DO owner hint parsing keeps the validated endpoint with patched String", async () => {
+  const headers = new Headers(doOwnerHintHeaders({ endpoint: "do-runtime-a:8788" }));
+  const nativeString = String;
+  let hostileStringCalls = 0;
+
+  const hint = await withMockedProperty(
+    globalThis,
+    "String",
+    /** @type {StringConstructor} */ (function hostileString(value) {
+      if (value === "do-runtime-a:8788") {
+        hostileStringCalls += 1;
+        return "10.0.0.5:8788";
+      }
+      return nativeString(value);
+    }),
+    () => ownerHintFromHeaders(headers)
+  );
+
+  assert.equal(hostileStringCalls, 0);
+  assert.equal(hint?.endpoint, "do-runtime-a:8788");
+});
+
+test("DO owner hint generation parsing requires a positive safe integer with captured intrinsics", async () => {
+  const headers = new Headers(doOwnerHintHeaders({ endpoint: "do-runtime-a:8788" }));
+  await withMockedProperty(Number, "isSafeInteger", () => false, () => {
+    assert.equal(ownerHintFromHeaders(headers)?.generation, 3);
+  });
+  for (const generation of ["0", "not-an-integer", "9007199254740992"]) {
+    headers.set("x-wdl-do-owner-generation", generation);
+    await withMockedProperty(Number, "isSafeInteger", () => true, () => {
+      assert.equal(ownerHintFromHeaders(headers), null, generation);
+    });
+  }
+});
+
 test("DurableObjectNamespace direct backend rejects unsafe IPv4 owner hint endpoints", async () => {
-  for (const endpoint of ["0.0.0.0:8788", "127.0.0.1:8788", "169.254.169.254:8788", "224.0.0.1:8788"]) {
+  for (const endpoint of ["0.0.0.0:8788", "8.8.8.8:8788", "127.0.0.1:8788", "169.254.169.254:8788", "224.0.0.1:8788"]) {
     /** @type {any[]} */
     const ownerCalls = [];
     const backend = {
@@ -912,6 +1885,146 @@ test("DurableObjectNamespace direct backend reuses learned owner hints", async (
   assert.equal(routerCalls.length, 1);
   assert.equal(ownerCalls.length, 2);
   assert.equal(ownerCalls[1].url, "http://do-runtime-a:8788/internal/do/invoke");
+});
+
+test("DurableObjectNamespace cancels a cached-owner response before router rediscovery", async () => {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  let cancellations = 0;
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, {
+      response: () => routerCalls.length === 1
+        ? doOwnerHintResponse()
+        : new Response("router-ok"),
+    }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, {
+      response: () => ownerCalls.length === 1
+        ? new Response("owner-ok", { headers: doOwnerHintHeaders() })
+        : cancellableDoOwnerHintResponse(() => {
+            cancellations += 1;
+          }, {
+            taskId: "do-runtime-b",
+            endpoint: "do-runtime-b:8788",
+            generation: 4,
+          }),
+    }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend, ownerNetwork });
+  const id = ns.idFromName("room-cached-hint");
+
+  assert.equal(await ns.get(id).fetch("https://demo.workers.example/one").then((r) => r.text()), "owner-ok");
+  assert.equal(await ns.get(id).fetch("https://demo.workers.example/two").then((r) => r.text()), "router-ok");
+
+  assert.equal(cancellations, 1);
+  assert.equal(routerCalls.length, 2);
+  assert.equal(ownerCalls.length, 2);
+});
+
+function hostileOwnerHintCacheFixture() {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, { response: doOwnerHintResponse() }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, { response: new Response("owner-ok") }),
+  };
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  };
+  return {
+    ns: new DurableObjectNamespace(props, { backend, ownerNetwork }),
+    ownerCalls,
+    props,
+    routerCalls,
+  };
+}
+
+test("DurableObjectNamespace owner hint cache ignores tenant-patched Map#get", async () => {
+  const { ns, ownerCalls, props, routerCalls } = hostileOwnerHintCacheFixture();
+  const objectName = "room-hostile-map-get";
+  const cacheKey = `${props.doStorageId}:${props.className}:${objectName}`;
+  const originalMapGet = Map.prototype.get;
+  let hostileGetCalls = 0;
+
+  const response = await withMockedProperty(
+    Map.prototype,
+    "get",
+    /** @this {Map<unknown, unknown>} */
+    function hostileMapGet(key) {
+      if (key === cacheKey) {
+        hostileGetCalls += 1;
+        return {
+          ownerKey: "forged-owner",
+          taskId: "forged-task",
+          endpoint: "10.0.0.5:8788",
+          generation: 1,
+        };
+      }
+      return Reflect.apply(originalMapGet, this, [key]);
+    },
+    () => ns.get(ns.idFromName(objectName)).fetch("https://demo.workers.example/send")
+  );
+
+  assert.equal(await response.text(), "owner-ok");
+  assert.equal(hostileGetCalls, 0);
+  assert.equal(routerCalls.length, 1);
+  assert.equal(ownerCalls.length, 1);
+  assert.equal(ownerCalls[0].url, "http://do-runtime-a:8788/internal/do/invoke");
+});
+
+test("DurableObjectNamespace owner hint cache hides hints from tenant-patched Map methods", async () => {
+  const { ns, ownerCalls, props, routerCalls } = hostileOwnerHintCacheFixture();
+  const objectName = "room-hostile-map-set";
+  const cacheKey = `${props.doStorageId}:${props.className}:${objectName}`;
+  const originalMapDelete = Map.prototype.delete;
+  const originalMapSet = Map.prototype.set;
+  let hostileDeleteCalls = 0;
+  let leakedHint = null;
+
+  const response = await withMockedProperty(
+    Map.prototype,
+    "delete",
+    /** @this {Map<unknown, unknown>} */
+    function hostileMapDelete(key) {
+      if (key === cacheKey) hostileDeleteCalls += 1;
+      return Reflect.apply(originalMapDelete, this, [key]);
+    },
+    () => withMockedProperty(
+      Map.prototype,
+      "set",
+      /** @this {Map<unknown, unknown>} */
+      function hostileMapSet(key, value) {
+        if (key === cacheKey) leakedHint = value;
+        return Reflect.apply(originalMapSet, this, [key, value]);
+      },
+      () => ns.get(ns.idFromName(objectName)).fetch("https://demo.workers.example/send")
+    )
+  );
+
+  assert.equal(await response.text(), "owner-ok");
+  assert.equal(hostileDeleteCalls, 0);
+  assert.equal(leakedHint, null);
+  assert.equal(routerCalls.length, 1);
+  assert.equal(ownerCalls.length, 1);
 });
 
 test("DurableObjectNamespace RPC reuses learned owner hints", async () => {
@@ -1035,6 +2148,23 @@ test("DurableObjectNamespace direct backend rejects oversized declared request b
   );
 });
 
+test("DO request body bounds use captured Number intrinsics", async () => {
+  const request = new Request("https://demo.workers.example/send", {
+    method: "POST",
+    headers: { "content-length": String(1024 * 1024 + 1) },
+    body: "x",
+  });
+  await withMockedProperty(globalThis, "Number", /** @type {NumberConstructor} */ (() => 0), async () => {
+    await assert.rejects(fetchInvokeInit({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+    }, "room-a", request, null), /Durable Object fetch body exceeds/);
+  });
+});
+
 test("DO requestSpec rejects streaming bodies as soon as they cross the cap", async () => {
   let pulls = 0;
   const body = new ReadableStream({
@@ -1052,30 +2182,23 @@ test("DO requestSpec rejects streaming bodies as soon as they cross the cap", as
     body,
     duplex: "half",
   }));
-  /** @type {ReturnType<typeof setTimeout> | undefined} */
-  let timeout;
-
-  try {
-    await assert.rejects(
-      Promise.race([
-        requestSpec(request, "rid-stream"),
-        new Promise((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("requestSpec kept reading the oversized stream")), 1000);
-        }),
-      ]),
-      /Durable Object fetch body exceeds/
-    );
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
+  await assert.rejects(
+    withTestTimeout(
+      requestSpec(request, "rid-stream"),
+      "requestSpec kept reading the oversized stream"
+    ),
+    /Durable Object fetch body exceeds/
+  );
 });
 
 test("DO requestSpec rejects oversized streams without waiting for cancel", async () => {
+  let cancellations = 0;
   const body = new ReadableStream({
     start(controller) {
       controller.enqueue(new Uint8Array(1024 * 1024 + 1));
     },
     cancel() {
+      cancellations += 1;
       return new Promise(() => {});
     },
   });
@@ -1084,22 +2207,39 @@ test("DO requestSpec rejects oversized streams without waiting for cancel", asyn
     body,
     duplex: "half",
   }));
-  /** @type {ReturnType<typeof setTimeout> | undefined} */
-  let timeout;
+  const readerCancel = ReadableStreamDefaultReader.prototype.cancel;
+  const promiseCatch = Promise.prototype.catch;
+  let hostileCancelCalls = 0;
+  let hostileCatchCalls = 0;
 
-  try {
-    await assert.rejects(
-      Promise.race([
-        requestSpec(request, "rid-cancel"),
-        new Promise((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("requestSpec waited for stream cancel")), 1000);
-        }),
-      ]),
-      /Durable Object fetch body exceeds/
-    );
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
+  await withMockedProperty(
+    ReadableStreamDefaultReader.prototype,
+    "cancel",
+    /** @this {ReadableStreamDefaultReader} @param {unknown} reason */
+    function hostileCancel(reason) {
+      hostileCancelCalls += 1;
+      return Reflect.apply(readerCancel, this, [reason]);
+    },
+    () => withMockedProperty(
+      Promise.prototype,
+      "catch",
+      /** @this {Promise<unknown>} @param {any} onRejected */
+      function hostileCatch(onRejected) {
+        hostileCatchCalls += 1;
+        return Reflect.apply(promiseCatch, this, [onRejected]);
+      },
+      () => assert.rejects(
+        withTestTimeout(
+          requestSpec(request, "rid-cancel"),
+          "requestSpec waited for stream cancel"
+        ),
+        /Durable Object fetch body exceeds/
+      )
+    )
+  );
+  assert.equal(cancellations, 1);
+  assert.equal(hostileCancelCalls, 0);
+  assert.equal(hostileCatchCalls, 0);
 });
 
 test("DurableObjectNamespace facade uses direct upgrade path for websockets", async () => {
@@ -1122,6 +2262,7 @@ test("DurableObjectNamespace facade uses direct upgrade path for websockets", as
       Connection: "Upgrade",
       Upgrade: "websocket",
       "Sec-WebSocket-Key": "abc",
+      "x-request-id": "tenant-forged",
     },
   });
 
@@ -1273,22 +2414,28 @@ test("DurableObjectNamespace websocket path does not fall back to router after o
     className: "Room",
   }, { backend, ownerNetwork });
 
-  const response = await ns.get(ns.idFromName("room-hint-ws-fail")).fetch("https://demo.workers.example/ws", {
+  let liveResponseJsonCalls = 0;
+  const response = await withMockedProperty(Response, "json", () => {
+    liveResponseJsonCalls += 1;
+    return new Response("forged", { status: 200 });
+  }, () => ns.get(ns.idFromName("room-hint-ws-fail")).fetch("https://demo.workers.example/ws", {
     headers: {
       Connection: "Upgrade",
       Upgrade: "websocket",
       "Sec-WebSocket-Key": "abc",
     },
-  });
+  }));
 
   const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "owner_unavailable");
   assert.equal(routerCalls.length, 1);
+  assert.equal(liveResponseJsonCalls, 0);
 });
 
 test("DurableObjectNamespace POST fetch does not replay through router after direct owner failure", async () => {
   /** @type {any[]} */
   const routerCalls = [];
+  let cancellations = 0;
   const backend = {
     fetch: makeRecordingFetch(routerCalls, {
       response: () => routerCalls.length === 1
@@ -1298,7 +2445,10 @@ test("DurableObjectNamespace POST fetch does not replay through router after dir
   };
   const ownerNetwork = {
     async fetch() {
-      return new Response("upstream request timeout", { status: 504 });
+      return cancellableResponse(() => {
+        cancellations += 1;
+        return Promise.reject(new Error("cancel failed"));
+      }, { status: 504 });
     },
   };
   const ns = new DurableObjectNamespace({
@@ -1319,6 +2469,7 @@ test("DurableObjectNamespace POST fetch does not replay through router after dir
   assert.equal(body.error, "owner_unavailable");
   assert.equal(routerCalls.length, 1);
   assert.equal(headerValue(routerCalls[0].init.headers, "x-wdl-do-accept-owner-hint"), "1");
+  assert.equal(cancellations, 1);
 });
 
 test("DurableObjectNamespace POST drops stale cached owner hints without replay after endpoint timeout", async () => {
@@ -1326,6 +2477,7 @@ test("DurableObjectNamespace POST drops stale cached owner hints without replay 
   const routerCalls = [];
   /** @type {any[]} */
   const ownerCalls = [];
+  let cancellations = 0;
   const backend = {
     fetch: makeRecordingFetch(routerCalls, {
       response: () => routerCalls.length === 1
@@ -1339,7 +2491,10 @@ test("DurableObjectNamespace POST drops stale cached owner hints without replay 
         ? new Response("owner-ok", {
             headers: doOwnerHintHeaders(),
           })
-        : new Response("upstream request timeout", { status: 504 }),
+        : cancellableResponse(() => {
+            cancellations += 1;
+            return new Promise(() => {});
+          }, { status: 504 }),
     }),
   };
   const ns = new DurableObjectNamespace({
@@ -1353,11 +2508,16 @@ test("DurableObjectNamespace POST drops stale cached owner hints without replay 
   const id = ns.idFromName("room-stale-cached-owner");
 
   assert.equal(await ns.get(id).fetch("https://demo.workers.example/one", { method: "POST", body: "first" }).then((r) => r.text()), "owner-ok");
-  const body = await readJsonResponse(await ns.get(id).fetch("https://demo.workers.example/two", { method: "POST", body: "second" }), 503);
+  const response = await withTestTimeout(
+    ns.get(id).fetch("https://demo.workers.example/two", { method: "POST", body: "second" }),
+    "owner dispatch waited for response cancellation"
+  );
+  const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "owner_unavailable");
 
   assert.equal(ownerCalls.length, 2);
   assert.equal(routerCalls.length, 1);
+  assert.equal(cancellations, 1);
 });
 
 test("DurableObjectNamespace replays safe GET after stale cached owner endpoint timeout", async () => {
@@ -1370,7 +2530,12 @@ test("DurableObjectNamespace replays safe GET after stale cached owner endpoint 
     fetch: makeRecordingFetch(routerCalls, {
       response: () => routerCalls.length === 1
         ? doOwnerHintResponse({ endpoint, generation: 11 })
-        : new Response("router-ok"),
+        : routerCalls.length === 2
+          ? Response.json({ error: "owner_claim_raced", message: "retry" }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders("owner_claim_raced"),
+            })
+          : new Response("router-ok"),
     }),
   };
   const ownerNetwork = {
@@ -1394,8 +2559,9 @@ test("DurableObjectNamespace replays safe GET after stale cached owner endpoint 
   assert.equal(await ns.get(id).fetch("https://demo.workers.example/two").then((r) => r.text()), "router-ok");
 
   assert.equal(ownerCalls.length, 2);
-  assert.equal(routerCalls.length, 2);
+  assert.equal(routerCalls.length, 3);
   assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
+  assert.equal(headerValue(routerCalls[2].init.headers, "x-wdl-do-accept-owner-hint"), null);
 });
 
 test("DurableObjectNamespace drops stale cached owner hints after owner lease budget errors", async () => {
@@ -1404,6 +2570,7 @@ test("DurableObjectNamespace drops stale cached owner hints after owner lease bu
     const routerCalls = [];
     /** @type {any[]} */
     const ownerCalls = [];
+    let cancellations = 0;
     const backend = {
       fetch: makeRecordingFetch(routerCalls, {
         response: () => routerCalls.length === 1
@@ -1415,7 +2582,12 @@ test("DurableObjectNamespace drops stale cached owner hints after owner lease bu
       fetch: makeRecordingFetch(ownerCalls, {
         response: () => ownerCalls.length === 1
           ? new Response("owner-ok", { headers: doOwnerHintHeaders() })
-          : Response.json({ error, message: "owner lease unavailable" }, { status: 503 }),
+          : cancellableResponse(() => {
+              cancellations += 1;
+            }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders(error),
+            }),
       }),
     };
     const ns = new DurableObjectNamespace({
@@ -1433,12 +2605,20 @@ test("DurableObjectNamespace drops stale cached owner hints after owner lease bu
 
     assert.equal(ownerCalls.length, 2, error);
     assert.equal(routerCalls.length, 2, error);
-    assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), "1", error);
+    assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null, error);
+    assert.equal(cancellations, 1, error);
   }
 });
 
-test("DurableObjectNamespace facade rejects foreign ids", () => {
+test("DurableObjectNamespace facade rejects foreign ids", async () => {
   const ns = new DurableObjectNamespace({ fetchObject() {} });
   assert.throws(() => ns.idFromName(""), /requires a non-empty string/);
+  for (const value of ["\ud800", "\udc00"]) {
+    assert.throws(() => ns.idFromName(value), /requires well-formed Unicode/);
+    assert.throws(() => ns.idFromString(value), /requires well-formed Unicode/);
+  }
+  await withMockedProperty(String.prototype, "isWellFormed", () => true, () => {
+    assert.throws(() => ns.idFromName("\ud800"), /requires well-formed Unicode/);
+  });
   assert.throws(() => ns.get({ name: "room-a" }), /requires an id returned by this namespace/);
 });

@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::header::CONTENT_LENGTH;
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -16,11 +16,12 @@ use serde_json::{Value, json};
 use wdl_rust_common::env::env_u16;
 use wdl_rust_common::health::healthcheck_http_200;
 use wdl_rust_common::internal_auth::{
-    InternalAuthTokens, internal_auth_headers_match, internal_auth_tokens_from_env,
+    INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE, InternalAuthTokens,
+    internal_auth_failure_response, internal_auth_headers_match, internal_auth_tokens_from_env,
 };
 use wdl_rust_common::metrics::prometheus_response;
 use wdl_rust_common::redis_conn::RedisConnection;
-use wdl_rust_common::request_id::sanitize_request_id;
+use wdl_rust_common::request_id::request_id_from_headers;
 use wdl_rust_common::time::duration_ms_for_log;
 
 // CF KV allows 25 MiB values; set Axum's body cap above that instead of
@@ -292,13 +293,6 @@ fn response_error(response: &Response) -> Option<(&'static str, &str)> {
         .map(|err| (err.code, err.message.as_str()))
 }
 
-fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(sanitize_request_id)
-}
-
 async fn track_request(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -311,14 +305,7 @@ async fn track_request(
     if !matches!(route, "healthz" | "metrics")
         && !internal_auth_headers_match(request.headers(), &state.internal_auth_tokens)
     {
-        let response = (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": "internal_auth_failed",
-                "message": "Internal authentication failed",
-            })),
-        )
-            .into_response();
+        let response = internal_auth_failure_response();
         record_request_complete(
             &state,
             method.as_str(),
@@ -326,7 +313,7 @@ async fn track_request(
             response.status(),
             request_id.as_deref(),
             started_at,
-            Some(("internal_auth_failed", "Internal authentication failed")),
+            Some((INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE)),
         );
         return response;
     }
@@ -417,6 +404,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
+    use axum::http::HeaderMap;
     use axum::response::IntoResponse;
     use serde_json::json;
 

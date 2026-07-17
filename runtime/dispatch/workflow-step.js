@@ -30,25 +30,36 @@ import {
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayCache} WorkflowReplayCache
  */
 
-/** @param {unknown} err */
-export function workflowError(err) {
-  const error = /** @type {{ name?: unknown, message?: unknown } | null} */ (
-    err && typeof err === "object" ? err : null
-  );
-  return {
-    name: typeof error?.name === "string" && error.name ? error.name : "Error",
-    message: String(
-      typeof error?.message === "string" && error.message ? error.message : err || "Workflow run failed"
-    ),
-  };
+/** @param {unknown} value @param {"name" | "message"} field */
+function readThrowableField(value, field) {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    return undefined;
+  }
+  try {
+    return /** @type {Record<string, unknown>} */ (value)[field];
+  } catch {
+    return undefined;
+  }
 }
 
 /** @param {unknown} err */
-function isNonRetryableError(err) {
-  const error = /** @type {{ name?: unknown } | null} */ (
-    err && typeof err === "object" ? err : null
-  );
-  return error?.name === "NonRetryableError" || error?.name === "workflow_invalid_step";
+export function workflowError(err) {
+  const rawName = readThrowableField(err, "name");
+  const rawMessage = readThrowableField(err, "message");
+  let message = "Workflow run failed";
+  if (typeof rawMessage === "string") {
+    message = rawMessage;
+  } else if (err != null) {
+    try {
+      message = String(err);
+    } catch {
+      // Some valid thrown values have no usable primitive conversion.
+    }
+  }
+  return {
+    name: typeof rawName === "string" && rawName ? rawName : "Error",
+    message,
+  };
 }
 
 /**
@@ -87,11 +98,17 @@ class WorkflowSuspended extends Error {
 
 /** @param {unknown} err */
 export function isWorkflowSuspended(err) {
-  return err instanceof WorkflowSuspended || (
-    err !== null &&
-    typeof err === "object" &&
-    /** @type {{ name?: unknown }} */ (err).name === "WorkflowSuspended"
-  );
+  try {
+    return err instanceof WorkflowSuspended;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {unknown} err */
+export function isWorkflowSuspensionSignal(err) {
+  if (isWorkflowSuspended(err)) return true;
+  return readThrowableField(err, "name") === "WorkflowSuspended";
 }
 
 /** @param {unknown} value */
@@ -191,7 +208,7 @@ async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string | null} [requestId]
  */
-export function createStepFacade(run, backend, requestId = null) {
+export function createStepController(run, backend, requestId = null) {
   let ordinal = 0;
   let startedSteps = 0;
   let suspendingStepInFlight = false;
@@ -200,6 +217,9 @@ export function createStepFacade(run, backend, requestId = null) {
   let stepCallbackDepth = 0;
   /** @type {unknown} */
   let terminalStepFailure = null;
+  /** @type {{ name: string, message: string } | null} */
+  let terminalStepError = null;
+  let hasTerminalStepFailure = false;
   const activeStepPromises = new Set();
   const nameCounts = new Map();
   const dependencyFrontier = new Set();
@@ -208,6 +228,14 @@ export function createStepFacade(run, backend, requestId = null) {
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
   let replayFetchPromise = null;
+
+  /** @param {unknown} reason @param {{ name: string, message: string } | null} [error] */
+  const rememberTerminalStepFailure = (reason, error = null) => {
+    if (hasTerminalStepFailure) return;
+    terminalStepFailure = reason;
+    terminalStepError = error ?? workflowError(reason);
+    hasTerminalStepFailure = true;
+  };
 
   /** @param {number[]} left @param {number[]} right */
   const sameDependencies = (left, right) => (
@@ -249,7 +277,7 @@ export function createStepFacade(run, backend, requestId = null) {
     if (stepCallbackDepth > 0) {
       throw workflowStepError("workflow_invalid_step", "workflow steps cannot start while another step.do callback is in flight");
     }
-    if (terminalStepFailure) throw terminalStepFailure;
+    if (hasTerminalStepFailure) throw terminalStepFailure;
     if (options.suspending) {
       if (activeStepCount > 0) {
         throw workflowStepError("workflow_invalid_step", "workflow suspending steps must execute when no other step is in flight");
@@ -362,7 +390,7 @@ export function createStepFacade(run, backend, requestId = null) {
       try {
         return await promise;
       } catch (reason) {
-        if (!isWorkflowSuspended(reason)) terminalStepFailure ??= reason;
+        if (!isWorkflowSuspended(reason)) rememberTerminalStepFailure(reason);
         throw reason;
       } finally {
         activeStepRecords.delete(record);
@@ -481,7 +509,7 @@ export function createStepFacade(run, backend, requestId = null) {
     return null;
   };
 
-  return {
+  const facade = {
     /**
      * @param {string} name
      * @param {unknown | (() => unknown | Promise<unknown>)} configOrCallback
@@ -504,7 +532,7 @@ export function createStepFacade(run, backend, requestId = null) {
         identity = nextStepIdentity(name, config);
         assertCanStartStep({ stepDo: true, stepDependencies: identity.dependencies });
       } catch (err) {
-        if (!isWorkflowSuspended(err)) terminalStepFailure ??= err;
+        if (!isWorkflowSuspended(err)) rememberTerminalStepFailure(err);
         const rejected = Promise.reject(err);
         rejected.catch(() => {});
         return rejected;
@@ -553,11 +581,12 @@ export function createStepFacade(run, backend, requestId = null) {
           assertRunStillOpen();
         } catch (err) {
           if (runReturned) throw err;
+          const error = workflowError(err);
           const committed = await workflowBackendCall(backend, "commit-step-error", {
             ...identity,
             attempt,
-            error: workflowError(err),
-            nonRetryable: isNonRetryableError(err),
+            error,
+            nonRetryable: error.name === "NonRetryableError" || error.name === "workflow_invalid_step",
           }, requestId);
           if (committed?.state === "waiting") {
             cacheStep(identity, { status: "waiting", attempt, dueAtMs: committed.dueAtMs ?? null });
@@ -565,8 +594,9 @@ export function createStepFacade(run, backend, requestId = null) {
             throw new WorkflowSuspended();
           }
           if (committed?.state === "failed") {
-            cacheStep(identity, { status: "failed", attempt, error: workflowError(err) });
+            cacheStep(identity, { status: "failed", attempt, error });
           }
+          rememberTerminalStepFailure(err, error);
           throw err;
         }
         await workflowBackendCall(backend, "commit-step-success", {
@@ -654,11 +684,21 @@ export function createStepFacade(run, backend, requestId = null) {
         });
       })());
     },
+  };
+
+  return {
+    facade,
     isSuspended() {
       return suspended;
     },
     terminalStepFailure() {
       return terminalStepFailure;
+    },
+    terminalStepError() {
+      return terminalStepError;
+    },
+    hasTerminalStepFailure() {
+      return hasTerminalStepFailure;
     },
     hasInFlightSteps() {
       return activeUnsettledStepCount() > 0;

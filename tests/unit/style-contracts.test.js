@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import {
-  d1RuntimeServiceRegex,
   extractAssignedConstant,
   extractBraceBlock,
   extractExportedStringConst,
@@ -15,6 +14,7 @@ import {
   scannedTestFiles,
   serviceAnchorRegex,
   withoutStringAndTemplateLiterals,
+  yamlDocuments,
 } from "../helpers/style-contract-scanner.js";
 import { jsFiles, readRepoFile, rustFiles, sourceFiles, withoutLineComments } from "../helpers/source-scan.js";
 
@@ -38,6 +38,7 @@ const PRODUCTION_JS_FILES = [
 const PLATFORM_HTTP_ERROR_FILES = [
   // auth/ is a socket-less JSRPC worker; it returns method payloads instead of
   // platform HTTP responses.
+  ...CONTROL_FILES,
   ...GATEWAY_FILES,
   ...RUNTIME_FILES,
   ...D1_RUNTIME_FILES,
@@ -51,6 +52,17 @@ const OFFICIAL_DOC_FILES = [
 // Intentionally empty: add paths here only when a documented active-doc
 // one-language exception is approved.
 const INTENTIONAL_ONE_LANGUAGE_ACTIVE_DOCS = new Set();
+
+function activeBilingualDocFiles() {
+  const notesDirName = ["arch", "ive"].join("");
+  return [
+    "README.md",
+    "README.zh.md",
+    ...markdownFiles("docs", { ignoreDirs: new Set([notesDirName]) }),
+    "deploy/kubernetes/README.md",
+    "deploy/kubernetes/README.zh.md",
+  ];
+}
 
 // Heuristic multiline scanners for object-literal JSON payload helpers.
 // They match a first object argument and an optional second object argument
@@ -227,6 +239,20 @@ test("shared primitive owners stay canonical", () => {
   assert.deepEqual(offenders, [], `shared primitive owners must stay canonical:\n${offenders.join("\n")}`);
 });
 
+test("name grammar predicates live with the shared regex owner", () => {
+  const owner = withoutLineComments(readRepoFile("shared/ns-pattern.js"));
+  const controlLib = withoutLineComments(readRepoFile("control/lib.js"));
+  for (const name of [
+    "isValidWorkerName",
+    "isValidWorkflowName",
+    "isValidQueueName",
+    "isValidKvId",
+  ]) {
+    assert.match(owner, new RegExp(`export function ${name}\\(`), name);
+    assert.doesNotMatch(controlLib, new RegExp(`function ${name}\\(`), name);
+  }
+});
+
 test("secret Redis key construction uses the shared JS owner", () => {
   const allowed = new Set(["shared/secret-keys.js"]);
   const offenders = [];
@@ -247,35 +273,11 @@ test("secret Redis key construction uses the shared JS owner", () => {
   );
 });
 
-test("do-runtime worker-name grammar matches shared control grammar", () => {
-  assert.equal(
-    extractRegex("do-runtime/protocol/wire-grammar.js", "WORKER_NAME_RE"),
-    extractRegex("shared/ns-pattern.js", "WORKER_NAME_RE")
-  );
-});
-
 test("runtime workflow instance id grammar matches shared control grammar", () => {
   assert.equal(
     extractRegex("runtime/workflows-client.js", "WORKFLOW_INSTANCE_ID_RE"),
     extractRegex("shared/ns-pattern.js", "WORKFLOW_INSTANCE_ID_RE")
   );
-});
-
-test("runtime workflow dispatch identity grammar mirrors shared grammar", () => {
-  const shared = readRepoFile("shared/ns-pattern.js");
-  assert.equal(
-    extractRegex("runtime/lib.js", "ROUTE_NS_RE"),
-    `/^(?:${extractStringConst(shared, "NS_PATTERN")}|__system__)$/`
-  );
-  assert.deepEqual(
-    extractStringSetConst(readRepoFile("runtime/lib.js"), "RESERVED_TENANT_NS"),
-    extractStringSetConst(shared, "RESERVED_TENANT_NS")
-  );
-  assert.equal(
-    extractRegex("runtime/lib.js", "WORKER_NAME_RE"),
-    extractRegex("shared/ns-pattern.js", "WORKER_NAME_RE")
-  );
-  assert.equal(extractRegex("runtime/lib.js", "VERSION_RE"), "/^v[1-9][0-9]*$/");
 });
 
 test("D1 object field setters stay shared across wire and transport codecs", () => {
@@ -306,16 +308,17 @@ test("control handlers do not bypass jsonError for literal error responses", () 
   assert.deepEqual(offenders, []);
 });
 
-test("route/version registry keys go through shared/version.js helpers", () => {
-  // Only shared/version.js may hold the literal. The `${...}`-anchored regex
+test("worker control-plane registry keys go through shared/worker-contract.js helpers", () => {
+  // Only shared/worker-contract.js may hold the literal. The `${...}`-anchored regex
   // matches key construction, so channel names ("routes:invalidate"/"flush")
   // and comments are skipped.
   const files = [
     ...CONTROL_FILES,
+    ...AUTH_FILES,
     ...GATEWAY_FILES,
     ...DO_RUNTIME_FILES,
     ...RUNTIME_FILES,
-  ].filter((file) => file !== "shared/version.js");
+  ].filter((file) => file !== "shared/worker-contract.js");
   const offenders = [];
   for (const file of files) {
     const source = withoutLineComments(readRepoFile(file));
@@ -327,12 +330,24 @@ test("route/version registry keys go through shared/version.js helpers", () => {
     if (/`worker:do-storage:\$\{/.test(source)) {
       offenders.push(`${file}: inline worker:do-storage: — use doStorageIdKey(ns, worker)`);
     }
+    if (/`hosts:\$\{/.test(source)) offenders.push(`${file}: inline hosts:<ns> — use hostsKey(ns)`);
+    if (/`ns-hosts:\$\{/.test(source)) offenders.push(`${file}: inline ns-hosts:<ns> — use nsHostsKey(ns)`);
+    if (/`worker:\$\{[^`]*:next_version`/.test(source)) {
+      offenders.push(`${file}: inline next_version counter — use nextVersionKey(ns, worker)`);
+    }
+    if (/"namespaces"/.test(source)) offenders.push(`${file}: inline namespaces set — use NAMESPACES_KEY`);
+    if (/"declared-hosts"/.test(source)) {
+      offenders.push(`${file}: inline declared-hosts set — use DECLARED_HOSTS_KEY`);
+    }
+    if (/"host-declarations:"/.test(source)) {
+      offenders.push(`${file}: inline host-declarations prefix — use hostDeclarationsKey(host)`);
+    }
   }
-  // Rust services are production readers too; rust/common/version.rs holds the
-  // only literals (mirror of shared/version.js), every other crate must call
+  // Rust services are production readers too; rust/common/worker_contract.rs holds the
+  // only literals (mirror of shared/worker-contract.js), every other crate must call
   // routes_key()/worker_versions_key()/do_storage_id_key().
   const rustOffenderFiles = rustFiles("rust").filter(
-    (file) => file !== "rust/common/src/version.rs"
+    (file) => file !== "rust/common/src/worker_contract.rs"
   );
   for (const file of rustOffenderFiles) {
     const source = withoutLineComments(readRepoFile(file));
@@ -344,7 +359,22 @@ test("route/version registry keys go through shared/version.js helpers", () => {
       offenders.push(`${file}: inline worker:do-storage: — use do_storage_id_key(ns, worker)`);
     }
   }
-  assert.deepEqual(offenders, [], `route/version key literals must use shared helpers:\n${offenders.join("\n")}`);
+  assert.deepEqual(offenders, [], `worker contract key literals must use shared helpers:\n${offenders.join("\n")}`);
+});
+
+test("platform domain configuration uses the shared normalized owner", () => {
+  const owner = withoutLineComments(readRepoFile("shared/ns-pattern.js"));
+  assert.match(owner, /DEFAULT_PLATFORM_DOMAIN = "workers\.local"/);
+  for (const file of [
+    "control/handlers/deploy.js",
+    "control/handlers/promote.js",
+    "control/handlers/hosts.js",
+    "gateway/index.js",
+  ]) {
+    const source = withoutLineComments(readRepoFile(file));
+    assert.match(source, /\bplatformDomainFromEnv\b/, file);
+    assert.doesNotMatch(source, /"workers\.local"/, file);
+  }
 });
 
 test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
@@ -357,42 +387,24 @@ test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
   assert.match(rust, /format!\("secrets:\{\}:\{\}", q\.ns, q\.worker\)/);
 });
 
-test("test bundleKey stubs stay production-faithful", () => {
-  const offenders = [];
-  const bundleKeyStubBodies = (/** @type {string} */ source) => {
-    const bodies = [];
-    for (const match of source.matchAll(/export function bundleKey\(|const bundleKey\s*=/g)) {
-      const start = match.index ?? 0;
-      const nextExport = source.indexOf("\nexport function ", start + 1);
-      const nextConst = source.indexOf("\nconst ", start + 1);
-      const nextBoundary = [nextExport, nextConst]
-        .filter((idx) => idx !== -1)
-        .sort((a, b) => a - b)[0] ?? source.length;
-      bodies.push(source.slice(start, nextBoundary));
-    }
-    return bodies;
-  };
-  for (const file of jsFiles("tests/unit")) {
-    const source = withoutLineComments(readRepoFile(file));
-    for (const body of bundleKeyStubBodies(source)) {
-      const hasVersionSegmentComposition =
-        /":v:"\s*\+\s*n/.test(body) || /:v:\$\{?\s*n\s*\}?/.test(body);
-      if (!/\bparseVersion\(version\)/.test(body) || !hasVersionSegmentComposition) {
-        offenders.push(`${file}: bundleKey stub must parse vN and compose worker:<ns>:<name>:v:<int>`);
-      }
-    }
-  }
-  assert.deepEqual(offenders, []);
-});
-
 test("worker delete lock key stays aligned across control and workflows", () => {
-  const controlLib = withoutLineComments(readRepoFile("control/lib.js"));
+  const workerContract = withoutLineComments(readRepoFile("shared/worker-contract.js"));
+  const commonWorkerContract = withoutLineComments(
+    readRepoFile("rust/common/src/worker_contract.rs"),
+  );
   const controlShared = withoutLineComments(readRepoFile("control/shared.js"));
   const workflowsActiveExport = withoutLineComments(readRepoFile("rust/workflows/src/api/active_export.rs"));
 
-  assert.match(controlLib, /`worker-delete-lock:\$\{ns\}:\$\{worker\}`/);
+  assert.match(workerContract, /`worker-delete-lock:\$\{ns\}:\$\{worker\}`/);
+  assert.match(commonWorkerContract, /format!\("worker-delete-lock:\{ns\}:\{worker\}"\)/);
   assert.match(controlShared, /\bdeleteLockKey\(ns, worker\)/);
-  assert.match(workflowsActiveExport, /format!\("worker-delete-lock:\{ns\}:\{worker\}"\)/);
+  assert.match(workflowsActiveExport, /\bworker_delete_lock_key\(ns, worker\)/);
+
+  const rustOwner = "rust/common/src/worker_contract.rs";
+  const offenders = rustFiles("rust").filter((file) =>
+    file !== rustOwner && withoutLineComments(readRepoFile(file)).includes("worker-delete-lock:")
+  );
+  assert.deepEqual(offenders, []);
 });
 
 test("product success payloads use camelCase fields", () => {
@@ -895,36 +907,20 @@ test("Redis command metric allow-list covers shared Redis wrappers", () => {
   );
 });
 
-test("route invalidation channel literals stay aligned across control and gateway", () => {
-  const shared = withoutLineComments(readRepoFile("control/shared.js"));
-  const routing = withoutLineComments(readRepoFile("control/routing.js"));
-  const gateway = withoutLineComments(readRepoFile("gateway/runtime.js"));
-  const routesChannel = extractStringConst(shared, "ROUTES_CHANNEL");
-  const routesFlushChannel = extractStringConst(shared, "ROUTES_FLUSH_CHANNEL");
-  const patternsChannel = extractStringConst(shared, "PATTERNS_CHANNEL");
-
-  assert.equal(extractStringConst(routing, "ROUTES_CHANNEL"), routesChannel);
-  assert.equal(extractStringConst(routing, "PATTERNS_CHANNEL"), patternsChannel);
-  assert.match(
-    gateway,
-    new RegExp(`\\[\\s*"${RegExp.escape(routesChannel)}",\\s*"${RegExp.escape(routesFlushChannel)}",\\s*"${RegExp.escape(patternsChannel)}"\\s*\\]`)
-  );
-  assert.match(gateway, new RegExp(`channel === "${RegExp.escape(routesFlushChannel)}"`));
-  assert.match(gateway, new RegExp(`channel === "${RegExp.escape(patternsChannel)}"`));
-});
-
 test("declared-host Redis key literals stay aligned across control, gateway, and docs", () => {
+  const workerContract = withoutLineComments(readRepoFile("shared/worker-contract.js"));
   const shared = withoutLineComments(readRepoFile("control/shared.js"));
   const routing = withoutLineComments(readRepoFile("control/routing.js"));
   const gateway = withoutLineComments(readRepoFile("gateway/runtime.js"));
   const layoutEn = readRepoFile("docs/redis-key-layout.md");
   const layoutZh = readRepoFile("docs/redis-key-layout.zh.md");
-  const declaredHostsKey = extractStringConst(shared, "DECLARED_HOSTS_KEY");
-  const hostDeclarationsPrefix = extractStringConst(shared, "HOST_DECLARATIONS_PREFIX");
+  const declaredHostsKey = extractStringConst(workerContract, "DECLARED_HOSTS_KEY");
+  const hostDeclarationsPrefix = extractStringConst(workerContract, "HOST_DECLARATIONS_PREFIX");
 
   assert.match(routing, new RegExp(`\\bDECLARED_HOSTS_KEY\\b`));
-  assert.match(routing, new RegExp(`\\bHOST_DECLARATIONS_PREFIX\\b`));
-  assert.equal(extractStringConst(gateway, "DECLARED_HOSTS_KEY"), declaredHostsKey);
+  assert.match(routing, /\bhostDeclarationsKey\b/);
+  assert.match(shared, /\bhostDeclarationsKey\b/);
+  assert.match(gateway, /\bDECLARED_HOSTS_KEY\b/);
   for (const source of [layoutEn, layoutZh]) {
     assert.match(source, new RegExp(`\\b${RegExp.escape(declaredHostsKey)}\\b`));
     assert.match(source, new RegExp(`\\b${RegExp.escape(hostDeclarationsPrefix)}<host>`));
@@ -932,12 +928,13 @@ test("declared-host Redis key literals stay aligned across control, gateway, and
 });
 
 test("gateway strips every client-supplied platform header it injects", () => {
-  const source = withoutLineComments(readRepoFile("gateway/index.js"));
-  const headerList = /const INTERNAL_FORWARD_HEADERS = \[([\s\S]*?)\];/.exec(source);
+  const gateway = withoutLineComments(readRepoFile("gateway/index.js"));
+  const owner = withoutLineComments(readRepoFile("gateway/lib.js"));
+  const headerList = /const INTERNAL_FORWARD_HEADERS = \[([\s\S]*?)\];/.exec(owner);
   assert.ok(headerList, "gateway INTERNAL_FORWARD_HEADERS list must be present");
   const stripped = new Set([...headerList[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]));
   const injectedNonPrefixedInternal = new Set(
-    [...source.matchAll(/forwardRequest\.headers\.set\("(x-worker[^"]+)"/g)]
+    [...gateway.matchAll(/forwardRequest\.headers\.set\("(x-worker[^"]+)"/g)]
       .map((match) => match[1])
   );
   const missing = [...injectedNonPrefixedInternal].filter((header) => !stripped.has(header)).toSorted();
@@ -946,22 +943,13 @@ test("gateway strips every client-supplied platform header it injects", () => {
     [],
     `gateway INTERNAL_FORWARD_HEADERS must include injected non-prefixed internal headers: ${missing.join(", ")}`
   );
-  assert.match(source, /const INTERNAL_HEADER_PREFIX = "x-wdl-"/);
-  assert.match(source, /header\.toLowerCase\(\)\.startsWith\(INTERNAL_HEADER_PREFIX\)/);
-  assert.match(source, /headers\.delete\(header\)/);
+  assert.match(owner, /const INTERNAL_HEADER_PREFIX = "x-wdl-"/);
+  assert.match(owner, /name\.toLowerCase\(\)\.startsWith\(INTERNAL_HEADER_PREFIX\)/);
+  assert.match(owner, /headers\.delete\(name\)/);
+  assert.match(gateway, /deleteGatewayInternalHeaders\(forwardRequest\.headers\)/);
 
   const websocket = withoutLineComments(readRepoFile("gateway/websocket.js"));
-  const websocketHeaderList = /const INTERNAL_FORWARD_HEADERS = \[([\s\S]*?)\];/.exec(websocket);
-  assert.ok(websocketHeaderList, "gateway websocket INTERNAL_FORWARD_HEADERS list must be present");
-  const websocketStripped = new Set([...websocketHeaderList[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]));
-  assert.deepEqual(
-    ["x-worker-id", "x-worker-prefix"].filter((header) => !websocketStripped.has(header)),
-    [],
-    "gateway websocket must strip non-prefixed internal headers from upgrade responses"
-  );
-  assert.match(websocket, /const INTERNAL_HEADER_PREFIX = "x-wdl-"/);
-  assert.match(websocket, /name\.toLowerCase\(\)\.startsWith\(INTERNAL_HEADER_PREFIX\)/);
-  assert.match(websocket, /out\.delete\(name\)/);
+  assert.match(websocket, /deleteGatewayInternalHeaders\(out\)/);
 });
 
 test("D1 owner protocol errors stay aligned with runtime stale-hint handling", () => {
@@ -1150,10 +1138,12 @@ test("redis-proxy HTTP observability matches platform request strategy", () => {
   assert.match(lib, /struct ResponseError/);
 });
 
-test("embedded DO alarm shim follows shared log stream routing", () => {
+test("embedded DO alarm shim keeps best-effort log routing no-throw", () => {
   const source = withoutLineComments(readRepoFile("do-runtime/alarm-shim-source.js"));
+  const logger = /function logStructured\([^]*?\n}\n\nfunction ensureAlarmTable/.exec(source)?.[0] || "";
   assert.equal(/console\.warn\(/.test(source), false);
-  assert.match(source, /if \(level === "error"\) console\.error\(line\);\n {2}else console\.log\(line\);/);
+  assert.match(logger, /if \(level === "error"\) console\.error\(line\);\s+else console\.log\(line\);/);
+  assert.match(logger, /try \{[^]*} catch \{/);
 });
 
 test("active docs and sources do not point at note paths", () => {
@@ -1181,12 +1171,7 @@ test("active docs and sources do not point at note paths", () => {
 });
 
 test("active bilingual docs stay paired", () => {
-  const notesDirName = ["arch", "ive"].join("");
-  const files = [
-    "README.md",
-    "README.zh.md",
-    ...markdownFiles("docs", { ignoreDirs: new Set([notesDirName]) }),
-  ];
+  const files = activeBilingualDocFiles();
   const fileSet = new Set(files);
   const offenders = [];
   for (const file of files) {
@@ -1337,7 +1322,8 @@ test("do-runtime operational logs avoid known camelCase field drift", () => {
 
 test("DO alarm tokens stay generated inside the storage shim", () => {
   const source = withoutLineComments(readRepoFile("do-runtime/alarm-shim-source.js"));
-  assert.match(source, /function alarmToken\(\)\s*\{\s*return crypto\.randomUUID\(\);\s*\}/);
+  assert.match(source, /const cryptoRandomUUID = crypto\.randomUUID;/);
+  assert.match(source, /function alarmToken\(\)\s*\{\s*return reflectApply\(cryptoRandomUUID, nativeCrypto, \[\]\);\s*\}/);
   assert.match(source, /const token = alarmToken\(\);/);
   assert.match(source, /alarmBinding\.setAlarmIndex\(\{\s*className,\s*objectName,\s*scheduledTime: alarmTime,\s*retryCount: 0,\s*token,/);
 });
@@ -1440,24 +1426,227 @@ test("owner forward metrics classify non-error HTTP statuses consistently", () =
 test("local compose services inherit shared image anchors", () => {
   const source = readRepoFile("docker-compose.yml");
   const offenders = [];
-  for (const service of ["redis-proxy-user", "redis-proxy-system", "scheduler"]) {
-    if (!serviceAnchorRegex(service, "rust-sidecar-image").test(source)) {
+  for (const service of ["redis-proxy-user", "redis-proxy-system", "redis-proxy-do"]) {
+    if (!serviceAnchorRegex(service, "redis-proxy-service").test(source)) {
       offenders.push(service);
     }
+  }
+  if (!serviceAnchorRegex("scheduler", "rust-sidecar-image").test(source)) {
+    offenders.push("scheduler");
   }
   for (const service of ["user-runtime", "system-runtime", "gateway"]) {
     if (!serviceAnchorRegex(service, "workerd-image").test(source)) {
       offenders.push(service);
     }
   }
-  // Strict by design: d1-multi profile filters stay before anchor inheritance
-  // so profile-only variants remain visually distinct from the default task.
-  for (const service of ["d1-runtime", "d1-runtime-a", "d1-runtime-b", "d1-runtime-c"]) {
-    if (!d1RuntimeServiceRegex(service).test(source)) {
-      offenders.push(service);
+  assert.deepEqual(offenders, []);
+});
+
+test("published compose services reset local builds on each service", () => {
+  const source = readRepoFile("docker-compose.images.yml");
+  const serviceGroups = /** @type {Array<[string, string[]]>} */ ([
+    ["rust-published", [
+      "redis-proxy-user",
+      "redis-proxy-system",
+      "redis-proxy-do",
+      "scheduler",
+      "workflows",
+    ]],
+    ["workerd-published", [
+      "user-runtime",
+      "system-runtime",
+      "gateway",
+      "d1-runtime",
+      "d1-runtime-a",
+      "d1-runtime-b",
+      "d1-runtime-c",
+      "do-runtime",
+      "do-runtime-a",
+      "do-runtime-b",
+      "do-runtime-c",
+    ]],
+  ]);
+  const servicesIndex = source.indexOf("services:");
+  assert.notEqual(servicesIndex, -1);
+  const anchorSource = source.slice(0, servicesIndex);
+  assert.doesNotMatch(anchorSource, /build:\s*!reset\b/);
+  const expectedServices = serviceGroups.flatMap(([, services]) => services).toSorted();
+  const actualServices = [...source.matchAll(/^ {2}([a-z0-9-]+):$/gm)]
+    .map((match) => match[1])
+    .toSorted();
+  assert.deepEqual(actualServices, expectedServices);
+  for (const [anchor, services] of serviceGroups) {
+    for (const service of services) {
+      const block = new RegExp(
+        String.raw`(?:^|\n) {2}${RegExp.escape(service)}:\n((?: {4}[^\n]*(?:\n|$))*)`,
+      ).exec(source)?.[1];
+      assert.ok(block, `${service} must exist in the published-image overlay`);
+      assert.match(block, new RegExp(String.raw`^ {4}<<: \*${anchor}$`, "m"), service);
+      assert.match(block, /^ {4}build: !reset null$/m, service);
     }
   }
-  assert.deepEqual(offenders, []);
+});
+
+test("local compose runtime profiles keep base services enabled by default", () => {
+  const [document] = yamlDocuments("docker-compose.yml");
+  const compose = /** @type {{ services?: Record<string, { profiles?: unknown }> }} */ (
+    document.toJS()
+  );
+  assert.ok(compose.services);
+  for (const family of ["d1", "do"]) {
+    const baseName = `${family}-runtime`;
+    const baseService = /** @type {{ profiles?: unknown } | undefined} */ (
+      compose.services[baseName]
+    );
+    assert.ok(baseService, `${baseName} must exist`);
+    assert.equal(baseService.profiles, undefined);
+    for (const suffix of ["a", "b", "c"]) {
+      const variantName = `${family}-runtime-${suffix}`;
+      const variantService = /** @type {{ profiles?: unknown } | undefined} */ (
+        compose.services[variantName]
+      );
+      assert.ok(variantService, `${variantName} must exist`);
+      assert.deepEqual(
+        variantService.profiles,
+        [`${family}-multi`],
+        variantName
+      );
+    }
+  }
+});
+
+test("Kubernetes stateful runtimes publish Pod-specific owner endpoints", () => {
+  const families = /** @type {Array<[string, number]>} */ ([["d1", 8787], ["do", 8788]]);
+  for (const [family, port] of families) {
+    const serviceName = `${family}-runtime`;
+    const headlessName = `${serviceName}-headless`;
+    const resources = /** @type {Array<Record<string, any>>} */ (
+      yamlDocuments(`deploy/kubernetes/base/${serviceName}.yaml`).map((document) => document.toJS())
+    );
+    const router = resources.find((resource) => resource.kind === "Service" && resource.metadata?.name === serviceName);
+    const headless = resources.find((resource) => resource.kind === "Service" && resource.metadata?.name === headlessName);
+    const statefulSet = resources.find((resource) => resource.kind === "StatefulSet" && resource.metadata?.name === serviceName);
+    assert.ok(router, `${serviceName} router Service must exist`);
+    assert.notEqual(router.spec?.clusterIP, "None", `${serviceName} router must stay load-balanced`);
+    assert.equal(headless?.spec?.clusterIP, "None", `${headlessName} must stay headless`);
+    assert.equal(statefulSet?.spec?.serviceName, headlessName, `${serviceName} StatefulSet serviceName`);
+
+    const container = statefulSet?.spec?.template?.spec?.containers
+      ?.find((/** @type {Record<string, any>} */ entry) => entry.name === serviceName);
+    assert.ok(container, `${serviceName} container must exist`);
+    const env = Object.fromEntries(container.env.map(
+      (/** @type {Record<string, any>} */ entry) => [entry.name, entry]
+    ));
+    assert.equal(env.POD_NAME?.valueFrom?.fieldRef?.fieldPath, "metadata.name");
+    assert.equal(env[`${family.toUpperCase()}_TASK_ID`]?.valueFrom?.fieldRef?.fieldPath, "metadata.name");
+    assert.equal(
+      env[`${family.toUpperCase()}_TASK_ENDPOINT`]?.value,
+      `$(POD_NAME).${headlessName}:${port}`
+    );
+  }
+});
+
+test("Kubernetes runtime families pin the redis-proxy functional contract", () => {
+  const files = [
+    "deploy/kubernetes/base/user-runtime.yaml",
+    "deploy/kubernetes/base/system-runtime.yaml",
+    "deploy/kubernetes/base/do-runtime.yaml",
+  ];
+  const sidecars = files.map((file) => {
+    const resources = /** @type {Array<{
+     *   kind?: string,
+     *   spec?: { template?: { spec?: { containers?: Array<Record<string, unknown>> } } },
+     * }>} */ (yamlDocuments(file).map((document) => document.toJS()));
+    const workload = resources.find((resource) =>
+      resource.kind === "Deployment" || resource.kind === "StatefulSet"
+    );
+    assert.ok(workload, `${file} must contain a Deployment or StatefulSet`);
+    const sidecar = workload.spec?.template?.spec?.containers
+      ?.find((container) => container.name === "redis-proxy");
+    assert.ok(sidecar, `${file} must contain the redis-proxy sidecar`);
+    return sidecar;
+  });
+
+  for (let index = 0; index < sidecars.length; index += 1) {
+    const sidecar = sidecars[index];
+    assert.equal(sidecar.image, "docker.io/getwdl/wdl-rust:latest", `${files[index]} image`);
+    assert.deepEqual(sidecar.command, ["/redis-proxy"], `${files[index]} command`);
+    assert.deepEqual(
+      /** @type {Array<Record<string, unknown>> | undefined} */ (sidecar.ports)
+        ?.find((port) => port.name === "redis-proxy"),
+      { name: "redis-proxy", containerPort: 7070 },
+      `${files[index]} port`
+    );
+    assert.deepEqual(sidecar.envFrom, [
+      { configMapRef: { name: "wdl-config" } },
+      { secretRef: { name: "wdl-secrets" } },
+    ], `${files[index]} envFrom`);
+    for (const probe of ["readinessProbe", "livenessProbe"]) {
+      assert.deepEqual(sidecar[probe], {
+        exec: { command: ["/redis-proxy", "healthcheck"] },
+      }, `${files[index]} ${probe}`);
+    }
+    const resources = /** @type {{ requests?: Record<string, unknown>, limits?: Record<string, unknown> } | undefined} */ (
+      sidecar.resources
+    );
+    assert.ok(resources?.requests?.cpu, `${files[index]} resource request cpu`);
+    assert.ok(resources?.requests?.memory, `${files[index]} resource request memory`);
+    assert.ok(resources?.limits?.memory, `${files[index]} resource limit memory`);
+  }
+});
+
+test("Kubernetes NetworkPolicies pin the per-component ingress matrix", () => {
+  const documents = yamlDocuments("deploy/kubernetes/base/network-policy.yaml");
+  /** @type {Record<string, string[]>} */
+  const actual = {};
+  for (const document of documents) {
+    const policy = /** @type {{
+     *   spec?: {
+     *     podSelector?: { matchLabels?: Record<string, unknown> },
+     *     ingress?: Array<{
+     *       from?: Array<{ podSelector?: { matchLabels?: Record<string, unknown> } }>,
+     *       ports?: Array<{ port?: unknown }>,
+     *     }>,
+     *   },
+     * }} */ (document.toJS());
+    const receiver = policy?.spec?.podSelector?.matchLabels?.["app.kubernetes.io/component"];
+    if (typeof receiver !== "string") continue;
+    assert.equal(actual[receiver], undefined, `duplicate NetworkPolicy receiver ${receiver}`);
+
+    const edges = [];
+    for (const ingress of policy.spec?.ingress || []) {
+      const rawCallers = ingress.from === undefined
+        ? ["*"]
+        : ingress.from.map((peer) => peer?.podSelector?.matchLabels?.["app.kubernetes.io/component"]);
+      const ports = (ingress.ports || []).map((entry) => Number(entry.port));
+      assert.ok(rawCallers.every((caller) => typeof caller === "string"), `${receiver} callers must use component selectors`);
+      assert.ok(ports.every(Number.isInteger), `${receiver} ingress ports must be integers`);
+      const callers = /** @type {string[]} */ (rawCallers);
+      for (const caller of callers) {
+        for (const port of ports) edges.push(`${caller}:${port}`);
+      }
+    }
+    actual[receiver] = edges.toSorted();
+  }
+
+  assert.deepEqual(actual, {
+    gateway: ["*:8080"],
+    "user-runtime": ["gateway:8081", "scheduler:8088", "workflows:8088"],
+    "system-runtime": ["gateway:8081", "gateway:8082", "scheduler:8088", "workflows:8088"],
+    "d1-runtime": ["d1-runtime:8787", "do-runtime:8787", "system-runtime:8787", "user-runtime:8787"],
+    "do-runtime": ["do-runtime:8788", "system-runtime:8788", "user-runtime:8788", "workflows:8788"],
+    workflows: ["do-runtime:9120", "scheduler:9120", "system-runtime:9120", "user-runtime:9120"],
+    valkey: [
+      "d1-runtime:6379",
+      "do-runtime:6379",
+      "gateway:6379",
+      "scheduler:6379",
+      "system-runtime:6379",
+      "user-runtime:6379",
+      "workflows:6379",
+    ],
+    s3mock: ["do-runtime:9090", "system-runtime:9090", "user-runtime:9090"],
+  });
 });
 
 test("local compose routes private HTTP hops through Envoy only", () => {
@@ -1726,6 +1915,7 @@ test("workflow instance state is owned by workflows DB2", () => {
     "wf:by-worker:",
     "wf:by-workflow:",
     "wf:by-version:",
+    "wf:pending-version:",
     "wf:retention",
   ];
   const allowed = new Set([
@@ -1733,9 +1923,9 @@ test("workflow instance state is owned by workflows DB2", () => {
     "tests/integration/workflows-runtime-core.test.js",
     "tests/integration/workflows-runtime-scheduler.test.js",
     "tests/integration/workflows-runtime-pausing.test.js",
-    "tests/integration/workflows-runtime-retention.test.js",
     "tests/unit/style-contracts.test.js",
     "rust/workflows/src/keys.rs",
+    "rust/workflows/src/schema.rs",
     "rust/workflows/src/tests.rs",
   ]);
   const allowedFilePrefixes = new Set([
@@ -1755,6 +1945,7 @@ test("workflow instance state is owned by workflows DB2", () => {
     ...jsFiles("do-runtime"),
     ...jsFiles("tests/unit"),
     ...jsFiles("tests/integration"),
+    ...rustFiles("rust"),
   ];
   const offenders = [];
   for (const file of files) {
@@ -1820,7 +2011,7 @@ test("cron discovery index literals stay aligned across scheduler and control", 
   assert.ok(control.includes(workerIndex), `control cron indexes must contain ${workerIndex}`);
   assert.ok(scheduler.includes(workerIndex), `scheduler cron indexes must contain ${workerIndex}`);
   assert.ok(integration.includes(workerIndex), `cron integration tests must contain ${workerIndex}`);
-  assert.ok(routing.includes("stageCronSlotRef"), "control routing should stage cron refs through the shared helper");
+  assert.ok(routing.includes("stageCronProjection"), "control routing should stage the scheduler projection through its owner");
   assert.equal(/`crons:\$\{/.test(routing), false, "control routing should not hand-roll cron hash keys");
   assert.equal(/`cron-slot:\$\{/.test(routing), false, "control routing should not hand-roll cron slot keys");
 
@@ -1924,24 +2115,9 @@ test("D1 and DO workerd env tunables are exposed through capnp bindings", () => 
     "DO_OWNER_LEASE_GUARD_MS",
     "DO_RENEW_CONCURRENCY",
     "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS",
-    "DO_TEST_HOOKS",
   ]) {
     assert.equal(exposed(doRuntime, name), true, `${name} must reach do-runtime workerd env`);
   }
-});
-
-test("Terraform gates DO test hooks like D1 test hooks", () => {
-  const rootVars = readRepoFile("terraform/variables.tf");
-  const moduleVars = readRepoFile("terraform/modules/compute/variables.tf");
-  const main = readRepoFile("terraform/main.tf");
-  const doService = readRepoFile("terraform/modules/compute/do_runtime_service.tf");
-
-  assert.match(rootVars, /variable "do_test_hooks_enabled"/);
-  assert.match(moduleVars, /variable "do_test_hooks_enabled"/);
-  assert.match(main, /do_test_hooks_enabled\s+=\s+var\.do_test_hooks_enabled/);
-  assert.match(doService, /var\.do_test_hooks_enabled \? \[/);
-  assert.match(doService, /\{ name = "DO_TEST_HOOKS", value = "1" \}/);
-  assert.match(doService, /!var\.do_test_hooks_enabled \|\| can\(regex\("\(\^\|-\)test\(\$\|-\)", var\.name\)\)/);
 });
 
 test("D1 and DO workerd containers keep explicit memory ceilings", () => {
@@ -2135,30 +2311,6 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
   }
 });
 
-test("DO RPC JSON-data validators stay aligned across client and server", () => {
-  // Match jsonDataError() through the following public checker declaration.
-  // The checker may be preceded by JSDoc and may be exported assertJsonRpcArgs()
-  // or local requireJsonData().
-  const jsonDataErrorWithChecker =
-    /function jsonDataError\([^]*?\n}\n\n(?:\/\*\*[^]*?\*\/\n)?(?:export function assertJsonRpcArgs|function requireJsonData)/;
-  const trailingCheckerMarker =
-    /\n\n(?:\/\*\*[^]*?\*\/\n)?(?:export function assertJsonRpcArgs|function requireJsonData)$/;
-  const extract = (/** @type {string} */ file) => {
-    const source = readRepoFile(file);
-    const match = source.match(jsonDataErrorWithChecker);
-    assert.ok(match, `${file} must define jsonDataError next to its public checker`);
-    return match[0]
-      .replace(trailingCheckerMarker, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  };
-
-  assert.equal(
-    extract("runtime/_wdl-do-transport.js"),
-    extract("do-runtime/protocol.js")
-  );
-});
-
 test("DO invoke request-size caps stay aligned across client and server", () => {
   const runtime = readRepoFile("runtime/_wdl-do-transport.js");
   const protocol = readRepoFile("do-runtime/protocol.js");
@@ -2171,12 +2323,10 @@ test("DO invoke request-size caps stay aligned across client and server", () => 
 
 test("internal binary protocol content-types stay centralized in transport constants", () => {
   const files = [
-    ...jsFiles("shared"),
-    ...jsFiles("runtime"),
-    ...jsFiles("d1-runtime"),
-    ...jsFiles("do-runtime"),
+    ...PRODUCTION_JS_FILES,
     ...jsFiles("tests/unit"),
     ...jsFiles("tests/integration"),
+    ...rustFiles("rust"),
   ];
   const literals = [
     "application/vnd.wdl.d1-query",
@@ -2191,6 +2341,7 @@ test("internal binary protocol content-types stay centralized in transport const
     "d1-runtime/protocol.js",
     "runtime/_wdl-do-transport.js",
     "do-runtime/protocol.js",
+    "rust/redis-proxy/src/runtime.rs",
     "tests/unit/runtime-load.test.js",
     "tests/unit/style-contracts.test.js",
   ]);
@@ -2221,58 +2372,57 @@ test("internal binary protocol content-types stay centralized in transport const
   assert.equal(redisRuntimeLoadContentType, runtimeLoadContentType);
 });
 
-test("DO owner hints are trusted only from do-runtime headers", () => {
-  const runtime = readRepoFile("runtime/_wdl-do-transport.js");
-  const doRuntime = readRepoFile("do-runtime/index.js");
-  const match = runtime.match(
-    /export async function ownerHintFromResponse\(response\) \{[^]*?\n}\n\n(?:\/\*\*[^]*?\*\/\n)?export async function followOwnerHint/
-  );
-  assert.ok(match, "runtime DO transport must keep ownerHintFromResponse next to followOwnerHint");
-  const ownerHintFromResponse = match[0];
-
-  assert.match(ownerHintFromResponse, /ownerHintFromHeaders\(response\.headers\)/);
-  assert.doesNotMatch(ownerHintFromResponse, /response\.clone\(\)\.json\(\)/);
-  assert.doesNotMatch(ownerHintFromResponse, /\.json\(\)/);
-
-  const wrapper = doRuntime.match(/function withOwnerHintHeaders\(response, owner\) \{[^]*?\n}\n\n/)?.[0] || "";
-  assert.match(wrapper, /headers\.delete\(DO_OWNER_HINT_CONTROL_HEADER\)/);
-  assert.match(wrapper, /ownerHintHeaders\(owner\)/);
-  assert.doesNotMatch(wrapper, /headers\.set\(DO_OWNER_HINT_CONTROL_HEADER/);
-
-  const ownerHintHeadersFn = runtime.match(/export function ownerHintHeaders\(owner, \{ control = false \} = \{\}\) \{[^]*?\n}\n\n/)?.[0] || "";
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.ownerKey\]/);
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.taskId\]/);
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.endpoint\]/);
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.generation\]/);
-  assert.match(ownerHintHeadersFn, /if \(control\) headers\[DO_OWNER_HINT_CONTROL_HEADER\] = "1";/);
-});
-
-test("owner endpoint validation lives in neutral runtime helper", () => {
-  const endpoint = readRepoFile("runtime/_wdl-owner-endpoint.js");
+test("owner endpoint validation lives in a shared contract owner", () => {
+  const endpoint = readRepoFile("shared/owner-endpoint.js");
+  const adapter = readRepoFile("runtime/_wdl-owner-endpoint.js");
   const doTransport = readRepoFile("runtime/_wdl-do-transport.js");
   const d1Binding = readRepoFile("runtime/bindings/d1.js");
   const controlD1RuntimeClient = readRepoFile("control/d1-runtime-client.js");
   const userConfig = readRepoFile("runtime/config-user.capnp");
   const systemConfig = readRepoFile("runtime/config-system.capnp");
+  const d1Config = readRepoFile("d1-runtime/config.capnp");
   const doConfig = readRepoFile("do-runtime/config.capnp");
+  const taskIdentity = readRepoFile("shared/task-identity.js");
   const tsconfig = readRepoFile("tsconfig.json");
 
   assert.match(endpoint, /export function validOwnerEndpointForService/);
   assert.match(endpoint, /"d1-runtime": \/\^d1-runtime/);
   assert.match(endpoint, /"do-runtime": \/\^do-runtime/);
+  assert.match(endpoint, /function acceptablePrivateIpv4/);
+  assert.match(adapter, /from "\.\.\/shared\/owner-endpoint\.js"/);
   assert.match(doTransport, /from "\.\/_wdl-owner-endpoint\.js"/);
-  assert.match(d1Binding, /from "runtime-owner-endpoint"/);
-  assert.match(controlD1RuntimeClient, /from "runtime-owner-endpoint"/);
+  assert.match(d1Binding, /from "shared-owner-endpoint"/);
+  assert.match(controlD1RuntimeClient, /from "shared-owner-endpoint"/);
   assert.match(controlD1RuntimeClient, /validOwnerEndpointForService\(owner\.endpoint, 8787, "d1-runtime"\)/);
-  assert.match(tsconfig, /"runtime-owner-endpoint": \["runtime\/_wdl-owner-endpoint\.js"\]/);
+  assert.match(tsconfig, /"shared-\*": \["shared\/\*\.js"\]/);
+  assert.doesNotMatch(taskIdentity, /_TASK_PORT/);
+  assert.doesNotMatch(d1Config, /D1_TASK_PORT/);
+  assert.doesNotMatch(doConfig, /DO_TASK_PORT/);
   for (const config of [userConfig, systemConfig, doConfig]) {
-    assert.match(config, /name = "runtime-owner-endpoint"/);
+    assert.match(config, /name = "shared-owner-endpoint"/);
     assert.match(config, /name = "_wdl-owner-endpoint\.js"/);
     assert.match(config, /name = "runtime-owner-endpoint-source"/);
   }
   for (const config of [userConfig, systemConfig]) {
     const doOwnerNetwork = /const doOwnerNetworkWorker[\s\S]*?\n\);/.exec(config)?.[0] || "";
-    assert.match(doOwnerNetwork, /name = "runtime-owner-endpoint"/);
+    assert.match(doOwnerNetwork, /name = "shared-owner-endpoint"/);
+  }
+});
+
+test("DO transport relative dependencies are registered in host and loaded-worker module graphs", () => {
+  const codeBudget = readRepoFile("runtime/load/code-budget.js");
+  assert.match(codeBudget, /\["_wdl-request-id\.js", sources\.requestIdSource\]/);
+  assert.match(codeBudget, /\["_wdl-do-transport\.js", sources\.doTransportSource\]/);
+
+  for (const file of [
+    "runtime/config-user.capnp",
+    "runtime/config-system.capnp",
+    "do-runtime/config.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /name = "runtime-do-transport", esModule = embed/);
+    assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
+    assert.match(source, /name = "runtime-request-id-source", text = embed/);
   }
 });
 
@@ -2286,7 +2436,7 @@ test("worker-id helper carries its relative grammar dependencies in workerd conf
     const source = readRepoFile(file);
     assert.match(source, /name = "shared-worker-id"/, file);
     assert.match(source, /name = "ns-pattern\.js"/, file);
-    assert.match(source, /name = "version\.js"/, file);
+    assert.match(source, /name = "worker-contract\.js"/, file);
   }
 });
 

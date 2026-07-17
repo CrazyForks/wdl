@@ -411,9 +411,8 @@ Manager secrets.
 
 ### Test Hooks
 
-`d1_test_hooks_enabled` and `do_test_hooks_enabled` default to `false` and are
-guarded to test-named compute stacks. Keep both disabled for normal live-ready
-service state.
+`d1_test_hooks_enabled` defaults to `false` and is guarded to test-named compute
+stacks. Keep it disabled for normal live-ready service state.
 
 ## Validation
 

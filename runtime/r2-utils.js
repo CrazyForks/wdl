@@ -3,6 +3,45 @@ export const R2_LIST_LIMIT_MAX = 1000;
 // Keep in sync with shared/ns-pattern.js. This file is embedded into loaded
 // workers as _wdl-r2-utils.js, so it must stay standalone.
 export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const R2_HTTP_METADATA_FIELDS = Object.freeze([
+  Object.freeze(["contentType", "content-type"]),
+  Object.freeze(["contentLanguage", "content-language"]),
+  Object.freeze(["contentDisposition", "content-disposition"]),
+  Object.freeze(["contentEncoding", "content-encoding"]),
+  Object.freeze(["cacheControl", "cache-control"]),
+]);
+const R2_IMF_FIXDATE_RE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
+/** @param {Headers} headers @param {{ canonical?: boolean }} [options] */
+export function r2CacheExpiryFromHeaders(headers, { canonical = false } = {}) {
+  const expires = headers.get("expires");
+  if (!expires) return undefined;
+  const ms = new Date(expires).getTime();
+  if (canonical && (
+    !R2_IMF_FIXDATE_RE.test(expires) ||
+    !Number.isFinite(ms) ||
+    new Date(ms).toUTCString() !== expires
+  )) return undefined;
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** @param {Headers} headers @param {unknown} value */
+export function setR2CacheExpiryHeader(headers, value) {
+  if (value == null) return;
+  let date;
+  if (value instanceof Date || typeof value === "number") {
+    date = new Date(value);
+  } else if (typeof value === "string" && value.trim() !== "") {
+    const timestamp = Number(value);
+    date = new Date(Number.isFinite(timestamp) ? timestamp : value);
+  } else {
+    throw new TypeError("R2 httpMetadata.cacheExpiry must be a valid Date or timestamp");
+  }
+  if (!Number.isFinite(date.getTime())) {
+    throw new TypeError("R2 httpMetadata.cacheExpiry must be a valid Date or timestamp");
+  }
+  headers.set("expires", date.toUTCString());
+}
 
 /**
  * @param {unknown} bucketName

@@ -82,7 +82,9 @@ CLI output may display:
   the value without trying to reconstruct it from package metadata.
 - `minCliVersion`: the minimum downstream CLI version supported by this platform build.
 - `urls.control`: the control origin that the request actually reached.
-- `urls.namespace`: the tenant namespace origin, returned only for namespace tokens.
+- `urls.namespace`: the tenant namespace origin, returned only for namespace tokens when
+  the platform explicitly configures `PLATFORM_DOMAIN`; Control does not validate that
+  the configured hostname is publicly reachable.
 - `urls.assets`: the configured public assets base URL, returned only when the control
   plane has a safe absolute `http`/`https` `ASSETS_CDN_BASE`; query and fragment are
   stripped before returning the hint.
@@ -148,7 +150,7 @@ Supported config surfaces:
 
 | Field | WDL behavior |
 |---|---|
-| `name`, `main`, `compatibility_date`, `compatibility_flags` | Stored in immutable bundle metadata. Control rejects malformed, future, or bundled-workerd-unsupported `compatibility_date` values before commit; final WorkerCode, including runtime/do-runtime-injected modules and generated workflow keys, must fit workerd's 64 MiB `workerLoader` code limit. |
+| `name`, `main`, `compatibility_date`, `compatibility_flags` | Stored in immutable bundle metadata. Control rejects supplied `compatibility_date` values earlier than `2026-04-01`, as well as malformed, future, or bundled-workerd-unsupported values, before commit; final WorkerCode, including runtime/do-runtime-injected modules and generated workflow keys, must fit workerd's 64 MiB `workerLoader` code limit. |
 | `[vars]` | String, number, and boolean values are accepted and stringified into `env`; vars, namespace/worker secrets, and runtime-injected binding/workflow env values must fit WDL's headroomed workerd 1 MiB `workerLoader` env budget. |
 | `[[kv_namespaces]]` | `id` is a platform-local KV namespace id, not a Cloudflare UUID. |
 | `[[r2_buckets]]` | `binding` plus `bucket_name` become a namespace-scoped virtual R2 bucket under the platform S3 bucket. |
@@ -171,10 +173,11 @@ would imply platform behavior WDL does not implement.
 The downstream CLI may expose these surfaces with its own command shape, but the
 platform-side behavior is fixed:
 
-- Worker listing reads active versions, retained versions, and secret-only entries from
-  control.
-- Worker deletion hard-deletes routes, retained versions, worker secrets, queue
-  consumers, and crons, then stages asset cleanup after the Redis commit.
+- Worker listing reads active versions, retained versions, secret-only entries, and
+  workflow-definitions-only entries from control.
+- Worker deletion hard-deletes routes, retained versions, worker secrets, workflow
+  definitions, queue consumers, and crons, then stages asset cleanup after the Redis
+  commit.
 - Version deletion hard-deletes one retained non-active version.
 - Secret mutation requires an explicit worker scope or namespace scope. Namespace-wide
   writes must not be accidental. A submitted empty string is a set secret, not unset.
