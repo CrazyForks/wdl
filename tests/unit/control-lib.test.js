@@ -10,6 +10,7 @@ import {
 } from "../../shared/ns-pattern.js";
 import {
   MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  WDL_UNSUPPORTED_COMPAT_FLAGS,
   WORKERD_EXPERIMENTAL_COMPAT_FLAGS,
   WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION,
 } from "../../shared/workerd-compat-flags.js";
@@ -844,6 +845,23 @@ test("prepareBundle: experimental workerd compatibility flags are rejected", () 
   );
 });
 
+test("prepareBundle: WDL-unsupported workerd compatibility flags are rejected", () => {
+  assert.throws(
+    () => prepareBundle(
+      "w.js",
+      { "w.js": "x" },
+      { compatibilityFlags: ["allow_irrevocable_stub_storage"] }
+    ),
+    (err) => {
+      if (!(err instanceof Error)) return false;
+      const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
+      return coded.code === "compatibility_flag_unsupported" &&
+        coded.status === 400 &&
+        coded.message.includes("allow_irrevocable_stub_storage");
+    }
+  );
+});
+
 test("prepareBundle: rejects legacy error serialization", () => {
   for (const compatibilityDate of ["2026-04-20", "2026-04-21", undefined]) {
     assert.throws(
@@ -951,7 +969,11 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION, WORKERD_VERSION, regenerate);
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("experimental"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unsafe_module"));
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 33);
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260610"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("enable_nodejs_inspector_local_dev"));
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 34);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("allow_irrevocable_stub_storage"), false);
+  assert.deepEqual(WDL_UNSUPPORTED_COMPAT_FLAGS, ["allow_irrevocable_stub_storage"]);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);
   assert.equal(
     WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nonclass_entrypoint_reuses_ctx_across_invocations"),

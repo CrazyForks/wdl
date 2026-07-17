@@ -16,7 +16,7 @@ import {
   generateHostBindingWrapperModule,
 } from "runtime-load-wrapper-generate";
 
-// Mirrors workerd v1.20260701.1
+// Mirrors workerd v1.20260717.1
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_CODE_SIZE.
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 

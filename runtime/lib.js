@@ -9,6 +9,7 @@ import {
   ENHANCED_ERROR_SERIALIZATION_FLAG,
   LEGACY_ERROR_SERIALIZATION_FLAG,
   MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  isWdlUnsupportedCompatFlag,
   isWorkerdExperimentalCompatFlag,
 } from "shared-workerd-compat-flags";
 
@@ -149,6 +150,11 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
     if (isWorkerdExperimentalCompatFlag(f)) {
       throw new Error(
         `meta.compatibilityFlags contains experimental workerd flag ${JSON.stringify(f)}, which WDL does not support for tenant workers`
+      );
+    }
+    if (isWdlUnsupportedCompatFlag(f)) {
+      throw new Error(
+        `meta.compatibilityFlags contains unsupported WDL flag ${JSON.stringify(f)}`
       );
     }
     if (f === LEGACY_ERROR_SERIALIZATION_FLAG) {

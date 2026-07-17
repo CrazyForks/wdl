@@ -291,6 +291,12 @@ recovery after the initial 101.
   over by lease expiry.
 - EFS shared storage is safe only because owner lease + generation fence keep one writer
   per owner scope.
+- A best-effort downgrade of a localDisk volume from workerd 2026-07-03 or later to
+  2026-07-01 should apply the scheduler-metadata cleanup documented in the
+  [infra rollout notes](infra.md#deployment--rollout-notes).
+- That cleanup restores process startup only. Before downgrading to workerd
+  2026-07-01, rewrite or delete any `Blob` values persisted through
+  `ctx.storage.put()` because that runtime cannot deserialize them.
 - Drain and renew must target the local `127.0.0.1:8788` service. A Service Connect or
   Kubernetes service alias may hit a different task and cannot express local-owner
   release semantics.

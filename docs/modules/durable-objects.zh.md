@@ -126,6 +126,8 @@ do-runtime 围绕 owner resolution、dispatch、alarm execution、drain、renew 
 - DO binding transport shape 改变时，do-runtime 应与 user/system runtime 一起滚。
 - workerd 进程终止前应先 drain，让 owned shard 释放，或通过 lease expiry failover。
 - EFS shared storage 只有在 owner lease + generation fence 保证每个 owner scope 单 writer 时才安全。
+- Best-effort 尝试把 localDisk volume 从 workerd 2026-07-03 或更高版本降回 2026-07-01 时，应执行 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 scheduler metadata cleanup。
+- 这项 cleanup 只恢复进程启动。降回 workerd 2026-07-01 前，必须重写或删除通过 `ctx.storage.put()` 持久化的 `Blob`，因为该版本无法反序列化这些值。
 - Drain 和 renew 必须打本地 `127.0.0.1:8788` service。Service Connect 或 Kubernetes service alias 可能命中其他 task，不能表达 local-owner release semantics。
 
 ## 保护该模块的测试

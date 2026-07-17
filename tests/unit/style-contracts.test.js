@@ -1730,7 +1730,7 @@ test("local compose routes private HTTP hops through Envoy only", () => {
       new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin`),
     );
   }
-  // workerd 2026-07-01 still gates workerLoader bindings on the process-level
+  // workerd 2026-07-17 still gates workerLoader bindings on the process-level
   // --experimental switch. Keep it only on workerLoader-owning processes, not
   // on gateway or D1 and not as a Worker compatibility flag.
   for (const tier of ["user-runtime-local", "system-runtime-local"]) {
@@ -1750,10 +1750,13 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
   assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
   for (const file of [
+    "gateway/config.capnp",
+    "gateway/config-local.capnp",
     "runtime/config-user.capnp",
     "runtime/config-user-local.capnp",
     "runtime/config-system.capnp",
     "runtime/config-system-local.capnp",
+    "d1-runtime/config.capnp",
     "do-runtime/config.capnp",
     "do-runtime/config-local.capnp",
   ]) {
@@ -1762,6 +1765,11 @@ test("local compose routes private HTTP hops through Envoy only", () => {
       source,
       /compatibilityFlags\s*=\s*\[[^\]]*"experimental"/,
       `${file} must not re-add the tenant experimental compatibility flag`
+    );
+    assert.doesNotMatch(
+      source,
+      /allow_irrevocable_stub_storage/,
+      `${file} must not enable irrevocable long-term stub storage`
     );
   }
   // The supervisor config owns the local/production .bin choice; only it

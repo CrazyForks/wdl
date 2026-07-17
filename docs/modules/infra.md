@@ -209,6 +209,34 @@ scheduler/workflows traffic. Configure the old value as
 across all private services, roll/restart the private fleet together, then clear
 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN` with a second roll after the fleet converges.
 
+WDL does not generally guarantee binary, runtime, configuration, schema, or storage
+downgrades. The notes below identify known hazards and best-effort recovery steps; they
+are not an exhaustive or guaranteed rollback procedure.
+
+When attempting a workerd downgrade, verify that every retained Dynamic Worker version
+uses a `compatibility_date` no later than the maximum supported by the target binary.
+Redeploy or remove incompatible retained versions before restoring traffic; runtime
+health checks do not cold-load every retained bundle.
+
+The workerd 2026-07-17 stateful-runtime upgrade is forward-only relative to
+2026-07-01. Starting any workerd 2026-07-03 or later adds an `actor_name` column to
+the native alarm scheduler's `_cf_ALARM` table in each localDisk `metadata.sqlite`;
+2026-07-01 then fails during startup against that schema. Forward upgrades need no
+operator action. For a best-effort downgrade of D1 or DO to 2026-07-01:
+
+1. Stop every D1 and DO runtime that shares the affected localDisk volumes.
+2. Delete only `metadata.sqlite`, `metadata.sqlite-wal`, and `metadata.sqlite-shm`
+   under `/data/d1/wdl-d1-storage-v1/` and `/data/do/wdl-do-host-v1/`.
+3. Start the 2026-07-01 runtimes and verify their health before restoring traffic.
+
+Those files contain workerd's native alarm scheduler metadata, which WDL does not use;
+WDL DO alarms are Workflows-backed. Do not delete the per-actor `*.sqlite` databases.
+This cleanup restores process startup only; it does not make per-actor data backward
+compatible. Workerd 2026-07-17 can persist `Blob` values through
+`ctx.storage.put()`, while 2026-07-01 cannot deserialize them. Rewrite such values to
+a 2026-07-01-compatible type or delete them before downgrade; otherwise the older
+runtime cannot read the affected DO storage values.
+
 For Terraform test, prefer Terraform-managed changes instead of manual rolling
 operations unless explicitly debugging.
 

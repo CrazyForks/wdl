@@ -31,17 +31,31 @@ Each row separates four compatibility claims:
 |---|---|---|---|---|---|
 | ES module Workers and `fetch()` | Supported | Module evaluation, request dispatch, `Response`/`Request`, service binding JSRPC machinery. | Dynamic `workerLoader`, immutable version ids, wrapper-generated `env`, gateway routing, request logs, and public/private outbound separation. | An uncaught tenant `fetch()` exception maps to platform `502 runtime_error`; exception detail goes to structured logs/live tail, not the client body. | WDL does not emulate every compatibility-date behavior change; workerd is configured with the platform's enabled flags. |
 | WebSocket upgrade | Supported | WebSocket API and 101 response handling inside workerd. | Gateway `GatewayWsHolder` Durable Object holds public sockets and forwards to runtime/do-runtime so long-lived 101s do not live on ordinary gateway request IoContexts. | WDL optimizes for preserving long-lived gateway-held sockets, while Cloudflare can rely on its global edge session model. | Gateway rolling still drops physical client sockets; application-level resume is not implemented. |
-| `compatibility_date` / `compatibility_flags` | Partial | workerd feature flags and compatibility behavior where configured in capnp. | CLI/control stores bundle metadata. Dynamic Workers reject explicit `compatibility_date` values earlier than `2026-04-01`; Control also validates that the value is a real `YYYY-MM-DD` date that is not later than the current UTC date or the maximum date supported by the bundled workerd, rejects upstream `$experimental` enable flags such as `experimental` / `unsafe_module`, and rejects `legacy_error_serialization`. Workerd owns validation of redundant or otherwise incompatible upstream flags at cold load. | WDL treats compatibility metadata as deploy-time platform metadata rather than a complete per-worker historical emulation layer. | No per-worker emulation of every Cloudflare historical behavior; tenant workers cannot opt into upstream experimental-only flags or disable WDL's required enhanced error serialization. |
+| `compatibility_date` / `compatibility_flags` | Partial | workerd feature flags and compatibility behavior where configured in capnp. | CLI/control stores bundle metadata. Dynamic Workers reject explicit `compatibility_date` values earlier than `2026-04-01`; Control also validates that the value is a real `YYYY-MM-DD` date that is not later than the current UTC date or the maximum date supported by the bundled workerd, rejects upstream `$experimental` enable flags such as `experimental` / `unsafe_module`, and rejects `legacy_error_serialization` plus `allow_irrevocable_stub_storage`. Workerd owns validation of redundant or otherwise incompatible upstream flags at cold load. | WDL treats compatibility metadata as deploy-time platform metadata rather than a complete per-worker historical emulation layer. | No per-worker emulation of every Cloudflare historical behavior; tenant workers cannot opt into upstream experimental-only flags, disable WDL's required enhanced error serialization, or persist irrevocable capability stubs. |
 | `nodejs_compat` | Partial | workerd-provided compatibility when the runtime service has the flag enabled. | CLI carries compatibility flags into metadata. | WDL exposes the workerd-enabled compatibility surface rather than a separate Node.js runtime. | This is not a full Node.js platform contract beyond workerd's enabled surface. |
 | Python Workers modules | Not supported | workerd has an experimental Python Workers path. | Control rejects `py` module manifests with `python_workers_unsupported`; runtime and do-runtime also fail closed for retained metadata containing `py` modules. | WDL keeps tenant bundles JavaScript/WebAssembly/data only and does not permit cold-load-time Pyodide bootstrap. | Python Workers and mixed JS/Python bundles are unsupported. |
 
-Node.js TLS behavior follows the bundled workerd binary. With the 2026-07-01
+WDL does not generally guarantee workerd downgrades. As best-effort guidance, a target
+binary can cold-load a retained Dynamic Worker version only when it supports that
+version's `compatibility_date`; see the
+[infra rollout notes](modules/infra.md#deployment--rollout-notes).
+
+Node.js TLS behavior follows the bundled workerd binary. With the 2026-07-17
 workerd pin, workers whose compatibility date is at least 2026-06-16 get
 `throw_on_not_implemented_tls_options`: unsupported `node:tls` options such as
 `checkServerIdentity` now throw `ERR_OPTION_NOT_IMPLEMENTED` instead of being silently
 ignored. Separately, workerd's `servername` / expected-certificate-hostname behavior
 changed outside any compatibility flag, so certificate hostname validation follows the
 bundled workerd behavior for all dates.
+
+Bundled workerd permits `Fetcher` and Durable Object class stubs to cross JSRPC as
+opaque arguments without an experimental flag. WDL treats possession of such a stub
+as capability delegation: the receiver can call the delegated target with the
+host-authored caller properties embedded in that stub, but cannot rewrite those
+properties or recover hidden platform backend capabilities. This delegation may live
+in memory, but WDL rejects `allow_irrevocable_stub_storage` at deploy and retained-state
+load, and static host workers do not enable it, so long-term stub persistence is not a
+supported WDL surface.
 
 ## Bindings And Storage
 
@@ -80,7 +94,7 @@ docs:
 | Workers AI, Vectorize, Analytics Engine, Browser Rendering, Hyperdrive, Email Workers | Not supported | No binding facade, control-plane metadata, or backing service exists in WDL. |
 | R2 multipart upload, customer-provided encryption keys, and Cloudflare-specific checksum behavior | Not supported | The current R2 facade targets S3-compatible object operations needed by WDL workers/assets. Advanced Cloudflare R2 behaviors need explicit design before being documented as compatible. |
 | Queue `contentType = "v8"` and per-consumer `max_concurrency` | Not supported | Queue messages support the documented `json`, `text`, and `bytes` content types; only `v8` is rejected. Dispatch concurrency remains scheduler-owned, and `max_concurrency` is rejected instead of silently ignored. |
-| Upstream experimental compatibility flags | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental` are rejected at deploy and runtime decode. |
+| Upstream experimental compatibility flags and irrevocable stub storage | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit `allow_irrevocable_stub_storage` deny policy, are rejected at deploy and runtime decode. |
 | Python Workers | Not supported | WDL rejects Python module manifests instead of letting workerd fail at cold-load. |
 | Durable Object cross-script bindings and migration rename/delete semantics | Not supported | WDL DO classes are same-worker only. Storage identity, owner routing, and delete cleanup are WDL-managed rather than Cloudflare migration-compatible. |
 | Cloudflare account API parity | Not supported | WDL exposes its own CLI/control API. Cloudflare API compatibility is not a stated goal. |

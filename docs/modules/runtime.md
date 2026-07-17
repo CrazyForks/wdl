@@ -263,21 +263,19 @@ when a matching active tail session exists.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
   Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline.
-- Removing the broad loaded-worker `experimental` flag intentionally removes access to
-  non-GA experimental-only tenant surfaces, such as irrevocable long-term stub storage.
-  Do not re-enable it as a compatibility workaround without an explicit feature design.
-- Control rejects upstream `$experimental` compatibility enable flags at deploy, and
-  runtime rejects retained metadata that still contains them. Disable-style flags such
-  as `no_*` are not part of that mirror unless upstream marks the enable flag itself
-  experimental.
+- Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
+  `allow_irrevocable_stub_storage` deny policy at deploy; runtime rejects retained
+  metadata containing either class. Static host workers also omit the irrevocable-stub
+  flag. Disable-style flags such as `no_*` are not part of the experimental mirror unless
+  upstream marks the enable flag itself experimental.
 - Python Workers modules are not supported. Control rejects new `py` module manifests,
   and runtime/do-runtime reject retained metadata that contains them instead of letting
   workerd fail later with a mixed JS/Python bundle error.
 - The runtime workerd processes still run with process-level `--experimental` because
-  upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
+  upstream workerd 2026-07-17 continues to gate `workerLoader` bindings on that switch.
   Do not add the `experimental` compatibility flag or `allowExperimental` to loaded
   WorkerCode unless another upstream API explicitly requires it.
-- Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
+- Upstream workerd 2026-07-17 caps dynamic worker code at 64 MiB and serialized dynamic
   env at 1 MiB. Control estimates final WorkerCode before version allocation and again
   after commit metadata materialization, including runtime/do-runtime-injected
   wrapper/client modules, workflow import rewrites, and generated workflow keys. Vars,

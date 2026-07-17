@@ -69,7 +69,7 @@
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | Platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、module path、reserved object-key 和 reserved namespace grammars。 |
 | `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner-scope key 与 route invalidation channel helpers。 |
-| `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期和 error-serialization policy。 |
+| `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期、unsupported-flag 和 error-serialization policy。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire 和 SQL splitting utilities。 |

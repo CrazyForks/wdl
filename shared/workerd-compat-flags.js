@@ -1,16 +1,17 @@
 /*
- * The experimental flags mirror workerd v1.20260701.1
+ * The experimental flags mirror workerd v1.20260717.1
  * src/workerd/io/compatibility-date.capnp. Refresh them on every workerd pin
  * bump from an upstream source checkout:
  *
  * node scripts/extract-workerd-experimental-compat-flags.mjs \
  *   /path/to/workerd/src/workerd/io/compatibility-date.capnp
  *
- * The dynamic-worker minimum/default dates and required error-serialization
- * behavior below are WDL policy rather than upstream mirror data.
+ * The dynamic-worker minimum/default dates, unsupported flags, and required
+ * error-serialization behavior below are WDL policy rather than upstream
+ * mirror data.
  */
 
-export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260701.1";
+export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260717.1";
 
 // WDL supports one forward-only dynamic-worker compatibility surface. Static
 // platform workers keep their independently pinned workerd service dates.
@@ -20,9 +21,14 @@ export const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
 export const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
 export const LEGACY_ERROR_SERIALIZATION_FLAG = "legacy_error_serialization";
 
+// Upstream no longer marks this flag experimental, but WDL does not expose
+// irrevocable long-term persistence for tenant-visible capability stubs.
+export const WDL_UNSUPPORTED_COMPAT_FLAGS = Object.freeze([
+  "allow_irrevocable_stub_storage",
+]);
+
 export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "allow_insecure_inefficient_logged_eval",
-  "allow_irrevocable_stub_storage",
   "auto_grpc_convert",
   "cache_reload_enabled",
   "connect_pass_through",
@@ -31,6 +37,7 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "enable_abortsignal_rpc",
   "enable_ctx_version_metadata",
   "enable_d1_with_sessions_api",
+  "enable_nodejs_inspector_local_dev",
   "enable_version_api",
   "enable_web_file_system",
   "experimental",
@@ -40,6 +47,7 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "memory_cache_delete",
   "new_module_registry",
   "precise_timers",
+  "python_workers_20260610",
   "python_workers_development",
   "python_workers_durable_objects",
   "replica_routing",
@@ -57,6 +65,7 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
 ]);
 
 const WORKERD_EXPERIMENTAL_COMPAT_FLAG_SET = new Set(WORKERD_EXPERIMENTAL_COMPAT_FLAGS);
+const WDL_UNSUPPORTED_COMPAT_FLAG_SET = new Set(WDL_UNSUPPORTED_COMPAT_FLAGS);
 
 /** @param {unknown} flag */
 export function isWorkerdExperimentalCompatFlag(flag) {
@@ -68,6 +77,20 @@ export function firstWorkerdExperimentalCompatFlag(flags) {
   if (!Array.isArray(flags)) return null;
   for (const flag of flags) {
     if (isWorkerdExperimentalCompatFlag(flag)) return flag;
+  }
+  return null;
+}
+
+/** @param {unknown} flag */
+export function isWdlUnsupportedCompatFlag(flag) {
+  return typeof flag === "string" && WDL_UNSUPPORTED_COMPAT_FLAG_SET.has(flag);
+}
+
+/** @param {unknown} flags */
+export function firstWdlUnsupportedCompatFlag(flags) {
+  if (!Array.isArray(flags)) return null;
+  for (const flag of flags) {
+    if (isWdlUnsupportedCompatFlag(flag)) return flag;
   }
   return null;
 }

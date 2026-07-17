@@ -10,12 +10,30 @@ Rust, tests, docs, and deployment code.
 The explicit baselines are part of the project contract:
 
 - JavaScript targets ES2025 on Node 24.
-- Rust targets Edition 2024 on Rust 1.96.
+- Rust targets Edition 2024 on Rust 1.97.
 
 Do not reintroduce older spellings when the repository already has a modern standard
 for the same operation. If a dependency, runtime, or build image blocks the modern
 form, keep the local exception narrow and document the reason in the owning module or
 review notes.
+
+## Upgrade And Downgrade Policy
+
+Unless an owning contract explicitly states otherwise, WDL is forward-only and
+greenfield-oriented for software, runtime, configuration, schema, and persisted-state
+evolution. The default project contract covers upgrades to the current supported
+state; it does not guarantee that older binaries or configuration readers can consume
+newer wire formats, storage encodings, or persisted state after a downgrade.
+
+Downgrade steps and known hazards recorded in active documentation are best-effort
+operator guidance. They may reduce risk, but they are not an exhaustive migration
+path, a tested rollback guarantee, or a compatibility promise. Add backward-compatible
+readers, dual formats, or downgrade tooling only when an explicit external rollout
+requirement justifies the extra contract and complexity.
+
+This policy does not change product-level rollback APIs that explicitly promote an
+older immutable Worker version; those remain supported according to their owning
+module contracts.
 
 ## Contract Ownership
 

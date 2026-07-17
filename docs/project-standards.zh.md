@@ -7,9 +7,17 @@
 显式语言基线是项目合同的一部分：
 
 - JavaScript 以 Node 24 上的 ES2025 为目标。
-- Rust 以 Rust 1.96 上的 Edition 2024 为目标。
+- Rust 以 Rust 1.97 上的 Edition 2024 为目标。
 
 当仓库已经对同一操作形成现代写法时，不要重新引入旧写法。如果 dependency、runtime 或 build image 阻止使用现代形式，应把例外限制在局部，并在 owning module 或 review notes 里说明原因。
+
+## 升级与降级政策
+
+除非 owning contract 另有明确约定，WDL 的软件、runtime、配置、schema 和持久化状态演进遵循 forward-only、近似 greenfield 的原则。项目默认合同只覆盖升级到当前受支持状态，不保证降级后旧 binary 或旧配置 reader 能消费较新的 wire format、storage encoding 或持久化状态。
+
+Active 文档中记录的降级步骤和已知风险仅是 best-effort 运维参考。它们可以降低风险，但不构成完整 migration path、经过验证的 rollback 保证或兼容性承诺。只有明确的外部 rollout 要求足以承担新增合同和复杂度时，才增加向后兼容 reader、双格式或降级工具。
+
+这项政策不影响产品层明确支持的 rollback API，例如把 route promote 回较旧的 immutable Worker version；这类能力仍以 owning module contract 为准。
 
 ## 合同所有权
 

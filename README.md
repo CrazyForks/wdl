@@ -160,7 +160,7 @@ a smoke worker. The compile step is required on a fresh clone because compose
 bind-mounts `./dist` over the image's built configs.
 
 ```bash
-npm install -g @wdl-dev/cli@1.4.0
+npm install -g @wdl-dev/cli@1.4.1
 npm ci
 npm install --ignore-scripts --prefix test-workers/hello-jsonc
 npm run compile:workerd:local

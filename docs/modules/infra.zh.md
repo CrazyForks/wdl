@@ -119,6 +119,19 @@ runtime internal protocol 变化时的常见顺序：
 
 Internal auth 轮换采用双读单写，但它不是 rolling-safe 协议：caller 始终只发送 `WDL_INTERNAL_AUTH_TOKEN`，receiver 接受当前值和可选 previous 值。应在维护窗口内轮换，或先暂停 scheduler/workflows traffic。把旧值配置为 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`、新值配置为 `WDL_INTERNAL_AUTH_TOKEN`，一起重启/滚动所有 private service；确认全量收敛后，再清空 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN` 并第二次滚动。
 
+WDL 通常不保证 binary、runtime、配置、schema 或 storage 降级。以下内容只列出已知风险和 best-effort 恢复步骤，不是完整或有保证的 rollback 流程。
+
+尝试降级 workerd 时，应确认所有 retained Dynamic Worker version 的 `compatibility_date` 不晚于目标 binary 支持的最大日期。恢复流量前，应重新部署或删除不兼容的 retained version；runtime health check 不会 cold-load 每个 retained bundle。
+
+workerd 2026-07-17 的 stateful-runtime 升级相对 2026-07-01 是 forward-only。任何 2026-07-03 或更高版本首次启动后，都会在各 localDisk `metadata.sqlite` 的 native alarm scheduler `_cf_ALARM` 表中增加 `actor_name` 列；2026-07-01 随后无法用该 schema 启动。前向升级不需要 operator 操作。尝试把 D1 或 DO best-effort 降回 2026-07-01 时：
+
+1. 停止共享相关 localDisk volume 的全部 D1 和 DO runtime。
+2. 只删除 `/data/d1/wdl-d1-storage-v1/` 和 `/data/do/wdl-do-host-v1/` 下的 `metadata.sqlite`、`metadata.sqlite-wal`、`metadata.sqlite-shm`。
+3. 启动 2026-07-01 runtime，确认健康后再恢复流量。
+
+这些文件只承载 workerd native alarm scheduler metadata，而 WDL 不使用该 scheduler；WDL DO alarm 由 Workflows 承载。不要删除 per-actor `*.sqlite` database。
+这项清理只恢复进程启动，不保证 per-actor 数据向后兼容。workerd 2026-07-17 可以通过 `ctx.storage.put()` 持久化 `Blob`，而 2026-07-01 无法反序列化。降级前应把这些值重写成 2026-07-01 兼容的类型或删除；否则旧 runtime 无法读取受影响的 DO storage value。
+
 Terraform test 环境优先用 Terraform-managed change，不要用手动 rolling 替代，除非是在明确 debug。
 
 ## 保护该模块的测试

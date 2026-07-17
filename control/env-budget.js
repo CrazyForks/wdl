@@ -33,7 +33,7 @@ const ESTIMATED_RUNTIME_CONTEXT = Object.freeze({
   }),
 });
 
-// Mirrors workerd v1.20260701.1
+// Mirrors workerd v1.20260717.1
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_ENV_SIZE.
 export const UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES = 1024 * 1024;
 // Absorbs WDL's JSON-vs-V8 estimator noise and small platform-injected fields

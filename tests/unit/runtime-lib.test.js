@@ -498,6 +498,22 @@ test("bundleToWorkerCode: experimental workerd compatibility flags fail closed",
   );
 });
 
+test("bundleToWorkerCode: WDL-unsupported compatibility flags fail closed", () => {
+  assert.throws(
+    () => bundleToWorkerCode(
+      mkBundle(
+        {
+          mainModule: "w.js",
+          compatibilityFlags: ["allow_irrevocable_stub_storage"],
+          modules: { "w.js": { type: "module" } },
+        },
+        { "w.js": enc.encode("x") }
+      )
+    ),
+    /meta\.compatibilityFlags contains unsupported WDL flag "allow_irrevocable_stub_storage"/
+  );
+});
+
 test("bundleToWorkerCode: missing __meta__ throws", () => {
   assert.throws(
     () => bundleToWorkerCode({ "worker.js": enc.encode("x") }),

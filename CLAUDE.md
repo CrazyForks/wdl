@@ -114,6 +114,12 @@ shared crate `wdl-rust-common`.
   convergence, not a new abstraction.
 - Do not add fake old/new protocol fallback for in-tree tiers that ship together unless
   there is a real external rollout requirement.
+- Unless an owning contract explicitly says otherwise, WDL software, runtime, config,
+  schema, and persisted-state evolution is forward-only and greenfield-oriented.
+  Downgrade instructions are best-effort operational guidance, not exhaustive or
+  guaranteed compatibility. Do not add backward-compatibility machinery solely to
+  support downgrade. This does not change product APIs that explicitly promote an
+  older immutable Worker version.
 - Write active repository docs as final-state contracts, not as a history of branch
   iterations or rejected approaches. Tests should protect observable behavior and
   durable boundaries; do not pin a refactor's implementation shape unless that shape is
@@ -132,7 +138,7 @@ shared crate `wdl-rust-common`.
   pinned by `tests/fixtures/*.json` read on both sides plus
   `tests/unit/style-contracts.test.js`; change both sides and the fixture together.
 - Use the explicit language baselines by default: JavaScript targets ES2025 on Node 24,
-  and Rust targets Edition 2024 on Rust 1.96. Do not reintroduce older spellings when
+  and Rust targets Edition 2024 on Rust 1.97. Do not reintroduce older spellings when
   the repository standard already uses a modern API or syntax. Cross-language rules
   live in `docs/project-standards.md`; language-specific rules live in
   `docs/workerd-js-standards.md` and `docs/rust-sidecar-standards.md`.

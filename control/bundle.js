@@ -15,6 +15,7 @@ import {
 import {
   LEGACY_ERROR_SERIALIZATION_FLAG,
   MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  firstWdlUnsupportedCompatFlag,
   firstWorkerdExperimentalCompatFlag,
 } from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
@@ -171,6 +172,14 @@ function validateCompatibilityFlags(flags) {
       400,
       "experimental_compat_flag_unsupported",
       `compatibilityFlags contains experimental workerd flag ${JSON.stringify(experimentalFlag)}, which WDL does not support for tenant workers`
+    );
+  }
+  const unsupportedFlag = firstWdlUnsupportedCompatFlag(flags);
+  if (unsupportedFlag) {
+    throw new BundleConfigError(
+      400,
+      "compatibility_flag_unsupported",
+      `compatibilityFlags contains unsupported WDL flag ${JSON.stringify(unsupportedFlag)}`
     );
   }
   if (flags.includes(LEGACY_ERROR_SERIALIZATION_FLAG)) {
