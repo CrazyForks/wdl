@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## wdl.20260718.1 - 2026-07-19
+
 - Upgraded the bundled runtime to workerd `1.20260718.1` and Workers types `5.20260718.1`; this date-only upstream release extends the maximum compatibility date to `2026-07-25` without runtime or schema changes.
 - Made Kubernetes overlays pull the published `latest` WDL images directly instead of requiring node-local `:dev` image imports.
 - Replaced the local ingress-nginx overlay with Gateway API resources for NGINX Gateway Fabric 2.6.7, preserving wildcard tenant routing, long-lived gateway requests, and the read-only ASSETS facade.
