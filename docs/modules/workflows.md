@@ -170,7 +170,10 @@ Key families:
   invalid, so user code must await the concurrent step promises. Suspending operations
   (`step.sleep`, `step.sleepUntil`, `step.waitForEvent`) remain exclusive and must not
   overlap another in-flight step because they suspend the whole workflow run.
-- Termination is an explicit non-success terminal outcome and uses error retention.
+- Completed instances use success retention; failed and terminated instances use error
+  retention. Both retention classes default to 8 hours for newly created instances and
+  may be overridden with
+  `create({ retention: { successRetention, errorRetention } })`.
 - `Workflow.createBatch()` accepts at most 100 entries per call. Runtime prevalidation
   and Rust admission share this pinned limit.
 - A single workflow result is capped at 1 MiB and a runtime-to-workflows backend JSON

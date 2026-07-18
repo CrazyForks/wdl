@@ -4,7 +4,7 @@ namespace: wdl-local
 resources:
   - ../local
   - assets-proxy.yaml
-  - ingress.yaml
-  - s3mock-network-policy.yaml
+  - gateway.yaml
+  - gateway-network-policy.yaml
 patches:
   - path: config-patch.yaml

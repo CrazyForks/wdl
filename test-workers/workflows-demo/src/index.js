@@ -121,8 +121,8 @@ export default {
       const instance = await env.ORDERS.create({
         id,
         retention: retentionMs > 0 ? {
-          successRetentionMs: retentionMs,
-          errorRetentionMs: retentionMs,
+          successRetention: retentionMs,
+          errorRetention: retentionMs,
         } : undefined,
         params: {
           source: "integration",

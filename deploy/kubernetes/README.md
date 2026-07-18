@@ -14,21 +14,21 @@ provider's native tooling.
 
 - `base/` defines reusable Deployments, StatefulSets, Services, and PVCs.
 - `components/metadata-guard/` owns the shared cloud-metadata egress policy.
-- `overlays/local/` pins local images, local development secrets, a namespace,
-  and local storage defaults.
-- `overlays/local-ingress/` adds nginx Ingress resources for local hostnames.
+- `overlays/local/` provides local smoke secrets, a namespace, and local storage
+  defaults.
+- `overlays/local-gateway/` adds Gateway API resources for local hostnames.
 - `overlays/local-metadata-guard/` applies the local overlay plus the shared
   metadata-guard component.
-- `overlays/local-ingress-metadata-guard/` applies the local ingress overlay
+- `overlays/local-gateway-metadata-guard/` applies the local gateway overlay
   plus the same component.
 - `storage/local-nfs/` contains Helm values for a local ReadWriteMany
   provisioner that can simulate provider RWX storage on a development cluster.
 
-The base uses the production-style image contract: workerd services default to
-`docker.io/getwdl/wdl-workerd:latest`, and Rust sidecars/default Rust services
-default to `docker.io/getwdl/wdl-rust:latest`. The local overlay maps those
-public image names to the same `wdl-workerd:dev` and `wdl-rust:dev` tags that
-Compose integration tests build locally.
+The base and local overlays use the published image contract: workerd services
+pull `docker.io/getwdl/wdl-workerd:latest`, and Rust sidecars/default Rust
+services pull `docker.io/getwdl/wdl-rust:latest`. WDL containers set
+`imagePullPolicy: Always`, so applying the stack does not depend on images built
+or imported through a developer workstation.
 
 All private WDL services read `WDL_INTERNAL_AUTH_TOKEN` from the shared
 `wdl-secrets` Secret and send it as `x-wdl-internal-auth` on internal mesh
@@ -55,8 +55,8 @@ Valkey, and external admin access are reached.
 
 For local or staging clusters that need the minimum cloud metadata guard without
 a full production egress allowlist, use `overlays/local-metadata-guard/` instead
-of `overlays/local/`, or `overlays/local-ingress-metadata-guard/` instead of
-`overlays/local-ingress/`. These overlays add an egress NetworkPolicy for WDL
+of `overlays/local/`, or `overlays/local-gateway-metadata-guard/` instead of
+`overlays/local-gateway/`. These overlays add an egress NetworkPolicy for WDL
 Pods that allows ordinary IPv4 egress but excludes common metadata endpoints
 `169.254.169.254/32` and `169.254.170.2/32`. This is not a complete production
 egress policy; production overlays still need provider-specific DNS, object
@@ -117,43 +117,30 @@ driver supplied by the target platform.
 ## Local Greenfield Path
 
 This is the recommended local smoke path. It was verified on Docker Desktop
-Kubernetes, but the sequence is intentionally standard Kubernetes: any cluster
-with `kubectl`, a working image source, an RWX storage class, and an ingress
-controller can follow the same shape.
+Kubernetes, where the Gateway `LoadBalancer` is published on `127.0.0.1`.
+Other Gateway API clusters can follow the same shape, but must map the smoke
+hostnames to their external Gateway address or expose it through a NodePort or
+local tunnel instead.
 
 1. Start or connect to a local Kubernetes cluster.
 2. Install the local NFS provisioner from the previous section, unless your
    cluster already provides an RWX storage class named `wdl-nfs-rwx`.
-3. Build the same local images used by Compose integration tests:
+3. Install the Gateway API standard CRDs and NGINX Gateway Fabric. This local
+   overlay is pinned to NGINX Gateway Fabric 2.6.7:
 
    ```bash
-   docker build -f Dockerfile.workerd -t wdl-workerd:dev .
-   docker build -f Dockerfile.rust -t wdl-rust:dev .
+   kubectl kustomize \
+     "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.6.7" \
+     | kubectl apply -f -
+   helm upgrade --install ngf \
+     oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+     --version 2.6.7 \
+     --namespace nginx-gateway \
+     --create-namespace \
+     --wait
    ```
 
-   If your local cluster does not share the Docker daemon with the Kubernetes
-   nodes, import or push those tags so every node can resolve them. Docker
-   Desktop's multi-node backend uses `kindest/node` containers, so importing the
-   local images looks like:
-
-   ```bash
-   docker save -o /tmp/wdl-k8s-images.tar wdl-workerd:dev wdl-rust:dev
-   for node in $(docker ps --format '{{.Names}}' | grep '^desktop-'); do
-     docker exec -i "$node" ctr -n k8s.io images import - < /tmp/wdl-k8s-images.tar
-   done
-   ```
-
-4. Install an nginx Ingress controller if the cluster does not already have one.
-   Kubernetes 1.35 should use ingress-nginx controller v1.15.x or newer in the
-   1.15 support line. This local overlay was verified with controller v1.15.1:
-
-   ```bash
-   kubectl apply -f \
-     https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/kind/deploy.yaml
-   kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=240s
-   ```
-
-5. Add host entries for the local smoke names:
+4. Add host entries for the local smoke names:
 
    ```text
    127.0.0.1 admin.test
@@ -161,16 +148,19 @@ controller can follow the same shape.
    127.0.0.1 s3mock.local
    ```
 
-6. Apply the ingress overlay. It includes the local base and patches
+5. Apply the Gateway API overlay. It includes the local base and patches
    `ASSETS_CDN_BASE` to `http://s3mock.local/wdl-assets`:
 
    ```bash
-   kubectl apply -k deploy/kubernetes/overlays/local-ingress
+   kubectl apply -k deploy/kubernetes/overlays/local-gateway
    ```
 
-7. Wait for every WDL workload to become ready:
+6. Wait for the Gateway and every WDL workload to become ready:
 
    ```bash
+   kubectl -n wdl-local wait --for=condition=Programmed gateway/wdl --timeout=240s
+   kubectl -n wdl-local rollout status deployment \
+     -l gateway.networking.k8s.io/gateway-name=wdl --timeout=240s
    kubectl -n wdl-local rollout status deploy/gateway
    kubectl -n wdl-local rollout status deploy/user-runtime
    kubectl -n wdl-local rollout status deploy/system-runtime
@@ -182,6 +172,37 @@ controller can follow the same shape.
    kubectl -n wdl-local rollout status statefulset/d1-runtime
    kubectl -n wdl-local rollout status statefulset/do-runtime
    ```
+
+7. Bootstrap the permanent `__system__/s3-cleanup` worker before accepting
+   tenant ASSETS deploys:
+
+   ```bash
+   export CONTROL_URL=http://admin.test
+   export ADMIN_TOKEN=local-dev-token
+
+   wdl d1 create --ns __system__ s3-cleanup-state
+   (
+     cd system-workers/s3-cleanup
+     wdl d1 migrations apply --ns __system__ s3-cleanup-state
+   )
+
+   printf '%s' 'http://s3mock:9090' \
+     | wdl secret put --ns __system__ --worker s3-cleanup S3_ENDPOINT
+   printf '%s' 'us-east-1' \
+     | wdl secret put --ns __system__ --worker s3-cleanup S3_REGION
+   printf '%s' 'wdl-assets' \
+     | wdl secret put --ns __system__ --worker s3-cleanup S3_BUCKET
+   printf '%s' 'test' \
+     | wdl secret put --ns __system__ --worker s3-cleanup S3_ACCESS_KEY_ID
+   printf '%s' 'test' \
+     | wdl secret put --ns __system__ --worker s3-cleanup S3_SECRET_ACCESS_KEY
+
+   wdl deploy system-workers/s3-cleanup --ns __system__
+   ```
+
+   This worker is required for the ASSETS lifecycle. Without it, version and
+   worker deletion can enqueue cleanup intents, but no consumer removes the S3
+   objects.
 
 8. Check the gateway and the CLI path:
 
@@ -199,7 +220,7 @@ The local admin host is `admin.test`, and the local admin token is
 ## Local Smoke Checks
 
 After the greenfield stack is ready, run a few tenant-level checks through the
-Ingress hostnames. These verify more than Pod readiness.
+Gateway API hostnames. These verify more than Pod readiness.
 
 Deploy and check ASSETS:
 
@@ -213,7 +234,27 @@ curl http://demo.workers.local/pages-assets/
 
 The HTML should contain URLs under `http://s3mock.local/wdl-assets/...`. Fetch
 one of those URLs directly to confirm the object-storage path is reachable
-through Ingress.
+through the Gateway.
+
+Then delete the test Worker and confirm that the system cleanup worker removes
+its ASSETS objects:
+
+```bash
+ASSET_URL=$(
+  curl -fsS http://demo.workers.local/pages-assets/ \
+    | sed -n 's/.*href="\([^"]*hello\.txt\)".*/\1/p'
+)
+test -n "$ASSET_URL"
+curl -fsS "$ASSET_URL"
+
+wdl delete worker pages-assets --ns demo --yes
+for _ in $(seq 1 90); do
+  ASSET_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' "$ASSET_URL")
+  [ "$ASSET_STATUS" = 404 ] && break
+  sleep 1
+done
+test "$ASSET_STATUS" = 404
+```
 
 Then smoke the stateful runtimes and workflows:
 
@@ -242,8 +283,8 @@ use.
 
 ## Port-Forward Fallback
 
-If you do not want to install an Ingress controller, apply the local overlay and
-forward the host-facing ports:
+If you do not want to install a Gateway API implementation, apply the local
+overlay and forward the host-facing ports:
 
 ```bash
 kubectl apply -k deploy/kubernetes/overlays/local
@@ -285,29 +326,30 @@ host. `ASSETS_CDN_BASE` defaults to `http://localhost:30900/wdl-assets` in the
 local overlay so asset URLs returned to a browser are reachable from the host
 while the s3mock port-forward is running.
 
-## Local Ingress
+## Local Gateway API
 
-If an Ingress controller is already installed, the ingress overlay can be
+If NGINX Gateway Fabric is already installed, the Gateway API overlay can be
 applied directly:
 
 ```bash
-kubectl apply -k deploy/kubernetes/overlays/local-ingress
-kubectl -n wdl-local rollout status statefulset/d1-runtime
-kubectl -n wdl-local rollout status statefulset/do-runtime
+kubectl apply -k deploy/kubernetes/overlays/local-gateway
+kubectl -n wdl-local wait --for=condition=Programmed gateway/wdl --timeout=240s
+kubectl -n wdl-local rollout status deployment \
+  -l gateway.networking.k8s.io/gateway-name=wdl --timeout=240s
 ```
 
-The local ingress overlay expects the `nginx` IngressClass and routes:
+The local Gateway API overlay expects the `nginx` GatewayClass and routes:
 
 - `admin.test` to `gateway:8080`;
 - `*.workers.local` to `gateway:8080`;
 - `s3mock.local/wdl-assets/assets/...` to a read-only `assets-proxy`, which
   forwards only query-free asset GET/HEAD requests to `s3mock:9090`.
 
-The overlay opens the `assets-proxy` NetworkPolicy only to ingress-nginx Pods in
-the `ingress-nginx` namespace, and opens s3mock only to WDL runtime Pods plus
-that proxy. It deliberately does not expose the full s3mock S3 API through
-Ingress. If your controller runs under a different namespace or label set, patch
-`overlays/local-ingress/s3mock-network-policy.yaml` alongside the IngressClass.
+The overlay opens the `assets-proxy` NetworkPolicy only to the data-plane Pods
+created for the `wdl` Gateway, and opens s3mock only to WDL runtime Pods plus
+that proxy. It deliberately does not expose the full s3mock S3 API through the
+Gateway. A different Gateway API implementation must provide an equivalent
+data-plane Pod selector in `overlays/local-gateway/gateway-network-policy.yaml`.
 
 Add host entries for the names you want to exercise if you did not already do
 so in the greenfield path:

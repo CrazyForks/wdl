@@ -60,6 +60,7 @@ spec:
       containers:
         - name: d1-runtime
           image: docker.io/getwdl/wdl-workerd:latest
+          imagePullPolicy: Always
           command: ["d1-supervisor"]
           envFrom:
             - configMapRef:

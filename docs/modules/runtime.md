@@ -271,13 +271,14 @@ when a matching active tail session exists.
 - Python Workers modules are not supported. Control rejects new `py` module manifests,
   and runtime/do-runtime reject retained metadata that contains them instead of letting
   workerd fail later with a mixed JS/Python bundle error.
-- The runtime workerd processes still run with process-level `--experimental` because
-  upstream workerd 2026-07-17 continues to gate `workerLoader` bindings on that switch.
+- Since WDL's 2026-07-01 workerd pin, runtime processes have used process-level
+  `--experimental` because upstream gates `workerLoader` bindings on that switch.
   Do not add the `experimental` compatibility flag or `allowExperimental` to loaded
   WorkerCode unless another upstream API explicitly requires it.
-- Upstream workerd 2026-07-17 caps dynamic worker code at 64 MiB and serialized dynamic
-  env at 1 MiB. Control estimates final WorkerCode before version allocation and again
-  after commit metadata materialization, including runtime/do-runtime-injected
+- Since WDL's 2026-07-01 workerd pin, Control has enforced upstream's 64 MiB dynamic
+  worker code cap and 1 MiB serialized dynamic env cap. It estimates final WorkerCode
+  before version allocation and again after commit metadata materialization, including
+  runtime/do-runtime-injected
   wrapper/client modules, workflow import rewrites, and generated workflow keys. Vars,
   namespace/worker secrets, and runtime-injected binding/workflow env values are checked
   against a headroomed `workerLoader` env budget in watched commit and secret-mutation

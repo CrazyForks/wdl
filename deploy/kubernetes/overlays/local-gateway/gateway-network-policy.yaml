@@ -1,7 +1,24 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-assets-proxy-local-ingress
+  name: allow-local-gateway-ingress
+  labels:
+    app.kubernetes.io/name: wdl
+    app.kubernetes.io/component: public-gateway
+spec:
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: wdl
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-assets-proxy-local-gateway
   labels:
     app.kubernetes.io/name: wdl
     app.kubernetes.io/component: assets-proxy
@@ -14,12 +31,9 @@ spec:
     - Ingress
   ingress:
     - from:
-        - namespaceSelector:
+        - podSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: ingress-nginx
+              gateway.networking.k8s.io/gateway-name: wdl
       ports:
         - port: 8080
 ---

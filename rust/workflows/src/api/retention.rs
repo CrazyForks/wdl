@@ -4,7 +4,7 @@ use serde_json::Value as JsonValue;
 
 use crate::{WorkflowError, WorkflowResult};
 
-const DEFAULT_WORKFLOW_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_WORKFLOW_RETENTION_MS: i64 = 8 * 60 * 60 * 1000;
 const MAX_WORKFLOW_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy)]
@@ -114,5 +114,18 @@ pub(crate) fn terminal_retention_ms(
             WorkflowError::invalid_state(format!("Workflow retention field is corrupt: {err}"))
         }),
         None => Ok(DEFAULT_WORKFLOW_RETENTION_MS),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_retention_to_eight_hours() {
+        let expected = 8 * 60 * 60 * 1000;
+        let policy = retention_policy(&JsonValue::Null).expect("default retention should parse");
+        assert_eq!(policy.success_ms, expected);
+        assert_eq!(policy.error_ms, expected);
     }
 }

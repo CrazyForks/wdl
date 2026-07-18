@@ -60,6 +60,7 @@ spec:
       containers:
         - name: redis-proxy
           image: docker.io/getwdl/wdl-rust:latest
+          imagePullPolicy: Always
           command: ["/redis-proxy"]
           envFrom:
             - configMapRef:
@@ -83,6 +84,7 @@ spec:
               memory: 256Mi
         - name: do-runtime
           image: docker.io/getwdl/wdl-workerd:latest
+          imagePullPolicy: Always
           command: ["do-supervisor"]
           envFrom:
             - configMapRef:

@@ -30,7 +30,7 @@
 
 WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary 只能 cold-load 其支持的 `compatibility_date` 对应的 retained Dynamic Worker version；具体说明见 [infra rollout 注意事项](modules/infra.zh.md#部署--rollout-注意事项)。
 
-Node.js TLS 行为跟随 bundled workerd binary。在 2026-07-17 workerd pin 下，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
+Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd pin 开始，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
 
 Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 experimental flag 的情况下作为 opaque JSRPC 参数传递。WDL 把持有这种 stub 视为 capability delegation：接收方可以按 stub 内由 host 写入的 caller properties 调用目标，但不能改写这些 properties，也不能取出隐藏的平台 backend capability。该委托可以在内存中保留；但 WDL 会在 deploy 和 retained-state load 时拒绝 `allow_irrevocable_stub_storage`，static host worker 也不会启用它，因此长期持久化 stub 不属于受支持的 WDL surface。
 

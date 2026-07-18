@@ -6,14 +6,6 @@ resources:
   - ../../base
 patches:
   - path: rwx-storage-patch.yaml
-  - path: local-image-pull-policy-patch.yaml
-images:
-  - name: docker.io/getwdl/wdl-workerd
-    newName: wdl-workerd
-    newTag: dev
-  - name: docker.io/getwdl/wdl-rust
-    newName: wdl-rust
-    newTag: dev
 generatorOptions:
   disableNameSuffixHash: true
 configMapGenerator:

@@ -154,17 +154,23 @@ For the full architecture, see [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
-Install the standalone `wdl` CLI once, then install repository dependencies, compile
-the local workerd configs, start the stack from published Docker Hub images, and deploy
-a smoke worker. The compile step is required on a fresh clone because compose
-bind-mounts `./dist` over the image's built configs.
+This path requires Git, Node.js 24, Docker Engine or Docker Desktop, and a recent
+Docker Compose with `!reset` and `--wait` support. It was verified with Docker Compose
+v5.3.0.
+
+Clone the repository, install the standalone `wdl` CLI and repository dependencies,
+compile the local workerd configs, start the stack from published Docker Hub images,
+and deploy a smoke worker. The compile step is required on a fresh clone because
+compose bind-mounts `./dist` over the image's built configs.
 
 ```bash
+git clone https://github.com/wdl-dev/wdl.git
+cd wdl
 npm install -g @wdl-dev/cli@1.4.1
 npm ci
 npm install --ignore-scripts --prefix test-workers/hello-jsonc
 npm run compile:workerd:local
-docker compose -f docker-compose.yml -f docker-compose.images.yml up -d --pull always --no-build
+docker compose -f docker-compose.yml -f docker-compose.images.yml up -d --pull always --no-build --wait --wait-timeout 180
 export ADMIN_TOKEN=local-dev-token
 export CONTROL_URL=http://admin.test:8080
 export CONTROL_CONNECT_HOST=localhost
@@ -192,6 +198,15 @@ to short-circuit to the static control worker. Adding `demo.workers.local` and
 `admin.test` to `/etc/hosts` is optional for this flow; it is only needed if you
 want browser-style requests to those names without explicit `Host` headers or
 CLI connect-host overrides.
+
+To stop the local stack and permanently remove its Compose volumes after the smoke
+test:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.images.yml down -v
+```
+
+The `-v` flag deletes all local WDL data in this Compose project.
 
 ## Deploy a Worker
 

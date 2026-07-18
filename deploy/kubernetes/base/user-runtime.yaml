@@ -39,6 +39,7 @@ spec:
       containers:
         - name: redis-proxy
           image: docker.io/getwdl/wdl-rust:latest
+          imagePullPolicy: Always
           command: ["/redis-proxy"]
           envFrom:
             - configMapRef:
@@ -62,6 +63,7 @@ spec:
               memory: 256Mi
         - name: user-runtime
           image: docker.io/getwdl/wdl-workerd:latest
+          imagePullPolicy: Always
           command: ["workerd"]
           args:
             - serve

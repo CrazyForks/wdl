@@ -116,4 +116,4 @@
 | Path | 责任 |
 |---|---|
 | `terraform/` | AWS ECS-shaped environment：ECS、Valkey、EFS、S3/R2 和 ALB rules。 |
-| `deploy/kubernetes/` | 基于 Kustomize 的本地和 portable Kubernetes manifests。 |
+| `deploy/kubernetes/` | 基于 Kustomize 的本地和 portable Kubernetes manifests，包括本地 Gateway API overlay。 |

@@ -23,6 +23,7 @@ spec:
       containers:
         - name: scheduler
           image: docker.io/getwdl/wdl-rust:latest
+          imagePullPolicy: Always
           command: ["/scheduler"]
           envFrom:
             - configMapRef:

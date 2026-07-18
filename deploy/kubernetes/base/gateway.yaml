@@ -36,6 +36,7 @@ spec:
       containers:
         - name: gateway
           image: docker.io/getwdl/wdl-workerd:latest
+          imagePullPolicy: Always
           command: ["workerd"]
           args:
             - serve

@@ -40,8 +40,8 @@ binary can cold-load a retained Dynamic Worker version only when it supports tha
 version's `compatibility_date`; see the
 [infra rollout notes](modules/infra.md#deployment--rollout-notes).
 
-Node.js TLS behavior follows the bundled workerd binary. With the 2026-07-17
-workerd pin, workers whose compatibility date is at least 2026-06-16 get
+Node.js TLS behavior follows the bundled workerd binary. Starting with WDL's
+2026-07-01 workerd pin, workers whose compatibility date is at least 2026-06-16 get
 `throw_on_not_implemented_tls_options`: unsupported `node:tls` options such as
 `checkServerIdentity` now throw `ERR_OPTION_NOT_IMPLEMENTED` instead of being silently
 ignored. Separately, workerd's `servername` / expected-certificate-hostname behavior

@@ -1515,6 +1515,165 @@ test("local compose runtime profiles keep base services enabled by default", () 
   }
 });
 
+test("Kubernetes base WDL containers pull published images", () => {
+  const files = [
+    "deploy/kubernetes/base/gateway.yaml",
+    "deploy/kubernetes/base/user-runtime.yaml",
+    "deploy/kubernetes/base/system-runtime.yaml",
+    "deploy/kubernetes/base/d1-runtime.yaml",
+    "deploy/kubernetes/base/do-runtime.yaml",
+    "deploy/kubernetes/base/scheduler.yaml",
+    "deploy/kubernetes/base/workflows.yaml",
+  ];
+  const wdlContainerNames = new Set([
+    "gateway",
+    "redis-proxy",
+    "user-runtime",
+    "system-runtime",
+    "d1-runtime",
+    "do-runtime",
+    "scheduler",
+    "workflows",
+  ]);
+  for (const file of files) {
+    let foundWdlContainer = false;
+    const resources = /** @type {Array<Record<string, any>>} */ (
+      yamlDocuments(file).map((document) => document.toJS())
+    );
+    for (const resource of resources) {
+      if (resource.kind !== "Deployment" && resource.kind !== "StatefulSet") continue;
+      for (const container of resource.spec?.template?.spec?.containers ?? []) {
+        if (!wdlContainerNames.has(container.name)) continue;
+        foundWdlContainer = true;
+        assert.match(container.image, /^docker\.io\/getwdl\/wdl-(?:rust|workerd):latest$/u, file);
+        assert.equal(container.imagePullPolicy, "Always", `${file} ${container.name}`);
+      }
+    }
+    assert.ok(foundWdlContainer, `${file} must contain a WDL container`);
+  }
+});
+
+test("Kubernetes local gateway uses Gateway API with isolated asset routing", () => {
+  const [kustomizationDocument] = yamlDocuments(
+    "deploy/kubernetes/overlays/local-gateway/kustomization.yaml"
+  );
+  const kustomization = /** @type {{ resources?: unknown }} */ (
+    kustomizationDocument.toJS()
+  );
+  assert.partialDeepStrictEqual(kustomization, {
+    resources: ["../local", "assets-proxy.yaml", "gateway.yaml", "gateway-network-policy.yaml"],
+  });
+
+  const resources = /** @type {Array<Record<string, any>>} */ (
+    yamlDocuments("deploy/kubernetes/overlays/local-gateway/gateway.yaml")
+      .map((document) => document.toJS())
+  );
+  const gateway = resources.find((resource) => resource.kind === "Gateway");
+  assert.partialDeepStrictEqual(gateway, {
+    apiVersion: "gateway.networking.k8s.io/v1",
+    metadata: { name: "wdl" },
+    spec: {
+      gatewayClassName: "nginx",
+      listeners: [{
+        name: "http",
+        protocol: "HTTP",
+        port: 80,
+        allowedRoutes: { namespaces: { from: "Same" } },
+      }],
+    },
+  });
+
+  const routeEdges = resources
+    .filter((resource) => resource.kind === "HTTPRoute")
+    .flatMap((route) => {
+      const routeName = route.metadata?.name;
+      const hostnames = /** @type {string[]} */ (route.spec?.hostnames ?? ["*"]);
+      const rules = /** @type {Array<Record<string, any>>} */ (route.spec?.rules ?? []);
+      return hostnames.flatMap((hostname) =>
+        rules.flatMap((rule, ruleIndex) => {
+          const backends = /** @type {Array<Record<string, any>>} */ (
+            rule.backendRefs ?? []
+          );
+          const matches = /** @type {Array<Record<string, any>>} */ (rule.matches ?? [{}]);
+          assert.ok(backends.length > 0, `${routeName} rule ${ruleIndex} must have a backend`);
+          return matches.flatMap((match) =>
+            backends.map((backend) => [
+              routeName,
+              hostname,
+              `${match.path?.type ?? "PathPrefix"}:${match.path?.value ?? "/"}`,
+              `${backend.group ?? "core"}:${backend.kind ?? "Service"}:` +
+                `${backend.namespace ?? "wdl-local"}:${backend.name}:${backend.port}`,
+            ].join("|"))
+          );
+        })
+      );
+    })
+    .toSorted();
+  assert.deepEqual(routeEdges, [
+    "wdl-assets|s3mock.local|PathPrefix:/wdl-assets/assets|core:Service:wdl-local:assets-proxy:8080",
+    "wdl-gateway|*.workers.local|PathPrefix:/|core:Service:wdl-local:gateway:8080",
+    "wdl-gateway|admin.test|PathPrefix:/|core:Service:wdl-local:gateway:8080",
+  ].toSorted());
+
+  const policy = resources.find((resource) => resource.kind === "ProxySettingsPolicy");
+  assert.partialDeepStrictEqual(policy, {
+    spec: {
+      targetRefs: [{
+        group: "gateway.networking.k8s.io",
+        kind: "HTTPRoute",
+        name: "wdl-gateway",
+      }],
+      timeout: { read: "3600s", send: "3600s" },
+    },
+  });
+
+  const networkPolicies = /** @type {Array<Record<string, any>>} */ (
+    yamlDocuments("deploy/kubernetes/overlays/local-gateway/gateway-network-policy.yaml")
+      .map((document) => document.toJS())
+  );
+  /** @param {Record<string, any>} selector @param {string} context */
+  const selectorKey = (selector, context) => {
+    assert.deepEqual(Object.keys(selector).toSorted(), ["matchLabels"], `${context} selector`);
+    return Object.entries(selector.matchLabels)
+      .map(([key, value]) => `${key}=${value}`)
+      .toSorted()
+      .join(",");
+  };
+  const ingressEdges = networkPolicies.flatMap((policy) => {
+    const receiver = selectorKey(policy.spec?.podSelector ?? {}, policy.metadata?.name);
+    const ingressRules = /** @type {Array<Record<string, any>>} */ (
+      policy.spec?.ingress ?? []
+    );
+    return ingressRules.flatMap((ingress, ingressIndex) => {
+      const context = `${policy.metadata?.name} ingress ${ingressIndex}`;
+      const peers = /** @type {Array<Record<string, any>>} */ (ingress.from ?? []);
+      const callers = ingress.from === undefined
+        ? ["*"]
+        : peers.map((peer) => {
+          assert.deepEqual(Object.keys(peer).toSorted(), ["podSelector"], `${context} peer`);
+          return selectorKey(peer.podSelector, `${context} peer`);
+        });
+      const networkPorts = /** @type {Array<Record<string, any>>} */ (ingress.ports ?? []);
+      const ports = ingress.ports === undefined
+        ? ["*"]
+        : networkPorts.map((entry) => {
+          const range = entry.endPort === undefined ? entry.port : `${entry.port}-${entry.endPort}`;
+          return `${entry.protocol ?? "TCP"}:${range}`;
+        });
+      return callers.flatMap((caller) =>
+        ports.map((port) => `${caller}->${receiver}@${port}`)
+      );
+    });
+  }).toSorted();
+  assert.deepEqual(ingressEdges, [
+    "*->gateway.networking.k8s.io/gateway-name=wdl@TCP:80",
+    "app.kubernetes.io/component=assets-proxy,app.kubernetes.io/name=wdl->" +
+      "app.kubernetes.io/component=s3mock,app.kubernetes.io/name=wdl@TCP:9090",
+    "gateway.networking.k8s.io/gateway-name=wdl->" +
+      "app.kubernetes.io/component=assets-proxy,app.kubernetes.io/name=wdl@TCP:8080",
+  ].toSorted());
+});
+
 test("Kubernetes stateful runtimes publish Pod-specific owner endpoints", () => {
   const families = /** @type {Array<[string, number]>} */ ([["d1", 8787], ["do", 8788]]);
   for (const [family, port] of families) {
@@ -1730,8 +1889,8 @@ test("local compose routes private HTTP hops through Envoy only", () => {
       new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin`),
     );
   }
-  // workerd 2026-07-17 still gates workerLoader bindings on the process-level
-  // --experimental switch. Keep it only on workerLoader-owning processes, not
+  // workerLoader bindings remain gated on the process-level --experimental
+  // switch. Keep it only on workerLoader-owning processes, not
   // on gateway or D1 and not as a Worker compatibility flag.
   for (const tier of ["user-runtime-local", "system-runtime-local"]) {
     assert.match(

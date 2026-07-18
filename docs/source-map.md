@@ -119,4 +119,4 @@ are outside this map unless they own runtime or deployable service behavior.
 | Path | Responsibility |
 |---|---|
 | `terraform/` | AWS ECS-shaped environment: ECS, Valkey, EFS, S3/R2, and ALB rules. |
-| `deploy/kubernetes/` | Kustomize-based local and portable Kubernetes manifests. |
+| `deploy/kubernetes/` | Kustomize-based local and portable Kubernetes manifests, including the local Gateway API overlay. |
