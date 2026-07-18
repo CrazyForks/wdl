@@ -352,9 +352,9 @@ across two or more files, or once a fixture's inline source exceeds about
 `tests/helpers/style-contract-scanner.js` owns the shared source-scanning and
 literal-extraction helpers used by style-contract tests. The production-facing
 tripwires stay in `tests/unit/style-contracts.test.js`; they assert on
-cross-tier and source-contract strings such as workerd config ownership,
-service anchors, `composeNoBuildFlag`, grammar mirrors, Redis key conventions,
-and active-doc parity. Test-helper tripwires live in
+cross-tier and source-contract strings such as workerd config ownership, service
+anchors, grammar mirrors, Redis key conventions, and active-doc parity.
+Test-helper tripwires live in
 `tests/unit/test-helper-style-contracts.test.js`; that file walks both helper trees
 recursively and guards test-helper conventions such as
 `load-shared-module.js` data-URL construction, module rewrites, response JSON

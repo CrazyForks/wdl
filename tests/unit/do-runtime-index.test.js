@@ -7,7 +7,6 @@ import { readJsonResponse } from "../helpers/response-json.js";
 import {
   importSpecifierReplacements,
   moduleDataUrl,
-  readRepositoryJson,
   readRepositoryModuleSource,
   repositoryFileUrl,
   repositoryModuleDataUrl,
@@ -158,8 +157,6 @@ const src = readRepositoryModuleSource("do-runtime/index.js", importSpecifierRep
 const { default: app } = await import(stub(src));
 const { DO_INVOKE_CONTENT_TYPE, DoRuntimeError, encodeDoInvokeRequest } = await import(protocolUrl);
 const doState = await import(stateUrl);
-const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
-
 beforeEach(() => {
   /** @type {any} */ (globalThis).__doIndexHostResponse = null;
   /** @type {any} */ (globalThis).__doIndexOwner = null;
@@ -332,26 +329,25 @@ test("do-runtime alarm dispatch delegates retryCount validation before dispatch"
   assert.equal(hostFetches.length, 0);
 });
 
-test("do-runtime alarm dispatch rejects non-canonical versions from the shared fixture", async () => {
-  for (const { tag, parsed } of versionFixture.cases) {
-    if (parsed != null) continue;
-    const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ns: "tenant",
-        worker: "alarms",
-        version: tag,
-        doStorageId: "do_0123456789abcdef0123456789abcdef",
-        className: "Room",
-        objectName: "alice",
-        retryCount: 0,
-        token: "row-token",
-      }),
-    }), env());
-    assert.equal(response.status, 400, tag);
-    assert.match((await jsonBody(response)).message, /version/, tag);
-  }
+test("do-runtime alarm dispatch delegates version validation before dispatch", async () => {
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ns: "tenant",
+      worker: "alarms",
+      version: "v0",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+      objectName: "alice",
+      retryCount: 0,
+      token: "row-token",
+    }),
+  }), env());
+
+  const body = await readJsonResponse(response, 400, "non-canonical version");
+  assert.equal(body.error, "invalid_request");
+  assert.match(body.message, /version/);
   assert.deepEqual(/** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches), []);
 });
 

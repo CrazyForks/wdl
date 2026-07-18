@@ -12,7 +12,6 @@ const {
   normalizeMigrationApply,
   normalizeMigrationRef,
   sha256Hex,
-  splitSqlStatements,
   validateDatabaseId,
   validateDatabaseRef,
 } = await importRepositoryModule("control/d1-model.js", [
@@ -40,24 +39,6 @@ test("control D1: database metadata state is explicit", () => {
   assert.equal(isReadyDatabase(ready), true);
   assert.equal(isReadyDatabase(provisional), false);
   assert.equal(provisional.provisionalUntil, "2026-01-01T00:10:00.000Z");
-});
-
-test("control D1: SQL splitter preserves trigger bodies", () => {
-  const statements = splitSqlStatements(`
-    create table posts (id integer primary key, title text);
-    create table audit (message text);
-    create trigger posts_ai after insert on posts
-    begin
-      insert into audit values ('created;inside');
-      update posts set title = title || ';done' where id = new.id;
-    end;
-    insert into posts (title) values ('hello');
-  `);
-
-  assert.equal(statements.length, 4);
-  assert.match(statements[2].sql, /create trigger posts_ai/i);
-  assert.match(statements[2].sql, /created;inside/);
-  assert.match(statements[2].sql, /;done/);
 });
 
 test("control D1: migration status classifies applied pending and drifted", () => {

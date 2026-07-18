@@ -3,8 +3,58 @@ import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { ROOT, resolveWdlCliBin } from "../../scripts/integration-environment.js";
+import {
+  ROOT,
+  composeNoBuildFlag,
+  resolveWdlCliBin,
+} from "../../scripts/integration-environment.js";
+import {
+  importRepositoryModule,
+  importSpecifierReplacements,
+  moduleDataUrl,
+  repositoryFileUrl,
+} from "../helpers/load-shared-module.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 import { makeTempDir, removeTempDir } from "../helpers/temp-dir.js";
+
+const composeHelper = await importRepositoryModule(
+  "tests/integration/helpers/compose.js",
+  importSpecifierReplacements({
+    "../../../scripts/integration-environment.js": repositoryFileUrl(
+      "scripts/integration-environment.js"
+    ),
+    "./env.js": moduleDataUrl('export const ROOT = ".";'),
+    "./cli.js": moduleDataUrl("export function sh(command) { return command; }"),
+  })
+);
+
+test("compose no-build flag follows the integration environment", () => {
+  assert.equal(composeNoBuildFlag({ WDL_INTEGRATION_NO_BUILD: "1" }), " --no-build");
+  assert.equal(composeNoBuildFlag({}), "");
+});
+
+test("compose helpers consume the shared preflight no-build flag", async () => {
+  await withMockedProperty(process.env, "WDL_INTEGRATION_NO_BUILD", "1", () => {
+    assert.equal(
+      composeHelper.composeUp("--wait gateway"),
+      "docker compose up -d --no-build --wait gateway"
+    );
+    assert.equal(
+      composeHelper.composeProfileUp("d1-multi", "--wait d1-runtime-a"),
+      "COMPOSE_PROFILES=d1-multi docker compose up -d --no-build --wait d1-runtime-a"
+    );
+  });
+  await withMockedProperty(process.env, "WDL_INTEGRATION_NO_BUILD", "0", () => {
+    assert.equal(
+      composeHelper.composeUp("--wait gateway"),
+      "docker compose up -d --wait gateway"
+    );
+    assert.equal(
+      composeHelper.composeProfileUp("d1-multi", "--wait d1-runtime-a"),
+      "COMPOSE_PROFILES=d1-multi docker compose up -d --wait d1-runtime-a"
+    );
+  });
+});
 
 test("resolveWdlCliBin uses the supplied PATH environment", () => {
   assert.equal(resolveWdlCliBin({ PATH: "" }), "wdl");

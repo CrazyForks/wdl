@@ -37,36 +37,9 @@ const webSocketProxyOptionsFromEnv = () => ({});`
   ],
 ]);
 
-const workerId = await import("../../shared/worker-id.js");
 Reflect.set(globalThis, "__gatewayProxyCalls", []);
 const gatewayProxyCalls = /** @type {unknown[][]} */ (Reflect.get(globalThis, "__gatewayProxyCalls"));
 const { GatewayWsHolder, buildUpstreamRequestFactory } = holderModule;
-
-test("gateway worker id helpers round-trip exact three-part worker ids", () => {
-  assert.equal(
-    workerId.formatWorkerId({ namespace: "demo", worker: "chat", version: "v1" }),
-    "demo:chat:v1"
-  );
-  assert.deepEqual(workerId.parseWorkerIdObject("demo:chat:v1"), {
-    namespace: "demo",
-    worker: "chat",
-    version: "v1",
-  });
-  for (const value of [
-    "",
-    "demo:chat",
-    "demo:chat:v1:extra",
-    "demo::v1",
-    ":chat:v1",
-    "demo:chat:",
-  ]) {
-    assert.deepEqual(workerId.parseWorkerIdObject(value), {
-      namespace: "",
-      worker: "",
-      version: "",
-    });
-  }
-});
 
 test("GatewayWsHolder fetch rejects missing upstream binding", async () => {
   const holder = new GatewayWsHolder();

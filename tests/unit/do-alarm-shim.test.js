@@ -394,6 +394,43 @@ test("DO alarm shim: failed non-transactional setAlarm rolls back the SQLite ala
   assert.equal(state.row, null);
 });
 
+test("DO alarm shim: scheduled alarms use distinct tokens from the pre-captured RNG", async () => {
+  const firstModuleTokens = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+  ];
+  const secondModuleTokens = ["33333333-3333-4333-8333-333333333333"];
+  /** @param {string[]} tokens @param {string} marker */
+  const importShimWithCapturedTokens = async (tokens, marker) => {
+    let index = 0;
+    return await withMockedProperty(
+      crypto,
+      "randomUUID",
+      () => /** @type {ReturnType<typeof crypto.randomUUID>} */ (tokens[index++]),
+      async () => await import(moduleDataUrl(`${shimSource}\n// ${marker}`)),
+    );
+  };
+  const firstModule = await importShimWithCapturedTokens(firstModuleTokens, "alarm-token-module-1");
+  const secondModule = await importShimWithCapturedTokens(secondModuleTokens, "alarm-token-module-2");
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const alarmBinding = makeDoAlarmBinding(calls);
+  const firstWrapped = firstModule.wrapStorage(storage, alarmBinding, "Room", "alice");
+  const secondWrapped = secondModule.wrapStorage(storage, alarmBinding, "Room", "alice");
+  const patchedToken = "00000000-0000-4000-8000-000000000000";
+
+  await withMockedProperty(crypto, "randomUUID", () => patchedToken, async () => {
+    await firstWrapped.setAlarm(1000);
+    await firstWrapped.setAlarm(2000);
+    await secondWrapped.setAlarm(3000);
+  });
+
+  const tokens = calls.map(([, input]) => /** @type {{ token: string }} */ (input).token);
+  assert.deepEqual(tokens, [...firstModuleTokens, ...secondModuleTokens]);
+  assert.equal(state.row?.token, secondModuleTokens[0]);
+});
+
 test("DO alarm shim: transactionSync rejects setAlarm before creating backend side effects", () => {
   /** @type {unknown[][]} */
   const calls = [];

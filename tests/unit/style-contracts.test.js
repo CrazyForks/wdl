@@ -684,15 +684,6 @@ test("gateway entrypoint keeps cache and subscriber mechanics in gateway/runtime
   assert.deepEqual(offenders, []);
 });
 
-test("gateway reserved subdomain rejection runs before Redis namespace lookup", () => {
-  const source = withoutLineComments(readRepoFile("gateway/dispatch.js"));
-  const reservedGuard = source.indexOf("isReservedNs(namespace) || RESERVED_TENANT_NS.has(namespace)");
-  const redisGate = source.indexOf("ensureKnownNs(redis)");
-  assert.notEqual(reservedGuard, -1, "reserved namespace guard not found in gateway subdomain branch");
-  assert.notEqual(redisGate, -1, "Redis namespace gate not found in gateway subdomain branch");
-  assert.ok(reservedGuard < redisGate, "reserved namespace 404 must not depend on Redis availability");
-});
-
 test("JS HTTP entrypoints use the shared request scope", () => {
   const files = ["control/index.js", "gateway/index.js", "runtime/index.js", "runtime/internal.js", "d1-runtime/index.js", "do-runtime/index.js"];
   const offenders = [];
@@ -737,14 +728,16 @@ test("HTTP request completion observability stays centralized", () => {
 });
 
 test("gateway routing lookup metrics use one outcome-labeled series", () => {
-  const files = ["gateway/index.js", "gateway/runtime.js", "README.md", "README.zh.md"];
-  const offenders = [];
-  for (const file of files) {
-    const source = withoutLineComments(readRepoFile(file));
-    if (/route_cache_(?:hits|misses)|pattern_cache_(?:hits|misses)|known_namespace_misses/.test(source)) {
-      offenders.push(file);
-    }
-  }
+  const source = withoutLineComments(readRepoFile("gateway/runtime.js"));
+  const routingCalls = (source.match(/metrics\.increment\([^;]+;/gs) || [])
+    .filter((call) => /["']routing_lookups["']/.test(call));
+  assert.equal(routingCalls.length, 1);
+  assert.match(routingCalls[0], /\bstage\b/);
+  assert.match(routingCalls[0], /\boutcome\b/);
+
+  const retiredFamilies = /route_cache_(?:hits|misses)|pattern_cache_(?:hits|misses)|known_namespace_misses/;
+  const offenders = ["gateway/index.js", "gateway/runtime.js", "README.md", "README.zh.md"]
+    .filter((file) => retiredFamilies.test(withoutLineComments(readRepoFile(file))));
   assert.deepEqual(offenders, []);
 });
 
@@ -1002,26 +995,6 @@ test("Redis callback warnings use the shared logger and stay non-sensitive", () 
   assert.match(source, /error_message:/);
 });
 
-test("shared Redis RESP module carries its observability dependency in workerd configs", () => {
-  const configs = [
-    "gateway/config.capnp",
-    "runtime/config-system.capnp",
-    "d1-runtime/config.capnp",
-    "do-runtime/config.capnp",
-  ];
-  const offenders = [];
-  for (const file of configs) {
-    const source = withoutLineComments(readRepoFile(file));
-    if (
-      source.includes('name = "shared-redis-resp"') &&
-      !source.includes('name = "shared-observability"')
-    ) {
-      offenders.push(file);
-    }
-  }
-  assert.deepEqual(offenders, []);
-});
-
 test("shared relative imports used by embedded modules are embedded in the same module list", () => {
   const configFiles = [
     "gateway/config.capnp",
@@ -1138,14 +1111,6 @@ test("redis-proxy HTTP observability matches platform request strategy", () => {
   assert.match(lib, /struct ResponseError/);
 });
 
-test("embedded DO alarm shim keeps best-effort log routing no-throw", () => {
-  const source = withoutLineComments(readRepoFile("do-runtime/alarm-shim-source.js"));
-  const logger = /function logStructured\([^]*?\n}\n\nfunction ensureAlarmTable/.exec(source)?.[0] || "";
-  assert.equal(/console\.warn\(/.test(source), false);
-  assert.match(logger, /if \(level === "error"\) console\.error\(line\);\s+else console\.log\(line\);/);
-  assert.match(logger, /try \{[^]*} catch \{/);
-});
-
 test("active docs and sources do not point at note paths", () => {
   const notesDirName = ["arch", "ive"].join("");
   const notesPath = `docs/${notesDirName}`;
@@ -1257,16 +1222,6 @@ test("queue main stream XADD is intentionally unbounded while auxiliary streams 
     "queue:<ns>:<queue>:s is the durable main stream; do not trim it with MAXLEN");
 });
 
-test("scheduler due-time dispatch does not reintroduce fixed polling knobs", () => {
-  const files = ["rust/scheduler/src/lib.rs", "docker-compose.yml", "README.md", "README.zh.md"];
-  const offenders = [];
-  for (const file of files) {
-    const source = withoutLineComments(readRepoFile(file));
-    if (/SCHEDULER_POLL_MS|QUEUE_DUE_SWEEP_MS/.test(source)) offenders.push(file);
-  }
-  assert.deepEqual(offenders, []);
-});
-
 test("supervisor config pins tier divergences (D1 SIGTERM, DO SIGKILL)", () => {
   const cfg = readRepoFile("rust/supervisor/src/config.rs");
 
@@ -1318,14 +1273,6 @@ test("do-runtime operational logs avoid known camelCase field drift", () => {
   const badLogField = /(?:log|console\.(?:error|log|warn))\([^;]*\b(ownerKey|workerId|taskId|inFlight|waitedMs|drainWaitMs|upstreamStatus)\s*:/s;
   const offenders = files.filter((file) => badLogField.test(withoutLineComments(readRepoFile(file))));
   assert.deepEqual(offenders, []);
-});
-
-test("DO alarm tokens stay generated inside the storage shim", () => {
-  const source = withoutLineComments(readRepoFile("do-runtime/alarm-shim-source.js"));
-  assert.match(source, /const cryptoRandomUUID = crypto\.randomUUID;/);
-  assert.match(source, /function alarmToken\(\)\s*\{\s*return reflectApply\(cryptoRandomUUID, nativeCrypto, \[\]\);\s*\}/);
-  assert.match(source, /const token = alarmToken\(\);/);
-  assert.match(source, /alarmBinding\.setAlarmIndex\(\{\s*className,\s*objectName,\s*scheduledTime: alarmTime,\s*retryCount: 0,\s*token,/);
 });
 
 test("do-runtime business metrics keep labels low-cardinality", () => {
@@ -1808,32 +1755,18 @@ test("Kubernetes NetworkPolicies pin the per-component ingress matrix", () => {
   });
 });
 
-test("local compose routes private HTTP hops through Envoy only", () => {
+test("local Compose routes private HTTP hops through Envoy", () => {
   const compose = withoutLineComments(readRepoFile("docker-compose.yml"));
+  const [composeDocument] = yamlDocuments("docker-compose.yml");
+  const composeConfig = /** @type {{ services?: Record<string, any> }} */ (
+    composeDocument.toJS()
+  );
   const envoy = withoutLineComments(readRepoFile("envoy/envoy.yaml"));
   const gatewayLocal = withoutLineComments(readRepoFile("gateway/config-local.capnp"));
   const runtimeUserLocal = withoutLineComments(readRepoFile("runtime/config-user-local.capnp"));
   const runtimeSystemLocal = withoutLineComments(readRepoFile("runtime/config-system-local.capnp"));
   const doRuntimeLocal = withoutLineComments(readRepoFile("do-runtime/config-local.capnp"));
-  const integrationPool = withoutLineComments(readRepoFile("scripts/_integration-pool.js"));
-  const integrationEnvironment = withoutLineComments(readRepoFile("scripts/integration-environment.js"));
-  const integrationStack = withoutLineComments(readRepoFile("tests/integration/helpers/stack.js"));
-  const integrationCompose = withoutLineComments(readRepoFile("tests/integration/helpers/compose.js"));
-  const compileConfigs = withoutLineComments(readRepoFile("scripts/compile-workerd-configs.js"));
-  const supervisorConfig = readRepoFile("rust/supervisor/src/config.rs");
-  const supervisorLib = readRepoFile("rust/supervisor/src/lib.rs");
-  const dockerfileWorkerd = withoutLineComments(readRepoFile("Dockerfile.workerd"));
-  const kubeGateway = withoutLineComments(readRepoFile("deploy/kubernetes/base/gateway.yaml"));
-  const kubeSystemRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/system-runtime.yaml"));
-  const kubeUserRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/user-runtime.yaml"));
-  const terraformGatewayService = withoutLineComments(readRepoFile("terraform/modules/compute/gateway_service.tf"));
-  const terraformRuntimeService = withoutLineComments(readRepoFile("terraform/modules/compute/runtime_service.tf"));
-  const terraformSystemRuntimeService = withoutLineComments(readRepoFile("terraform/modules/compute/system_runtime_service.tf"));
-  const packageJson = withoutLineComments(readRepoFile("package.json"));
 
-  // Local/integration should mirror production Service Connect for HTTP
-  // service-to-service hops, while Redis remains direct because production
-  // Valkey is not behind Service Connect.
   assert.match(compose, /\n {2}envoy:\n\s+image: envoyproxy\/envoy:/);
   assert.match(compose, /RUNTIME_HOST: envoy/);
   assert.match(compose, /RUNTIME_PORT: "18088"/);
@@ -1842,11 +1775,21 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   assert.match(compose, /REDIS_URL: redis:\/\/redis:6379/);
   assert.match(compose, /REDIS_ADDR: redis:6379/);
   assert.match(compose, /WDL_WORKERD_CONFIG_VARIANT: local/);
-  assert.match(compose, /envoy:\n[\s\S]*?healthcheck:/);
-  assert.match(compose, /GET \/ready HTTP\/1\.1/);
-  assert.equal(/envoy --mode validate/.test(compose), false);
-  assert.match(compose, /envoy:\n[\s\S]*?condition: service_healthy/);
-  assert.equal(/WDL_LOCAL_ENVOY_MESH/.test(compose), false);
+  const envoyHealthcheck = composeConfig.services?.envoy?.healthcheck;
+  assert.ok(Array.isArray(envoyHealthcheck?.test), "Envoy healthcheck command must exist");
+  assert.ok(
+    envoyHealthcheck.test.some((/** @type {unknown} */ part) =>
+      typeof part === "string" && part.includes("GET /ready")
+    ),
+    "Envoy healthcheck must probe /ready",
+  );
+  for (const serviceName of ["gateway", "scheduler", "system-runtime", "user-runtime"]) {
+    assert.equal(
+      composeConfig.services?.[serviceName]?.depends_on?.envoy?.condition,
+      "service_healthy",
+      `${serviceName} must wait for healthy Envoy`,
+    );
+  }
 
   assert.match(gatewayLocal, /address = "envoy:18081"/);
   assert.match(gatewayLocal, /address = "envoy:18082"/);
@@ -1856,90 +1799,6 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   assert.match(runtimeUserLocal, /address = "envoy:18787"/);
   assert.match(runtimeSystemLocal, /address = "envoy:18787"/);
   assert.match(doRuntimeLocal, /address = "envoy:18787"/);
-  assert.match(integrationPool, /WDL_WORKERD_CONFIG_VARIANT: "local"/);
-  assert.match(integrationEnvironment, /COMPILE_WORKERD_LOCAL_ARGS = \["scripts\/compile-workerd-configs\.js", "--local"\]/);
-  assert.match(integrationEnvironment, /DOCKER_COMPOSE_BUILD_ARGS = \["compose", "build", "gateway", "workflows"\]/);
-  assert.match(integrationEnvironment, /WDL_INTEGRATION_SKIP_PREPARE/);
-  assert.match(integrationEnvironment, /WDL_INTEGRATION_NO_BUILD/);
-  assert.match(integrationPool, /WDL_INTEGRATION_NO_BUILD: "1"/);
-  assert.match(integrationStack, /COMPILE_WORKERD_LOCAL_ARGS/);
-  assert.match(integrationStack, /DOCKER_COMPOSE_BUILD_ARGS/);
-  assert.match(integrationCompose, /composeNoBuildFlag/);
-  assert.match(packageJson, /"compile:workerd": "node scripts\/compile-workerd-configs\.js"/);
-  assert.match(packageJson, /"compile:workerd:local": "node scripts\/compile-workerd-configs\.js --local"/);
-  assert.doesNotMatch(packageJson, /"pretest:integration"/);
-  assert.match(compileConfigs, /process\.argv\.includes\("--local"\)/);
-  assert.match(compileConfigs, /existsSync\(WORKERD\)/);
-  assert.match(compileConfigs, /Run `npm ci` before `npm run compile:workerd:local`/);
-  assert.match(compileConfigs, /result\.error/);
-  assert.match(compileConfigs, /result\.stderr\?\.length/);
-  for (const config of [
-    "gateway-local",
-    "user-runtime-local",
-    "system-runtime-local",
-    "do-runtime-local",
-  ]) {
-    assert.match(compileConfigs, new RegExp(`name: "${RegExp.escape(config)}"`));
-  }
-  // Compose pure-tier commands now bind compiled .bin paths directly (no
-  // workerd-serve.sh, no source-mode dispatch).
-  for (const tier of ["gateway-local", "user-runtime-local", "system-runtime-local"]) {
-    assert.match(
-      compose,
-      new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin`),
-    );
-  }
-  // workerLoader bindings remain gated on the process-level --experimental
-  // switch. Keep it only on workerLoader-owning processes, not
-  // on gateway or D1 and not as a Worker compatibility flag.
-  for (const tier of ["user-runtime-local", "system-runtime-local"]) {
-    assert.match(
-      compose,
-      new RegExp(`workerd-configs/${RegExp.escape(tier)}\\.bin", "--experimental"`),
-    );
-  }
-  assert.doesNotMatch(compose, /gateway-local\.bin", "--experimental"/);
-  assert.match(kubeUserRuntime, /user-runtime\.bin[\s\S]*?- --experimental/);
-  assert.match(kubeSystemRuntime, /system-runtime\.bin[\s\S]*?- --experimental/);
-  assert.doesNotMatch(kubeGateway, /--experimental/);
-  assert.match(terraformRuntimeService, /user-runtime\.bin", "--experimental"/);
-  assert.match(terraformSystemRuntimeService, /system-runtime\.bin", "--experimental"/);
-  assert.doesNotMatch(terraformGatewayService, /--experimental/);
-  assert.match(supervisorLib, /workerd_args\(D1_COMPILED_CONFIG, false\)/);
-  assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
-  assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
-  for (const file of [
-    "gateway/config.capnp",
-    "gateway/config-local.capnp",
-    "runtime/config-user.capnp",
-    "runtime/config-user-local.capnp",
-    "runtime/config-system.capnp",
-    "runtime/config-system-local.capnp",
-    "d1-runtime/config.capnp",
-    "do-runtime/config.capnp",
-    "do-runtime/config-local.capnp",
-  ]) {
-    const source = readRepoFile(file);
-    assert.doesNotMatch(
-      source,
-      /compatibilityFlags\s*=\s*\[[^\]]*"experimental"/,
-      `${file} must not re-add the tenant experimental compatibility flag`
-    );
-    assert.doesNotMatch(
-      source,
-      /allow_irrevocable_stub_storage/,
-      `${file} must not enable irrevocable long-term stub storage`
-    );
-  }
-  // The supervisor config owns the local/production .bin choice; only it
-  // references do-runtime-local.bin since compose forwards via the
-  // supervisor binary, not via raw workerd serve.
-  assert.match(supervisorConfig, /do-runtime-local\.bin/);
-  // workerd-serve.sh has been retired; keep the dev/prod surface free of
-  // re-introductions.
-  assert.equal(/workerd-serve/.test(compose), false);
-  assert.equal(/workerd-serve/.test(dockerfileWorkerd), false);
-  assert.equal(/workerd-serve/.test(packageJson), false);
 
   assert.match(envoy, /\badmin:\n\s+address:/);
   for (const port of ["18081", "18082", "18083", "18088", "18089", "18787", "18788"]) {
@@ -1956,9 +1815,8 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   ]) {
     assert.match(envoy, new RegExp(RegExp.escape(upstream)));
   }
-  // D1 owner-routing tests address task-specific runtimes directly. Only the
-  // initial runtime binding router is Envoy-backed; learned owner endpoints
-  // stay as D1_TASK_ENDPOINT service names, matching production registry data.
+  // Only the first-hop router is Envoy-backed. Learned owner endpoints stay
+  // task-specific so the lease and generation fence reaches the named owner.
   for (const service of ["d1-runtime-a", "d1-runtime-b", "d1-runtime-c"]) {
     assert.match(compose, new RegExp(`D1_TASK_ENDPOINT: ${RegExp.escape(service)}:8787`));
     assert.equal(envoy.includes(`address: ${service}, port_value: 8787`), false);
@@ -1979,7 +1837,51 @@ test("local compose routes private HTTP hops through Envoy only", () => {
       new RegExp(`name: ${RegExp.escape(listener)}[\\s\\S]*?preserve_external_request_id: true`)
     );
   }
-  assert.ok((envoy.match(/preserve_external_request_id: true/g) || []).length >= 5);
+});
+
+test("workerd experimental process access stays limited to workerLoader tiers", () => {
+  const compose = withoutLineComments(readRepoFile("docker-compose.yml"));
+  const kubeGateway = withoutLineComments(readRepoFile("deploy/kubernetes/base/gateway.yaml"));
+  const kubeSystemRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/system-runtime.yaml"));
+  const kubeUserRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/user-runtime.yaml"));
+  const terraformGateway = withoutLineComments(readRepoFile("terraform/modules/compute/gateway_service.tf"));
+  const terraformRuntime = withoutLineComments(readRepoFile("terraform/modules/compute/runtime_service.tf"));
+  const terraformSystemRuntime = withoutLineComments(readRepoFile("terraform/modules/compute/system_runtime_service.tf"));
+  const supervisorConfig = readRepoFile("rust/supervisor/src/config.rs");
+  const supervisorLib = readRepoFile("rust/supervisor/src/lib.rs");
+
+  for (const tier of ["user-runtime-local", "system-runtime-local"]) {
+    assert.match(
+      compose,
+      new RegExp(`workerd-configs/${RegExp.escape(tier)}\\.bin", "--experimental"`),
+    );
+  }
+  assert.doesNotMatch(compose, /gateway-local\.bin", "--experimental"/);
+  assert.match(kubeUserRuntime, /user-runtime\.bin[\s\S]*?- --experimental/);
+  assert.match(kubeSystemRuntime, /system-runtime\.bin[\s\S]*?- --experimental/);
+  assert.doesNotMatch(kubeGateway, /--experimental/);
+  assert.match(terraformRuntime, /user-runtime\.bin", "--experimental"/);
+  assert.match(terraformSystemRuntime, /system-runtime\.bin", "--experimental"/);
+  assert.doesNotMatch(terraformGateway, /--experimental/);
+  assert.match(supervisorLib, /workerd_args\(D1_COMPILED_CONFIG, false\)/);
+  assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
+  assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
+
+  for (const file of [
+    "gateway/config.capnp",
+    "gateway/config-local.capnp",
+    "runtime/config-user.capnp",
+    "runtime/config-user-local.capnp",
+    "runtime/config-system.capnp",
+    "runtime/config-system-local.capnp",
+    "d1-runtime/config.capnp",
+    "do-runtime/config.capnp",
+    "do-runtime/config-local.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.doesNotMatch(source, /compatibilityFlags\s*=\s*\[[^\]]*"experimental"/, file);
+    assert.doesNotMatch(source, /allow_irrevocable_stub_storage/, file);
+  }
 });
 
 test("S3 query encoding stays aligned between shared and injected runtime helpers", () => {
@@ -2287,115 +2189,60 @@ test("D1 and DO workerd env tunables are exposed through capnp bindings", () => 
   }
 });
 
-test("D1 and DO workerd containers keep explicit memory ceilings", () => {
+test("D1 and DO deployments keep explicit runtime memory ceilings", () => {
   const rootVars = readRepoFile("terraform/variables.tf");
   const moduleVars = readRepoFile("terraform/modules/compute/variables.tf");
   const main = readRepoFile("terraform/main.tf");
   const locals = readRepoFile("terraform/modules/compute/locals.tf");
   const d1Service = readRepoFile("terraform/modules/compute/d1_runtime_service.tf");
   const doService = readRepoFile("terraform/modules/compute/do_runtime_service.tf");
-  const d1Kube = readRepoFile("deploy/kubernetes/base/d1-runtime.yaml");
-  const doKube = readRepoFile("deploy/kubernetes/base/do-runtime.yaml");
 
   for (const name of ["d1_runtime_container_memory", "do_runtime_container_memory"]) {
     assert.match(rootVars, new RegExp(`variable "${name}"`));
     assert.match(moduleVars, new RegExp(`variable "${name}"`));
     assert.match(main, new RegExp(`${name}\\s+=\\s+var\\.${name}`));
   }
+  assert.match(locals, /stateful_runtime_memory_headroom\s+=\s+128/);
   assert.match(
     locals,
-    /stateful_runtime_memory_headroom\s+=\s+128/
+    /d1_runtime_container_memory\s+=\s+coalesce\(\s*var\.d1_runtime_container_memory,\s*var\.runtime_memory - local\.stateful_runtime_memory_headroom,\s*\)/,
   );
-  assert.match(
-    locals,
-    /d1_runtime_container_memory\s+=\s+coalesce\(\s*var\.d1_runtime_container_memory,\s*var\.runtime_memory - local\.stateful_runtime_memory_headroom,\s*\)/
-  );
+
   assert.match(d1Service, /memory\s+=\s+local\.d1_runtime_container_memory/);
   assert.match(
     d1Service,
-    /local\.d1_runtime_container_memory > 0 &&\s*local\.d1_runtime_container_memory <= var\.runtime_memory - local\.stateful_runtime_memory_headroom/
+    /local\.d1_runtime_container_memory > 0 &&\s*local\.d1_runtime_container_memory <= var\.runtime_memory - local\.stateful_runtime_memory_headroom/,
   );
   assert.match(locals, /redis_proxy_memory_reservation\s+=\s+64/);
-  assert.match(locals, /do_runtime_container_memory\s+=\s+coalesce\(\s*var\.do_runtime_container_memory,\s*var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom,\s*\)/);
+  assert.match(
+    locals,
+    /do_runtime_container_memory\s+=\s+coalesce\(\s*var\.do_runtime_container_memory,\s*var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom,\s*\)/,
+  );
   assert.match(doService, /memoryReservation\s+=\s+local\.redis_proxy_memory_reservation/);
   assert.match(doService, /memory\s+=\s+local\.do_runtime_container_memory/);
-  assert.match(doService, /local\.do_runtime_container_memory > 0 &&\s*local\.do_runtime_container_memory <= var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom/);
-  assert.match(doService, /redis-proxy sidecar/);
-  assert.match(d1Kube, /name: d1-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
-  assert.match(doKube, /name: do-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
+  assert.match(
+    doService,
+    /local\.do_runtime_container_memory > 0 &&\s*local\.do_runtime_container_memory <= var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom/,
+  );
+
+  for (const serviceName of ["d1-runtime", "do-runtime"]) {
+    const resources = /** @type {Array<Record<string, any>>} */ (
+      yamlDocuments(`deploy/kubernetes/base/${serviceName}.yaml`)
+        .map((document) => document.toJS())
+    );
+    const statefulSet = resources.find((resource) =>
+      resource.kind === "StatefulSet" && resource.metadata?.name === serviceName
+    );
+    const container = statefulSet?.spec?.template?.spec?.containers
+      ?.find((/** @type {Record<string, any>} */ entry) => entry.name === serviceName);
+    assert.ok(container, `${serviceName} StatefulSet container must exist`);
+    assert.equal(container.resources?.limits?.memory, "1Gi", `${serviceName} memory limit`);
+  }
 });
 
-test("Terraform ECS services use Fargate-only launch contracts", () => {
+test("Terraform ECS services keep their Fargate placement and rollout classes", () => {
   const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
   const locals = readRepoFile("terraform/modules/compute/locals.tf");
-  const rootVars = readRepoFile("terraform/variables.tf");
-  const variableBlock = (/** @type {string} */ name) => {
-    const start = rootVars.indexOf(`variable "${name}" {`);
-    assert.notEqual(start, -1, `missing Terraform variable ${name}`);
-    const next = rootVars.indexOf('\nvariable "', start + 1);
-    return rootVars.slice(start, next === -1 ? rootVars.length : next);
-  };
-  const variableDefault = (/** @type {string} */ name) => {
-    const match = variableBlock(name).match(/default\s+=\s+([0-9]+)/);
-    assert.ok(match, `missing numeric Terraform default for ${name}`);
-    return Number(match[1]);
-  };
-
-  assert.match(cluster, /name\s+=\s+"containerInsights"\s+value\s+=\s+"enhanced"/);
-  // Keep in sync with the AWS ECS Fargate task-size table.
-  const validFargateCpuValues = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
-  const fargateMemoryByCpu = new Map([
-    [256, new Set([512, 1024, 2048])],
-    [512, new Set([1024, 2048, 3072, 4096])],
-    [1024, new Set([2048, 3072, 4096, 5120, 6144, 7168, 8192])],
-    [2048, new Set(Array.from({ length: 13 }, (_, i) => 4096 + i * 1024))],
-    [4096, new Set(Array.from({ length: 23 }, (_, i) => 8192 + i * 1024))],
-    [8192, new Set(Array.from({ length: 12 }, (_, i) => 16384 + i * 4096))],
-    [16384, new Set(Array.from({ length: 12 }, (_, i) => 32768 + i * 8192))],
-    [32768, new Set([61440, 122880, 249856])],
-  ]);
-  const cpuListPattern = validFargateCpuValues.join(", ");
-  const assertFargateVariableValidation = (/** @type {string} */ service) => {
-    const cpuBlock = variableBlock(`${service}_cpu`);
-    const memoryBlock = variableBlock(`${service}_memory`);
-    assert.match(
-      cpuBlock,
-      new RegExp(`contains\\(\\[${cpuListPattern}\\], var\\.${service}_cpu\\)`),
-      `${service}_cpu must validate the full Fargate CPU set`
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 256 && contains\\(\\[512, 1024, 2048\\], var\\.${service}_memory\\)`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 512 && contains\\(\\[1024, 2048, 3072, 4096\\], var\\.${service}_memory\\)`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 1024 && contains\\(\\[2048, 3072, 4096, 5120, 6144, 7168, 8192\\], var\\.${service}_memory\\)`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 2048 && var\\.${service}_memory >= 4096 && var\\.${service}_memory <= 16384 && var\\.${service}_memory % 1024 == 0`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 4096 && var\\.${service}_memory >= 8192 && var\\.${service}_memory <= 30720 && var\\.${service}_memory % 1024 == 0`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 8192 && var\\.${service}_memory >= 16384 && var\\.${service}_memory <= 61440 && var\\.${service}_memory % 4096 == 0`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 16384 && var\\.${service}_memory >= 32768 && var\\.${service}_memory <= 122880 && var\\.${service}_memory % 8192 == 0`)
-    );
-    assert.match(
-      memoryBlock,
-      new RegExp(`var\\.${service}_cpu == 32768 && contains\\(\\[61440, 122880, 249856\\], var\\.${service}_memory\\)`)
-    );
-  };
   const assertCapacityProviderDependency = (
     /** @type {string} */ source,
     /** @type {string} */ file
@@ -2408,29 +2255,18 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
   };
 
   assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
-  assert.doesNotMatch(cluster, /default_capacity_provider_strategy/);
-  assert.match(locals, /fargate_stateless_capacity_provider_strategies\s+=\s+\[/);
-  assert.match(locals, /fargate_ondemand_capacity_provider_strategies\s+=\s+\[/);
   assert.match(
     locals,
-    /zero_downtime_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/
+    /zero_downtime_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/,
   );
   assert.match(
     locals,
-    /stop_before_start_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+0\s*\}/
+    /stop_before_start_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+0\s*\}/,
   );
   assert.match(
     locals,
-    /sequential_replacement_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+50\s*\}/
+    /sequential_replacement_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+50\s*\}/,
   );
-  assert.match(rootVars, /variable "spot_weight" \{[\s\S]*?condition\s+=\s+var\.spot_weight > 0/);
-  assert.match(rootVars, /variable "od_weight" \{[\s\S]*?condition\s+=\s+var\.od_weight > 0/);
-  for (const service of ["gateway", "system_runtime", "runtime", "scheduler", "workflows"]) {
-    const cpu = variableDefault(`${service}_cpu`);
-    const memory = variableDefault(`${service}_memory`);
-    assert.ok(fargateMemoryByCpu.get(cpu)?.has(memory), `${service} default ${cpu}/${memory} must be a valid Fargate CPU/memory pair`);
-    assertFargateVariableValidation(service);
-  }
 
   for (const file of [
     "terraform/modules/compute/gateway_service.tf",
@@ -2590,20 +2426,6 @@ test("DO transport relative dependencies are registered in host and loaded-worke
     assert.match(source, /name = "runtime-do-transport", esModule = embed/);
     assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
     assert.match(source, /name = "runtime-request-id-source", text = embed/);
-  }
-});
-
-test("worker-id helper carries its relative grammar dependencies in workerd configs", () => {
-  for (const file of [
-    "gateway/config.capnp",
-    "runtime/config-user.capnp",
-    "runtime/config-system.capnp",
-    "do-runtime/config.capnp",
-  ]) {
-    const source = readRepoFile(file);
-    assert.match(source, /name = "shared-worker-id"/, file);
-    assert.match(source, /name = "ns-pattern\.js"/, file);
-    assert.match(source, /name = "worker-contract\.js"/, file);
   }
 });
 

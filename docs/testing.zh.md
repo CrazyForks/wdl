@@ -200,7 +200,7 @@ npm install -g @wdl-dev/cli@1.4.1
 
 ### Tripwire
 
-`tests/helpers/style-contract-scanner.js` 负责 style-contract tests 共用的源码扫描和字面量提取 helper。生产/跨 tier tripwire 留在 `tests/unit/style-contracts.test.js`，它断言 workerd config 归属、service anchor、`composeNoBuildFlag`、grammar mirror、Redis key convention、active-doc parity 等跨源码契约。测试 helper/style tripwire 放在 `tests/unit/test-helper-style-contracts.test.js`；该文件递归扫描两棵 helper 树，守住 `load-shared-module.js` data-URL 构造、module rewrite、response JSON helper、Redis CLI wrapper 和上面的 module-loader 约定。repo module source rewrite 应继续集中在 `load-shared-module.js`，不要漂回 file-local source-reader 或 source-producer `.replace(...)` 链。共享 source scanner 会跳过生成的 dependency 和 worker build 目录（`node_modules`、`.deploy-dist`、`.wrangler`）。因此这些 tripwire 覆盖的是仓库作者维护的源码，而不是本地安装 churn。重命名或移动 helper 而忘记更新 tripwire，unit 套件即跳。
+`tests/helpers/style-contract-scanner.js` 负责 style-contract tests 共用的源码扫描和字面量提取 helper。生产/跨 tier tripwire 留在 `tests/unit/style-contracts.test.js`，它断言 workerd config 归属、service anchor、grammar mirror、Redis key convention、active-doc parity 等跨源码契约。测试 helper/style tripwire 放在 `tests/unit/test-helper-style-contracts.test.js`；该文件递归扫描两棵 helper 树，守住 `load-shared-module.js` data-URL 构造、module rewrite、response JSON helper、Redis CLI wrapper 和上面的 module-loader 约定。repo module source rewrite 应继续集中在 `load-shared-module.js`，不要漂回 file-local source-reader 或 source-producer `.replace(...)` 链。共享 source scanner 会跳过生成的 dependency 和 worker build 目录（`node_modules`、`.deploy-dist`、`.wrangler`）。因此这些 tripwire 覆盖的是仓库作者维护的源码，而不是本地安装 churn。重命名或移动 helper 而忘记更新 tripwire，unit 套件即跳。
 
 ## 持续集成
 

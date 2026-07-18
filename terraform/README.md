@@ -248,11 +248,11 @@ boundary. D1 and DO task identities use `ECS_CONTAINER_METADATA_URI_V4`.
 
 ## Observability
 
-The Terraform ECS cluster enables Container Insights with enhanced observability. That
-collects AWS infrastructure telemetry for cluster, service, task, and container health
-and utilization, including per-container memory metrics used for capacity checks. AWS
-bills these metrics as CloudWatch Container Insights/custom metrics. This is separate
-from WDL service Prometheus metrics and bounded-label application logs.
+The ECS cluster's Container Insights setting controls optional AWS infrastructure
+telemetry for cluster, service, task, and container health and utilization. Its mode
+may be adjusted independently of WDL application observability. AWS bills enabled
+telemetry as CloudWatch Container Insights/custom metrics; it remains separate from
+WDL service Prometheus metrics and bounded-label application logs.
 
 ## Admin Token
 

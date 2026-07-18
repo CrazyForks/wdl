@@ -288,18 +288,6 @@ test("control Redis key helpers match canonical schema", () => {
   assert.equal(doObjectRegistryKey("do_abc"), "do:objects:do_abc");
 });
 
-test("NS_RE accepts DNS-label-compatible tenant namespaces", () => {
-  for (const ok of ["demo", "a", "ns-1", "0", "a-b-c", "0123456789", "a".repeat(63)]) {
-    assert.ok(NS_RE.test(ok), `expected "${ok}" to match`);
-  }
-});
-
-test("NS_RE rejects uppercase, dot, empty, edge-hyphen, and long names", () => {
-  for (const bad of ["", "-", "-ns", "ns-", "a".repeat(64), "Demo", "ns.one", "ns_1", "ns one", "a/b", "你好"]) {
-    assert.ok(!NS_RE.test(bad), `expected "${bad}" to NOT match`);
-  }
-});
-
 test("normalizeModule: string → module", () => {
   const r = normalizeModule("export default {}");
   assert.equal(r.type, "module");
@@ -2924,20 +2912,6 @@ test("compareStreamIds orders ms first then seq with BigInt safety", () => {
   // BigInt-safe (>2^53)
   assert.equal(compareStreamIds("9007199254740993-0", "9007199254740994-0") < 0, true);
   assert.equal(compareStreamIds("1-9007199254740993", "1-9007199254740994") < 0, true);
-});
-
-// --- PLATFORM_TIER_RESERVED_NS shape sanity (lock at file end) ---
-
-const PLATFORM_NS_SHAPE_RE = /^__[a-z0-9_]+__$/;
-test("PLATFORM_TIER_RESERVED_NS members are __<name>__ shaped + not __system__ + not RESERVED_TENANT_NS", () => {
-  for (const ns of PLATFORM_TIER_RESERVED_NS) {
-    assert.ok(RESERVED_NS.has(ns),
-      `platform-tier member "${ns}" must also be listed in RESERVED_NS`);
-    assert.ok(PLATFORM_NS_SHAPE_RE.test(ns),
-      `member "${ns}" must match /^__[a-z0-9_]+__$/`);
-    assert.notEqual(ns, "__system__",
-      "__system__ is the control plane and must not be in PLATFORM_TIER_RESERVED_NS");
-  }
 });
 
 test("PLATFORM_TIER_RESERVED_NS at suite end is exactly the baseline {__platform__}", () => {

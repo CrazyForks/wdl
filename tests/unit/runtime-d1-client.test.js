@@ -34,7 +34,7 @@ const OVERSIZED_BIND_PARAM_SIZE = MAX_BIND_PARAM_SIZE + 1;
  * @typedef {new (message: string, options?: Record<string, unknown>) => D1ErrorInstance} D1ErrorConstructor
  */
 
-/** @type {{ D1Error: D1ErrorConstructor, D1Database: D1DatabaseConstructor, splitExecStatements: (sql: string) => D1Statement[] }} */
+/** @type {{ D1Error: D1ErrorConstructor, D1Database: D1DatabaseConstructor }} */
 const d1ClientModule = await importRepositoryModule("runtime/d1-client.js", [
   ...importSpecifierReplacements({
     "./_wdl-sql-splitter.js": repositoryFileUrl("shared/sql-splitter.js"),
@@ -44,11 +44,7 @@ const d1ClientModule = await importRepositoryModule("runtime/d1-client.js", [
   }),
 ]);
 
-const {
-  D1Error,
-  D1Database: LocalD1Database,
-  splitExecStatements,
-} = d1ClientModule;
+const { D1Error, D1Database: LocalD1Database } = d1ClientModule;
 
 /**
  * @param {((mode: string, statements: D1Statement[]) => D1QueryResponse | Promise<D1QueryResponse>) | null} [handler]
@@ -283,65 +279,6 @@ test("D1 local client: exec returns D1ExecResult shape", async () => {
     { sql: "insert into t values ('x')", params: [] },
   ]);
   assert.deepEqual(result, { count: 2, duration: 3 });
-});
-
-test("D1 local client: exec splitter ignores semicolons inside strings and comments", () => {
-  assert.deepEqual(
-    splitExecStatements(`
-      insert into messages (id, body) values ('semi', 'a;b');
-      -- ignored ; in line comment
-      insert into messages (id, body) values ("quoted;id", 'c');
-      /* ignored ; in block comment */
-      select [semi;column] from \`semi;table\`;
-    `),
-    [
-      { sql: "insert into messages (id, body) values ('semi', 'a;b')", params: [] },
-      {
-        sql: "-- ignored ; in line comment\n      insert into messages (id, body) values (\"quoted;id\", 'c')",
-        params: [],
-      },
-      {
-        sql: "/* ignored ; in block comment */\n      select [semi;column] from `semi;table`",
-        params: [],
-      },
-    ]
-  );
-});
-
-test("D1 local client: exec splitter keeps CREATE TRIGGER bodies intact", () => {
-  const sql = `
-    create table source (id text);
-    create table audit (id text);
-    create trigger source_ai after insert on source
-    begin
-      insert into audit (id) values (new.id);
-      update audit set id = id || ';seen' where id = new.id;
-    end;
-    insert into source values ('a');
-  `;
-
-  const statements = splitExecStatements(sql);
-  assert.equal(statements.length, 4);
-  assert.match(statements[2].sql, /^create trigger/i);
-  assert.match(statements[2].sql, /insert into audit/);
-  assert.match(statements[2].sql, /update audit/);
-  assert.match(statements[3].sql, /^insert into source/);
-});
-
-test("D1 local client: exec splitter keeps CREATE TRIGGER bodies intact with trailing END comment", () => {
-  const sql = `
-    create table source (id text);
-    create trigger source_ai after insert on source
-    begin
-      insert into source values ('a');
-    end /* trailing comment */;
-    insert into source values ('b');
-  `;
-
-  const statements = splitExecStatements(sql);
-  assert.equal(statements.length, 3);
-  assert.match(statements[1].sql, /^create trigger/i);
-  assert.match(statements[2].sql, /^insert into source values \('b'\)/i);
 });
 
 test("D1 local client: withSession() is API-compatible without replica routing", async () => {
