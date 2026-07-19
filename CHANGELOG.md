@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Made Workflows interleave and examine at most 128 ready candidates from all active scheduling shards through one global dispatch pool, raised the configurable default pool size from 8 to 128, raised the independently configurable DO alarm pool from 8 to 32, ran both bounded dispatch waves concurrently, and gave Scheduler workflow ticks an independent 130-second request deadline, removing shard-serial queueing and the mismatch between Scheduler's previous 60-second deadline and Terraform's 120-second Workflows dispatch timeout under concurrent long-running workflows.
-- Updated the bundled runtime to date-only workerd `1.20260719.1` and Workers types `5.20260719.1`, extending the maximum compatibility date to `2026-07-26`, and raised the published CLI integration and Quick Start pin from `1.4.1` to `1.5.0`.
+## wdl.20260719.1 - 2026-07-19
+
+- Removed shard-serial Workflows queueing by interleaving at most 128 ready candidates through a global dispatch pool, running workflow and DO alarm pools concurrently with defaults of 128 and 32, and aligning Scheduler's 130-second tick deadline with Terraform's 120-second dispatch timeout.
+- Updated the bundled workerd and Workers types pins to `1.20260719.1` and `5.20260719.1`, and pinned CLI integration and Quick Start to `@wdl-dev/cli@1.5.0`.
 
 ## wdl.20260718.1 - 2026-07-19
 
