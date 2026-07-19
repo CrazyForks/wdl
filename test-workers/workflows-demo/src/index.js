@@ -102,6 +102,9 @@ export class OrderWorkflow extends WorkflowEntrypoint {
       }));
     }
     return await step.do("record", async () => {
+      if (event.payload.runDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, event.payload.runDelayMs));
+      }
       if (event.payload.fail) throw new Error("workflow boom");
       return {
         instanceId: event.payload.id ?? null,
@@ -143,6 +146,7 @@ export default {
           parallelSteps: url.searchParams.get("parallelSteps") === "1",
           dynamicStepName: url.searchParams.get("dynamicStepName") || "",
           largeStepResult: url.searchParams.get("largeStepResult") === "1",
+          runDelayMs: Number(url.searchParams.get("runDelayMs") ?? 0),
         },
       });
       return Response.json({

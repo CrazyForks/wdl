@@ -86,7 +86,7 @@ Key families：
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
 - Workflows 在持久化 DO alarm job 前拒绝 non-canonical alarm identity，在 dispatch 前重新校验持久化 alarm identity，并在把 active route 用作 retarget 前校验其 version。其中 namespace、worker、version 校验复用 `wdl-rust-common`；do-runtime protocol grammar 与 identity helper 拥有 canonical alarm-specific field 和 aggregate 512-byte DO host-id 合同，Workflows 在持久化和 dispatch 前镜像并重新校验该合同。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
-- 32 个 scheduling shards 划分 ready/due work。每次 tick 会把 active shard 的候选交错放入同一个全局 dispatch pool，而不是逐 shard drain。`WORKFLOWS_READY_DISPATCH_CONCURRENCY` 限制该 pool，默认值为 `128`，并限制在每次 tick 的 1–128 ready batch 范围内。Workflow 与 DO alarm dispatch pool 会并行运行。`WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY` 控制 DO alarm wave，默认值为 `32`，有效范围为 1–100 个 job；每次 tick 启动一个这样的 wave。Scheduler 通过 `WORKFLOWS_TICK_TIMEOUT_MS` 为 tick request 设置独立的客户端 deadline，默认值为 130 秒。Workflows 的代码默认 dispatch timeout 为 60 秒；Terraform 将其提高到 120 秒，从而为默认的单 wave pool 保留 10 秒 request、Redis 和 commit 余量。该配置限制 Scheduler 的等待时间，并不限制客户端断开后的服务端 tick 执行。Operator 提高 `WORKFLOWS_DISPATCH_TIMEOUT_MS`，或把 workflow dispatch concurrency 降到 ready batch size 以下时，也必须提高 tick timeout。
+- 32 个 scheduling shards 划分 ready/due work。每次 tick 会交错处理 active shard 的候选，在 claim 前取得 dispatch permit，并把已 claim activation 交给 Workflows-owned background task，而不是逐 shard drain。Tick 只等待 maintenance、claim 和 admission，不等待 tenant execution 或 DO alarm delivery 完成。`WORKFLOWS_READY_DISPATCH_CONCURRENCY` 限制同一个 Workflows replica 上跨重叠 tick 的 workflow execution，默认值为 `128`，并限制在 1–128 ready batch 范围内。独立的 DO alarm pool 由 `WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY` 控制，默认值为 `32`，有效范围为 1–100 个 job。已 admission 的 task 会持有 pool permit 和 shutdown in-flight guard，直到 runtime dispatch 与 fenced commit 结束；进程丢失后仍由现有 run lease 和 ready hint 恢复。Scheduler 通过 `WORKFLOWS_TICK_TIMEOUT_MS` 为 maintenance 和 admission 设置独立客户端 deadline，默认值为 60 秒；它不是 workflow execution deadline，也与 Workflows runtime dispatch timeout 相互独立。Tick 报告 maintenance、admission 或任一 dispatch pool 因容量不足仍有待处理工作时，Scheduler 使用 `WORKFLOWS_TICK_ACTIVE_INTERVAL_MS`（默认 100ms）；否则使用 `WORKFLOWS_TICK_INTERVAL_MS`（默认 1 秒）。
 - Ready token 是去重 hint；instance hash state 是权威状态。
 - Execution commit 同时用 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting` 状态，因此一个并行 sibling 进入 retry/wait 后，另一个 sibling 仍可完成；completed runtime terminal 要求 `running`，failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。Lifecycle commit 只用 generation fence，并在同一个 Lua commit 内 rotate `generation`。
 - Runtime replay cache 只是 advisory。DB 2 step state 是权威。
@@ -107,9 +107,9 @@ Scheduling 是 hint-based，但状态权威在 instance hash：
 
 1. `create`、`resume`、`restart` 和 event delivery 向 `wf:ready:<shard>` 写 immediate token。
 2. Sleep、retry 和 wait timeout 向 `wf:due:<shard>` 写或更新 due token。
-3. scheduler 调 `/internal/workflows/tick`；workflows promote due token、采样 ready token，并 claim eligible instance。
+3. scheduler 调 `/internal/workflows/tick`；workflows promote due token、采样 ready token、取得同一 Workflows replica 内跨 tick/shard 共用的 dispatch permit，并 claim eligible instance。Tick 在 admission 后返回，不等待这些 run 完成。
 4. Claim 根据 instance hash 校验 status、generation 和 lease state。重复或 stale 的 ready/due token 会自清理，不执行用户代码。
-5. Runtime dispatch 受 `WORKFLOWS_DISPATCH_TIMEOUT_MS` 约束。runtime dispatch error 或 timeout 时，workflows 会释放 ordinary run claim，让后续 tick 可以 retry。Generation/run-token fence 会阻止双 durable commit，但用户代码里的外部副作用可能重复；workflow 代码和 step callback 应保持幂等。`WORKFLOWS_RUN_LEASE_MS` 会被 clamp 到高于 dispatch timeout，它是 stale-claim backstop，不是普通 long-run timeout 旋钮。
+5. 每个已 admission 的 runtime dispatch 加上其 fenced result commit 都由 tracked Workflows task 持有。Runtime dispatch 受 `WORKFLOWS_DISPATCH_TIMEOUT_MS` 约束。runtime dispatch error 或 timeout 时，workflows 会释放 ordinary run claim，让后续 tick 可以 retry。Generation/run-token fence 会阻止双 durable commit，但用户代码里的外部副作用可能重复；workflow 代码和 step callback 应保持幂等。`WORKFLOWS_RUN_LEASE_MS` 会被 clamp 到高于 dispatch timeout，它是 stale-claim backstop，不是普通 long-run timeout 旋钮。
 
 Step facade 实现 durable replay：
 
@@ -151,14 +151,14 @@ Progress callback 是 best-effort same-worker Durable Object push。Create reque
 
 ## 可观测性
 
-workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/_metrics`、request in-flight tracking、shutdown drain 和有界 labels。Runtime 输出 workflow dispatch、replay cache、payload-limit 和 callback outcome。Workflows 输出 internal DO alarm delivery/retry/discard outcome 和有界 `do_alarm_dispatches` metric。Scheduler 把 workflow tick failure 与 queue/cron dispatch 分开记录。
+workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/_metrics`、request in-flight tracking、shutdown drain 和有界 labels。Runtime 输出 workflow dispatch、replay cache、payload-limit 和 callback outcome。Workflows 通过有界 `workflow_dispatches` 输出包括 fenced no-op commit 在内的 completion outcome，并通过 `do_alarm_dispatches` 输出 internal DO alarm delivery/retry/discard/in-flight-unknown outcome。Scheduler tick 日志记录 admission 与 dispatch-pool capacity pressure，并把 workflow tick failure 与 queue/cron dispatch 分开记录。
 
 ## 部署 / Rollout 注意事项
 
 - Workflows rollout 跨 control、runtime、do-runtime、scheduler 和 workflows。
 - workflows dispatch run 到 runtime 前，runtime 必须先支持 workflow internal dispatch path。
 - 当 do-runtime 会调用新的 workflows API shape 时，必须先滚 workflows，再滚 do-runtime；internal Durable Object alarm mutation endpoints 也属于这个顺序。
-- Scheduler 可在 workflows 部署后 rolling，因为它只调用 tick endpoint。
+- Scheduler 可在 workflows 部署后 rolling，因为它对 Workflows 的唯一依赖是 tick endpoint；cron 和 queue loop 与此独立。
 - DB 2 是 workflow instance state 边界；不要从 control/runtime/scheduler 直接写 DB 2。
 - workflows 在 DB 2 中持久化 `wf:schema_version`。Schema `2` 会在 step record 和 summary 中存储 DAG dependency edges。当前部署按该 schema 的 greenfield state 处理；没有新的设计前，不要为 in-flight legacy workflow instance 添加原地迁移路径。
 - 如果开发或维护环境启动时 workflows DB 2 中已有未带版本的 `wf:*` runtime key，应先停止 workflows，清理该 DB 2 runtime state 后再启动。WDL workflow definitions 位于 DB 0 的 `wf:defs:*`，不属于 DB 2 runtime-state cleanup 范围。

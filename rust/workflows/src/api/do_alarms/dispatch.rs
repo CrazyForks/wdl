@@ -9,15 +9,15 @@ use wdl_rust_common::worker_contract::{
 };
 
 use crate::{
-    AppState, DO_ALARM_READY_BATCH_MAX, DoAlarmJobKeys, LogLevel, WorkflowError, WorkflowResult,
-    do_alarm_shard_queue_keys, log,
+    AppState, DO_ALARM_READY_BATCH_MAX, DispatchTaskUnavailable, DoAlarmJobKeys, LogLevel,
+    WorkflowError, WorkflowResult, do_alarm_shard_queue_keys, fields_with_error, log,
 };
 
 use super::super::{
-    ReadyDispatchConfig, ReadyMemberOutcome, dispatch_ready_members, due_shards_with_due_members,
-    emit_outcome_counts, eval_script, remove_ready_member_if_state_missing,
+    ReadyAdmissionConfig, ReadyAdmissionOutcome, ReadyAdmissionResult, admit_ready_members,
+    due_shards_with_due_members, eval_script, remove_ready_member_if_state_missing,
 };
-use super::model::{DoAlarmJob, DoAlarmTickCounters, job_from_state, map_hgetall};
+use super::model::{DoAlarmJob, job_from_state, map_hgetall};
 use super::scripts::{
     CLAIM_DO_ALARM_SCRIPT, DISCARD_CORRUPT_DO_ALARM_SCRIPT, FINALIZE_DO_ALARM_SCRIPT,
     MOVE_DUE_DO_ALARM_SCRIPT, RETRY_DO_ALARM_SCRIPT,
@@ -25,8 +25,8 @@ use super::scripts::{
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
 
-fn do_alarm_ready_dispatch_config(concurrency: usize) -> ReadyDispatchConfig {
-    ReadyDispatchConfig {
+fn do_alarm_ready_admission_config(concurrency: usize) -> ReadyAdmissionConfig {
+    ReadyAdmissionConfig {
         batch_size: concurrency.min(DO_ALARM_READY_BATCH_MAX),
         concurrency,
         prune_on_error: true,
@@ -37,9 +37,23 @@ fn saturating_i64_ms(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-pub(crate) struct DoAlarmTickResult {
-    pub(crate) counters: DoAlarmTickCounters,
+#[derive(Default)]
+pub(crate) struct DoAlarmAdmissionResult {
+    pub(crate) due_moved: usize,
+    pub(crate) admitted: usize,
+    pub(crate) capacity_blocked: bool,
     pub(crate) error: Option<WorkflowError>,
+}
+
+impl DoAlarmAdmissionResult {
+    fn from_ready(due_moved: usize, result: ReadyAdmissionResult<usize>) -> Self {
+        Self {
+            due_moved,
+            admitted: result.counters,
+            capacity_blocked: result.capacity_blocked,
+            error: result.error,
+        }
+    }
 }
 
 enum ClaimDoAlarmResult {
@@ -51,6 +65,14 @@ enum ClaimDoAlarmResult {
 enum DoAlarmDispatchError {
     Retryable(String),
     InFlightUnknown(String),
+}
+
+enum DoAlarmAdmission {
+    Dispatch {
+        job: Box<DoAlarmJob>,
+        dispatch_version: String,
+    },
+    Immediate,
 }
 
 pub(crate) async fn move_due_do_alarms(app: &AppState) -> WorkflowResult<usize> {
@@ -382,36 +404,29 @@ async fn remove_ready_if_missing(app: &AppState, job_id: &str) -> WorkflowResult
     remove_ready_member_if_state_missing(app, &keys.state(), &keys.ready(), job_id).await
 }
 
-fn merge_counters(target: &mut DoAlarmTickCounters, delta: DoAlarmTickCounters) {
-    target.due_moved += delta.due_moved;
-    target.dispatched += delta.dispatched;
-    target.delivered += delta.delivered;
-    target.retried += delta.retried;
-    target.discarded += delta.discarded;
-    target.skipped += delta.skipped;
+fn increment_do_alarm_outcome(app: &AppState, outcome: &'static str) {
+    app.metrics
+        .increment("do_alarm_dispatches", &[("outcome", outcome)], 1.0);
 }
 
-async fn process_ready_do_alarm_job(
+async fn prepare_ready_do_alarm_job(
     app: &AppState,
-    job_id: String,
-) -> WorkflowResult<ReadyMemberOutcome<DoAlarmTickCounters>> {
-    let mut counters = DoAlarmTickCounters::default();
-    let job = match claim_do_alarm(app, &job_id).await? {
+    job_id: &str,
+) -> WorkflowResult<DoAlarmAdmission> {
+    let job = match claim_do_alarm(app, job_id).await? {
         ClaimDoAlarmResult::Job(job) => *job,
         ClaimDoAlarmResult::DiscardedCorrupt => {
-            counters.discarded += 1;
-            return Ok(ReadyMemberOutcome::new(counters));
+            increment_do_alarm_outcome(app, "discarded");
+            return Ok(DoAlarmAdmission::Immediate);
         }
         ClaimDoAlarmResult::None => {
-            counters.skipped += usize::from(remove_ready_if_missing(app, &job_id).await?);
-            return Ok(ReadyMemberOutcome::new(counters));
+            remove_ready_if_missing(app, job_id).await?;
+            return Ok(DoAlarmAdmission::Immediate);
         }
     };
     let Some(dispatch_version) = resolve_alarm_dispatch_version(app, &job).await? else {
         if finalize_claimed_do_alarm(app, &job).await? {
-            counters.discarded += 1;
-        } else {
-            counters.skipped += 1;
+            increment_do_alarm_outcome(app, "discarded");
         }
         log(
             app,
@@ -427,13 +442,23 @@ async fn process_ready_do_alarm_job(
                 "error_message": "DO alarm target is no longer retained or active",
             }),
         );
-        return Ok(ReadyMemberOutcome::new(counters));
+        return Ok(DoAlarmAdmission::Immediate);
     };
-    counters.dispatched += 1;
-    match dispatch_do_alarm(app, &job, &dispatch_version).await {
+    Ok(DoAlarmAdmission::Dispatch {
+        job: Box::new(job),
+        dispatch_version,
+    })
+}
+
+async fn finish_claimed_do_alarm(
+    app: &AppState,
+    job: &DoAlarmJob,
+    dispatch_version: &str,
+) -> WorkflowResult<()> {
+    match dispatch_do_alarm(app, job, dispatch_version).await {
         Ok(body) => {
-            if finalize_claimed_do_alarm(app, &job).await? {
-                counters.delivered += 1;
+            if finalize_claimed_do_alarm(app, job).await? {
+                increment_do_alarm_outcome(app, "delivered");
                 let ignored = body
                     .get("ignored")
                     .and_then(JsonValue::as_bool)
@@ -455,11 +480,10 @@ async fn process_ready_do_alarm_job(
                         "ignored": ignored,
                     }),
                 );
-            } else {
-                counters.skipped += 1;
             }
         }
         Err(DoAlarmDispatchError::InFlightUnknown(err)) => {
+            increment_do_alarm_outcome(app, "in_flight_unknown");
             log(
                 app,
                 LogLevel::Warn,
@@ -474,14 +498,13 @@ async fn process_ready_do_alarm_job(
                     "error_message": err,
                 }),
             );
-            return Ok(ReadyMemberOutcome::stop_after_current_batch(counters));
         }
         Err(DoAlarmDispatchError::Retryable(err)) => {
-            let outcome = retry_do_alarm(app, &job, &err).await?;
+            let outcome = retry_do_alarm(app, job, &err).await?;
             match outcome {
-                1 => counters.retried += 1,
-                2 => counters.discarded += 1,
-                _ => counters.skipped += 1,
+                1 => increment_do_alarm_outcome(app, "retried"),
+                2 => increment_do_alarm_outcome(app, "discarded"),
+                _ => {}
             }
             log(
                 app,
@@ -507,50 +530,128 @@ async fn process_ready_do_alarm_job(
             );
         }
     }
-    Ok(ReadyMemberOutcome::new(counters))
+    Ok(())
 }
 
-pub(crate) async fn dispatch_ready_do_alarms(app: &AppState) -> WorkflowResult<DoAlarmTickResult> {
-    let counters = DoAlarmTickCounters {
-        due_moved: move_due_do_alarms(app).await?,
-        ..Default::default()
+fn log_do_alarm_dispatch_task_error(app: &AppState, job: &DoAlarmJob, err: &WorkflowError) {
+    log(
+        app,
+        LogLevel::Warn,
+        "do_alarm_dispatch_task_error",
+        fields_with_error(
+            json!({
+                "namespace": job.ns,
+                "worker": job.worker,
+                "class_name": job.class_name,
+                "object_name": job.object_name,
+                "job_id": job.job_id,
+                "retry_count": job.retry_count,
+                "error_code": err.code,
+            }),
+            "Error",
+            &err.message,
+        ),
+    );
+}
+
+async fn process_ready_do_alarm_job(
+    app: &AppState,
+    job_id: String,
+) -> WorkflowResult<ReadyAdmissionOutcome<usize>> {
+    let guard = match app.begin_dispatch_task(&app.dispatch.do_alarm) {
+        Ok(guard) => guard,
+        Err(DispatchTaskUnavailable::Stopping) => {
+            return Ok(ReadyAdmissionOutcome::stop_after_current_batch(0));
+        }
+        Err(DispatchTaskUnavailable::AtCapacity) => {
+            return Ok(ReadyAdmissionOutcome::capacity_unavailable(0));
+        }
     };
-    let result = dispatch_ready_members(
+    match prepare_ready_do_alarm_job(app, &job_id).await? {
+        DoAlarmAdmission::Dispatch {
+            job,
+            dispatch_version,
+        } => {
+            let panic_fields = json!({
+                "namespace": job.ns,
+                "worker": job.worker,
+                "job_id": job.job_id,
+            });
+            let state = app.clone();
+            app.spawn_tracked(
+                guard,
+                "do_alarm_dispatch_task_panicked",
+                panic_fields,
+                async move {
+                    if let Err(err) = finish_claimed_do_alarm(&state, &job, &dispatch_version).await
+                    {
+                        log_do_alarm_dispatch_task_error(&state, &job, &err);
+                    }
+                },
+            );
+            Ok(ReadyAdmissionOutcome::admitted(1))
+        }
+        DoAlarmAdmission::Immediate => {
+            drop(guard);
+            Ok(ReadyAdmissionOutcome::capacity_released(0))
+        }
+    }
+}
+
+fn merge_admitted(target: &mut usize, delta: usize) {
+    *target += delta;
+}
+
+pub(crate) async fn admit_ready_do_alarms(
+    app: &AppState,
+) -> WorkflowResult<DoAlarmAdmissionResult> {
+    let due_moved = move_due_do_alarms(app).await?;
+    let result = admit_ready_members(
         app,
         do_alarm_shard_queue_keys(),
-        do_alarm_ready_dispatch_config(app.config.do_alarm_dispatch_concurrency),
-        counters,
+        do_alarm_ready_admission_config(app.config.do_alarm_dispatch_concurrency),
+        0,
         |_, job_id| process_ready_do_alarm_job(app, job_id),
-        merge_counters,
+        merge_admitted,
     )
     .await?;
-    let counters = result.counters;
-    emit_outcome_counts(
-        app,
-        "do_alarm_dispatches",
-        &[
-            ("delivered", counters.delivered),
-            ("retried", counters.retried),
-            ("discarded", counters.discarded),
-        ],
-    );
-    Ok(DoAlarmTickResult {
-        counters,
-        error: result.error,
-    })
+    Ok(DoAlarmAdmissionResult::from_ready(due_moved, result))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{do_alarm_ready_dispatch_config, retry_delay_ms_from_parts, saturating_i64_ms};
+    use super::{
+        DoAlarmAdmissionResult, ReadyAdmissionResult, do_alarm_ready_admission_config,
+        retry_delay_ms_from_parts, saturating_i64_ms,
+    };
 
     #[test]
-    fn ready_batch_is_one_bounded_dispatch_wave() {
-        let config = do_alarm_ready_dispatch_config(32);
+    fn ready_batch_is_one_bounded_admission_wave() {
+        let config = do_alarm_ready_admission_config(32);
 
         assert_eq!(config.batch_size, 32);
         assert_eq!(config.concurrency, 32);
         assert!(config.prune_on_error);
+    }
+
+    #[test]
+    fn admission_result_can_report_partial_activity_with_an_error() {
+        let result = DoAlarmAdmissionResult::from_ready(
+            2,
+            ReadyAdmissionResult {
+                counters: 3,
+                error: Some(crate::WorkflowError::internal_error("candidate failed")),
+                capacity_blocked: true,
+            },
+        );
+
+        assert_eq!(result.due_moved, 2);
+        assert_eq!(result.admitted, 3);
+        assert!(result.capacity_blocked);
+        assert_eq!(
+            result.error.as_ref().map(|err| err.code),
+            Some("internal_error")
+        );
     }
 
     #[test]
@@ -605,7 +706,11 @@ mod tests {
         assert!(implementation.contains("DoAlarmDispatchError::InFlightUnknown(err.to_string())"));
         assert!(implementation.contains("app.config.do_alarm_claim_lease_ms"));
         assert!(timeout_branch < retry_branch);
+        assert!(
+            implementation[timeout_branch..retry_branch]
+                .contains("increment_do_alarm_outcome(app, \"in_flight_unknown\")")
+        );
         assert!(implementation.contains("\"do_alarm_dispatch_in_flight_unknown\""));
-        assert!(implementation.contains("ReadyMemberOutcome::stop_after_current_batch(counters)"));
+        assert!(implementation.contains("DoAlarmDispatchError::InFlightUnknown(err)"));
     }
 }

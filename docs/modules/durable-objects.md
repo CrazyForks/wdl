@@ -278,10 +278,10 @@ interrupt.
 ## Observability
 
 do-runtime emits structured logs around owner resolution, dispatch, alarm execution,
-drain, renew, and WebSocket handling. Workflows emits backend alarm retry/discard
-outcomes and `do_alarm_dispatches` metrics; do-runtime metrics cover runtime
-operations. Gateway request logs do not measure the lifetime of backend WebSocket
-recovery after the initial 101.
+drain, renew, and WebSocket handling. Workflows emits backend alarm
+delivery/retry/discard/in-flight-unknown outcomes through `do_alarm_dispatches`;
+do-runtime metrics cover runtime operations. Gateway request logs do not measure the
+lifetime of backend WebSocket recovery after the initial 101.
 
 ## Deployment / Rollout Notes
 

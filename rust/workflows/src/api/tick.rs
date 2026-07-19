@@ -3,15 +3,16 @@ use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 
 use crate::{
-    AppState, InstanceIdentity, LogLevel, WORKFLOW_READY_BATCH_SIZE, WorkflowError, WorkflowResult,
-    fields_with_error, log, workflow_shard_queue_keys,
+    AppState, DispatchTaskUnavailable, InstanceIdentity, LogLevel, Metrics,
+    WORKFLOW_READY_BATCH_SIZE, WorkflowError, WorkflowResult, fields_with_error, log,
+    workflow_shard_queue_keys,
 };
 
 use super::{
-    ReadyDispatchConfig, ReadyMemberOutcome, claim_run, dispatch_ready_do_alarms,
-    dispatch_ready_members, emit_outcome_counts, identity_from_state, log_instance_event,
-    parse_ready_token, read_payload_ref, read_state_by_id, release_run_claim,
-    requeue_expired_run_claim, spawn_progress_from_identity,
+    ReadyAdmissionConfig, ReadyAdmissionOutcome, RunClaim, admit_ready_do_alarms,
+    admit_ready_members, claim_run, identity_from_state, log_instance_event, parse_ready_token,
+    read_payload_ref, read_state_by_id, release_run_claim, requeue_expired_run_claim,
+    spawn_progress_from_identity,
 };
 
 mod dispatch;
@@ -29,33 +30,52 @@ use retention::cleanup_retention;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TickResponse {
-    pub(crate) dispatched: usize,
-    pub(crate) completed: usize,
-    pub(crate) failed: usize,
-    pub(crate) suspended: usize,
+    pub(crate) workflow_admitted: usize,
+    pub(crate) workflow_capacity_blocked: bool,
     pub(crate) due_moved: usize,
     pub(crate) retention_cleaned: usize,
     pub(crate) do_alarm_due_moved: usize,
-    pub(crate) do_alarm_dispatched: usize,
-    pub(crate) do_alarm_delivered: usize,
-    pub(crate) do_alarm_retried: usize,
-    pub(crate) do_alarm_discarded: usize,
-    pub(crate) do_alarm_skipped: usize,
+    pub(crate) do_alarm_admitted: usize,
+    pub(crate) do_alarm_capacity_blocked: bool,
 }
 
-#[derive(Default)]
-struct TickCounters {
-    dispatched: usize,
-    completed: usize,
-    failed: usize,
-    suspended: usize,
+struct ClaimedWorkflowRun {
+    identity: InstanceIdentity,
+    params: JsonValue,
+    previous_status: String,
+    claim: RunClaim,
+    request_id: Option<String>,
 }
+
+struct WorkflowDispatchGaugeGuard<'a> {
+    metrics: &'a Metrics,
+}
+
+impl<'a> WorkflowDispatchGaugeGuard<'a> {
+    fn begin(metrics: &'a Metrics) -> Self {
+        metrics.add_gauge("workflow_dispatch_in_flight", &[], 1.0);
+        Self { metrics }
+    }
+}
+
+impl Drop for WorkflowDispatchGaugeGuard<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .add_gauge("workflow_dispatch_in_flight", &[], -1.0);
+    }
+}
+
+enum ReadyTokenAdmission {
+    Dispatch(Box<ClaimedWorkflowRun>),
+    Immediate(ReadyTokenResult),
+}
+
 enum ReadyTokenResult {
     Completed,
     Failed,
     DispatchError,
     Suspended,
-    SuspendedKeep,
+    Fenced,
     RemoveMalformed,
     RemoveIfStateMissing(ReadyTokenIdentity),
     RemoveIfTerminal(ReadyTokenGuard),
@@ -67,29 +87,33 @@ async fn load_params(app: &AppState, state: &HashMap<String, String>) -> Workflo
         .unwrap_or(JsonValue::Null))
 }
 
-async fn dispatch_ready_token(
+async fn prepare_ready_token(
     app: &AppState,
     token: String,
     request_id: Option<&str>,
-) -> WorkflowResult<ReadyTokenResult> {
+) -> WorkflowResult<ReadyTokenAdmission> {
     let Some((ns, workflow_key, instance_id)) = parse_ready_token(&token) else {
-        return Ok(ReadyTokenResult::RemoveMalformed);
+        return Ok(ReadyTokenAdmission::Immediate(
+            ReadyTokenResult::RemoveMalformed,
+        ));
     };
     let state = read_state_by_id(app, &ns, &workflow_key, &instance_id).await?;
     let Some(status) = state.get("status").map(String::as_str) else {
-        return Ok(ReadyTokenResult::RemoveIfStateMissing(ReadyTokenIdentity {
-            ns,
-            workflow_key,
-            instance_id,
-        }));
+        return Ok(ReadyTokenAdmission::Immediate(
+            ReadyTokenResult::RemoveIfStateMissing(ReadyTokenIdentity {
+                ns,
+                workflow_key,
+                instance_id,
+            }),
+        ));
     };
     if status == "running" {
         let identity = identity_from_state(&ns, &workflow_key, &instance_id, &state)?;
         requeue_expired_run_claim(app, &identity).await?;
-        return Ok(ReadyTokenResult::Keep);
+        return Ok(ReadyTokenAdmission::Immediate(ReadyTokenResult::Keep));
     }
     if status != "queued" && status != "waiting" {
-        return Ok(match status {
+        return Ok(ReadyTokenAdmission::Immediate(match status {
             "completed" | "failed" | "terminated" => {
                 let identity = identity_from_state(&ns, &workflow_key, &instance_id, &state)?;
                 ReadyTokenResult::RemoveIfTerminal(ReadyTokenGuard {
@@ -100,35 +124,53 @@ async fn dispatch_ready_token(
                 })
             }
             _ => ReadyTokenResult::Keep,
-        });
+        }));
     }
     let identity = identity_from_state(&ns, &workflow_key, &instance_id, &state)?;
     let params = load_params(app, &state).await?;
     let previous_status = status.to_string();
     let Some(claim) = claim_run(app, &identity, &previous_status).await? else {
-        return Ok(ReadyTokenResult::Keep);
+        return Ok(ReadyTokenAdmission::Immediate(ReadyTokenResult::Keep));
     };
     log_instance_event(app, "workflow_instance_started", &identity);
     spawn_progress_from_identity(app, &identity, "workflow_instance_started", "running", None);
-    app.metrics
-        .add_gauge("workflow_dispatch_in_flight", &[], 1.0);
-    let response = match dispatch_runtime(app, &identity, &claim.token, params, request_id).await {
-        Ok(response) => response,
-        Err(err) => {
-            app.metrics
-                .add_gauge("workflow_dispatch_in_flight", &[], -1.0);
-            app.metrics
-                .increment("workflow_dispatches", &[("outcome", "error")], 1.0);
-            release_run_claim(app, &identity, &claim, &previous_status).await?;
-            log_dispatch_error(app, &identity, &err);
-            return Ok(ReadyTokenResult::DispatchError);
-        }
-    };
+    Ok(ReadyTokenAdmission::Dispatch(Box::new(
+        ClaimedWorkflowRun {
+            identity,
+            params,
+            previous_status,
+            claim,
+            request_id: request_id.map(str::to_string),
+        },
+    )))
+}
+
+async fn finish_claimed_workflow(
+    app: &AppState,
+    run: ClaimedWorkflowRun,
+) -> WorkflowResult<ReadyTokenResult> {
+    let ClaimedWorkflowRun {
+        identity,
+        params,
+        previous_status,
+        claim,
+        request_id,
+    } = run;
+    let _gauge = WorkflowDispatchGaugeGuard::begin(&app.metrics);
+    let response =
+        match dispatch_runtime(app, &identity, &claim.token, params, request_id.as_deref()).await {
+            Ok(response) => response,
+            Err(err) => {
+                app.metrics
+                    .increment("workflow_dispatches", &[("outcome", "error")], 1.0);
+                release_run_claim(app, &identity, &claim, &previous_status).await?;
+                log_dispatch_error(app, &identity, &err);
+                return Ok(ReadyTokenResult::DispatchError);
+            }
+        };
     let outcome = match commit_runtime_result(app, &identity, &claim, response).await {
         Ok(outcome) => outcome,
         Err(err) => {
-            app.metrics
-                .add_gauge("workflow_dispatch_in_flight", &[], -1.0);
             app.metrics
                 .increment("workflow_dispatches", &[("outcome", "error")], 1.0);
             if err.code == "redis_error" {
@@ -139,13 +181,11 @@ async fn dispatch_ready_token(
             return Ok(ReadyTokenResult::DispatchError);
         }
     };
-    app.metrics
-        .add_gauge("workflow_dispatch_in_flight", &[], -1.0);
     Ok(match outcome {
         RuntimeCommitOutcome::Completed => ReadyTokenResult::Completed,
         RuntimeCommitOutcome::Failed => ReadyTokenResult::Failed,
-        RuntimeCommitOutcome::SuspendedRemoveReady => ReadyTokenResult::Suspended,
-        RuntimeCommitOutcome::SuspendedKeepReady => ReadyTokenResult::SuspendedKeep,
+        RuntimeCommitOutcome::Suspended => ReadyTokenResult::Suspended,
+        RuntimeCommitOutcome::Fenced => ReadyTokenResult::Fenced,
     })
 }
 
@@ -154,18 +194,57 @@ async fn process_ready_workflow_token(
     shard: usize,
     token: String,
     request_id: Option<&str>,
-) -> WorkflowResult<ReadyMemberOutcome<TickCounters>> {
-    let result = dispatch_ready_token(app, token.clone(), request_id).await?;
-    let mut counters = TickCounters::default();
-    apply_ready_token_result(app, shard, token, result, &mut counters).await?;
-    Ok(ReadyMemberOutcome::new(counters))
+) -> WorkflowResult<ReadyAdmissionOutcome<usize>> {
+    let guard = match app.begin_dispatch_task(&app.dispatch.workflow) {
+        Ok(guard) => guard,
+        Err(DispatchTaskUnavailable::Stopping) => {
+            return Ok(ReadyAdmissionOutcome::stop_after_current_batch(0));
+        }
+        Err(DispatchTaskUnavailable::AtCapacity) => {
+            return Ok(ReadyAdmissionOutcome::capacity_unavailable(0));
+        }
+    };
+    match prepare_ready_token(app, token.clone(), request_id).await? {
+        ReadyTokenAdmission::Dispatch(run) => {
+            let identity = run.identity.clone();
+            let panic_fields = json!({
+                "namespace": identity.ns,
+                "worker": identity.worker,
+                "workflow_name": identity.workflow_name,
+                "workflow_key": identity.workflow_key,
+                "instance_id": identity.instance_id,
+                "generation": identity.generation,
+            });
+            let state = app.clone();
+            app.spawn_tracked(
+                guard,
+                "workflow_dispatch_task_panicked",
+                panic_fields,
+                async move {
+                    match finish_claimed_workflow(&state, *run).await {
+                        Ok(result) => {
+                            if let Err(err) =
+                                apply_ready_token_result(&state, shard, token, result).await
+                            {
+                                log_dispatch_error(&state, &identity, &err);
+                            }
+                        }
+                        Err(err) => log_dispatch_error(&state, &identity, &err),
+                    }
+                },
+            );
+            Ok(ReadyAdmissionOutcome::admitted(1))
+        }
+        ReadyTokenAdmission::Immediate(result) => {
+            drop(guard);
+            apply_ready_token_result(app, shard, token, result).await?;
+            Ok(ReadyAdmissionOutcome::capacity_released(0))
+        }
+    }
 }
 
-fn merge_tick_counters(target: &mut TickCounters, delta: TickCounters) {
-    target.dispatched += delta.dispatched;
-    target.completed += delta.completed;
-    target.failed += delta.failed;
-    target.suspended += delta.suspended;
+fn merge_admitted(target: &mut usize, delta: usize) {
+    *target += delta;
 }
 
 fn log_dispatch_error(app: &AppState, identity: &InstanceIdentity, err: &WorkflowError) {
@@ -197,22 +276,22 @@ pub(crate) async fn tick_workflows(
 ) -> WorkflowResult<TickResponse> {
     let due_moved = move_due_tokens(app).await?;
     let retention_cleaned = cleanup_retention(app).await?;
-    let workflow_dispatch = dispatch_ready_members(
+    let workflow_admission = admit_ready_members(
         app,
         workflow_shard_queue_keys(),
-        ReadyDispatchConfig {
+        ReadyAdmissionConfig {
             batch_size: WORKFLOW_READY_BATCH_SIZE,
             concurrency: app.config.ready_dispatch_concurrency,
             prune_on_error: false,
         },
-        TickCounters::default(),
+        0,
         |shard, token| process_ready_workflow_token(app, shard, token, request_id),
-        merge_tick_counters,
+        merge_admitted,
     );
-    let (result, do_alarm_result) = tokio::join!(workflow_dispatch, dispatch_ready_do_alarms(app));
+    let (result, do_alarm_result) = tokio::join!(workflow_admission, admit_ready_do_alarms(app));
     let do_alarm_counters = match do_alarm_result {
         Ok(result) => {
-            if let Some(err) = result.error {
+            if let Some(err) = &result.error {
                 log(
                     app,
                     LogLevel::Warn,
@@ -220,7 +299,7 @@ pub(crate) async fn tick_workflows(
                     fields_with_error(json!({ "error_code": err.code }), "Error", &err.message),
                 );
             }
-            result.counters
+            result
         }
         Err(err) => {
             log(
@@ -236,16 +315,6 @@ pub(crate) async fn tick_workflows(
     if let Some(err) = result.error {
         return Err(err);
     }
-    let counters = result.counters;
-    emit_outcome_counts(
-        app,
-        "workflow_dispatches",
-        &[
-            ("completed", counters.completed),
-            ("failed", counters.failed),
-            ("suspended", counters.suspended),
-        ],
-    );
     if due_moved > 0 {
         app.metrics.increment(
             "workflow_due_claims",
@@ -254,19 +323,24 @@ pub(crate) async fn tick_workflows(
         );
     }
     Ok(TickResponse {
-        dispatched: counters.dispatched,
-        completed: counters.completed,
-        failed: counters.failed,
-        suspended: counters.suspended,
+        workflow_admitted: result.counters,
+        workflow_capacity_blocked: result.capacity_blocked,
         due_moved,
         retention_cleaned,
         do_alarm_due_moved: do_alarm_counters.due_moved,
-        do_alarm_dispatched: do_alarm_counters.dispatched,
-        do_alarm_delivered: do_alarm_counters.delivered,
-        do_alarm_retried: do_alarm_counters.retried,
-        do_alarm_discarded: do_alarm_counters.discarded,
-        do_alarm_skipped: do_alarm_counters.skipped,
+        do_alarm_admitted: do_alarm_counters.admitted,
+        do_alarm_capacity_blocked: do_alarm_counters.capacity_blocked,
     })
+}
+
+fn workflow_dispatch_metric_outcome(result: &ReadyTokenResult) -> Option<&'static str> {
+    match result {
+        ReadyTokenResult::Completed => Some("completed"),
+        ReadyTokenResult::Failed => Some("failed"),
+        ReadyTokenResult::Suspended => Some("suspended"),
+        ReadyTokenResult::Fenced => Some("fenced"),
+        _ => None,
+    }
 }
 
 async fn apply_ready_token_result(
@@ -274,28 +348,17 @@ async fn apply_ready_token_result(
     shard: usize,
     token: String,
     result: ReadyTokenResult,
-    counters: &mut TickCounters,
 ) -> WorkflowResult<()> {
+    if let Some(outcome) = workflow_dispatch_metric_outcome(&result) {
+        app.metrics
+            .increment("workflow_dispatches", &[("outcome", outcome)], 1.0);
+    }
     match result {
-        ReadyTokenResult::Completed => {
-            counters.dispatched += 1;
-            counters.completed += 1;
-        }
-        ReadyTokenResult::Failed => {
-            counters.dispatched += 1;
-            counters.failed += 1;
-        }
-        ReadyTokenResult::DispatchError => {
-            counters.dispatched += 1;
-        }
-        ReadyTokenResult::Suspended => {
-            counters.dispatched += 1;
-            counters.suspended += 1;
-        }
-        ReadyTokenResult::SuspendedKeep => {
-            counters.dispatched += 1;
-            counters.suspended += 1;
-        }
+        ReadyTokenResult::Completed
+        | ReadyTokenResult::Failed
+        | ReadyTokenResult::DispatchError
+        | ReadyTokenResult::Suspended
+        | ReadyTokenResult::Fenced => {}
         ReadyTokenResult::RemoveMalformed => {
             remove_ready_token(app, shard, token).await?;
         }
@@ -313,6 +376,59 @@ async fn apply_ready_token_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_dispatch_gauge_releases_when_dispatch_unwinds() {
+        let metrics = Metrics::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = WorkflowDispatchGaugeGuard::begin(&metrics);
+            panic!("simulated workflow dispatch panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(
+            metrics
+                .render_prometheus()
+                .contains("wdl_workflow_dispatch_in_flight 0")
+        );
+    }
+
+    #[test]
+    fn tick_response_serializes_admission_maintenance_and_capacity_pressure() {
+        assert_eq!(
+            serde_json::to_value(TickResponse {
+                workflow_admitted: 2,
+                workflow_capacity_blocked: true,
+                due_moved: 3,
+                retention_cleaned: 4,
+                do_alarm_due_moved: 5,
+                do_alarm_admitted: 6,
+                do_alarm_capacity_blocked: false,
+            })
+            .unwrap(),
+            json!({
+                "workflowAdmitted": 2,
+                "workflowCapacityBlocked": true,
+                "dueMoved": 3,
+                "retentionCleaned": 4,
+                "doAlarmDueMoved": 5,
+                "doAlarmAdmitted": 6,
+                "doAlarmCapacityBlocked": false,
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_dispatch_metrics_distinguish_suspension_from_fenced_noop() {
+        assert_eq!(
+            workflow_dispatch_metric_outcome(&ReadyTokenResult::Suspended),
+            Some("suspended")
+        );
+        assert_eq!(
+            workflow_dispatch_metric_outcome(&ReadyTokenResult::Fenced),
+            Some("fenced")
+        );
+    }
 
     #[test]
     fn terminal_commit_removes_ready_token_inside_fenced_script() {
@@ -349,14 +465,14 @@ mod tests {
     }
 
     #[test]
-    fn ready_dispatch_uses_shared_runner_without_error_prune() {
+    fn ready_admission_uses_shared_runner_without_error_prune() {
         let source = include_str!("tick.rs");
         let implementation = source
             .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("tick implementation should precede tests");
 
-        assert!(implementation.contains("dispatch_ready_members("));
+        assert!(implementation.contains("admit_ready_members("));
         assert!(implementation.contains("workflow_shard_queue_keys()"));
         assert!(implementation.contains("prune_on_error: false"));
     }
@@ -364,26 +480,31 @@ mod tests {
     #[test]
     fn running_ready_tokens_requeue_expired_claims_before_runtime_dispatch() {
         let source = include_str!("tick.rs");
-        let running_branch = source
+        let implementation = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("tick implementation should precede tests");
+        let running_branch = implementation
             .find(r#"if status == "running" {"#)
             .expect("ready-token dispatch must branch on running instances");
-        let branch_source = &source[running_branch..];
+        let branch_source = &implementation[running_branch..];
         let requeue_pos = branch_source
             .find("requeue_expired_run_claim(app, &identity).await?")
             .expect("running instances must first try expired-claim requeue");
         let keep_pos = branch_source
-            .find("return Ok(ReadyTokenResult::Keep);")
+            .find("return Ok(ReadyTokenAdmission::Immediate(ReadyTokenResult::Keep));")
             .expect("running branch must stop before runtime dispatch");
         let claim_pos = branch_source
             .find("claim_run(app, &identity, &previous_status)")
             .expect("queued/waiting instances still claim after the running branch");
-        let dispatch_pos = branch_source
-            .find("dispatch_runtime(app, &identity, &claim.token")
-            .expect("runtime dispatch must remain after claim_run");
 
         assert!(requeue_pos < keep_pos);
         assert!(keep_pos < claim_pos);
-        assert!(claim_pos < dispatch_pos);
+        let finish_source = implementation
+            .split("async fn finish_claimed_workflow")
+            .nth(1)
+            .expect("claimed workflow execution must have a completion phase");
+        assert!(finish_source.contains("match dispatch_runtime("));
     }
 
     #[test]

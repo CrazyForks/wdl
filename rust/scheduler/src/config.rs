@@ -56,7 +56,7 @@ pub(crate) fn config_from_env() -> Config {
         workflows_port: env_u16("WORKFLOWS_PORT", 9120),
         workflows_tick_interval_ms: env_u64("WORKFLOWS_TICK_INTERVAL_MS", 1_000),
         workflows_tick_active_interval_ms: env_u64("WORKFLOWS_TICK_ACTIVE_INTERVAL_MS", 100),
-        workflows_tick_timeout_ms: env_u64("WORKFLOWS_TICK_TIMEOUT_MS", 130_000),
+        workflows_tick_timeout_ms: env_u64("WORKFLOWS_TICK_TIMEOUT_MS", 60_000),
         runtime_host,
         runtime_port,
         metrics_port: env_u16("SCHEDULER_METRICS_PORT", 9110),
@@ -101,7 +101,7 @@ mod tests {
                 ("WDL_INTERNAL_AUTH_TOKEN", Some("test-internal-auth-token")),
                 ("WORKFLOWS_TICK_TIMEOUT_MS", None),
             ],
-            || assert_eq!(config_from_env().workflows_tick_timeout_ms, 130_000),
+            || assert_eq!(config_from_env().workflows_tick_timeout_ms, 60_000),
         );
     }
 

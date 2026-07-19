@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Decoupled Workflows scheduler ticks from tenant run and DO alarm completion: ticks now perform bounded maintenance, claim, and admission, while tracked Workflows tasks hold per-replica dispatch permits through runtime dispatch and the fenced commit. Restored Scheduler's independent tick deadline to 60 seconds and removed the obsolete Terraform coupling to the 120-second runtime dispatch timeout.
+- Replaced internal Workflows tick completion counters with admission and capacity-pressure fields in responses and tick logs, separated fenced workflow commits and unknown in-flight DO alarm outcomes into bounded metrics, and made Scheduler response-body read failures explicit instead of treating them as empty ticks.
+
 ## wdl.20260719.1 - 2026-07-19
 
 - Removed shard-serial Workflows queueing by interleaving at most 128 ready candidates through a global dispatch pool, running workflow and DO alarm pools concurrently with defaults of 128 and 32, and aligning Scheduler's 130-second tick deadline with Terraform's 120-second dispatch timeout.

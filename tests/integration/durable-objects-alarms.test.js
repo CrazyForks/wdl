@@ -686,12 +686,82 @@ test("stale ready hints do not claim alarms rescheduled into the future", async 
   const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
   assert.equal(tick.status, 200, tick.body);
   const tickBody = responseJson(tick);
-  assert.equal(tickBody.doAlarmDispatched, 0);
+  assert.equal(tickBody.doAlarmAdmitted, 0);
 
   const record = redisGetDoAlarmJob(ns, "alarms", "AlarmCounter", "future");
   assert.equal(record.status, "waiting");
   assert.equal(redisDoAlarmDueIncludes(jobId), true);
   assert.equal(redisDoAlarmReadyIncludes(jobId), false);
+});
+
+test("later ticks admit DO alarms while an earlier delivery remains active", async () => {
+  const ns = uniqueNs("do-alarm-admit");
+  await deployAndPromote(ns, "alarms", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_BLOCKING_ALARM_WORKER },
+    bindings: {
+      ALARMS: { type: "do", className: "AlarmCounter" },
+    },
+  });
+
+  /** @param {string} name */
+  async function readAlarmStatus(name) {
+    const response = await gatewayFetch(ns, `/alarms/status?name=${name}`);
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return responseJson({ body: text });
+  }
+
+  await withServiceStopped("scheduler", async () => {
+    const slow = await gatewayFetch(ns, "/alarms/schedule-blocking?name=slow&ms=15000");
+    assert.equal(slow.status, 200, await slow.text());
+    const slowJobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "slow");
+    await waitForDoAlarmDue(slowJobId);
+    // The fixture schedules 200ms ahead; index presence does not mean wall-clock due yet.
+    await delay(300);
+
+    const startedAt = performance.now();
+    const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
+    const elapsedMs = performance.now() - startedAt;
+    assert.equal(tick.status, 200, tick.body);
+    assert.equal(responseJson(tick).doAlarmAdmitted >= 1, true);
+    assert.equal(elapsedMs < 3000, true, `tick waited ${elapsedMs}ms for DO alarm delivery`);
+    await waitForJson(
+      "slow DO alarm starts in the background",
+      () => readAlarmStatus("slow"),
+      (json) => json.started === 1 && json.alarms === 0,
+      10000
+    );
+
+    const fast = await gatewayFetch(ns, "/alarms/schedule-blocking?name=fast&ms=0");
+    assert.equal(fast.status, 200, await fast.text());
+    const fastJobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "fast");
+    await waitForDoAlarmDue(fastJobId);
+    // The fixture schedules 200ms ahead; index presence does not mean wall-clock due yet.
+    await delay(300);
+    const slowBeforeNextTick = await readAlarmStatus("slow");
+    assert.equal(slowBeforeNextTick.started, 1);
+    assert.equal(slowBeforeNextTick.alarms, 0);
+    const nextTick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
+    assert.equal(nextTick.status, 200, nextTick.body);
+    assert.equal(responseJson(nextTick).doAlarmAdmitted >= 1, true);
+
+    await waitForJson(
+      "later tick completes fast DO alarm before the slow delivery",
+      () => readAlarmStatus("fast"),
+      (json) => json.alarms === 1,
+      10000
+    );
+    const slowAfterFast = await readAlarmStatus("slow");
+    assert.equal(slowAfterFast.started, 1);
+    assert.equal(slowAfterFast.alarms, 0);
+    await waitForJson(
+      "slow DO alarm completes in the background",
+      () => readAlarmStatus("slow"),
+      (json) => json.alarms === 1,
+      20000
+    );
+  });
 });
 
 test("expired running DO alarm claims redeliver from the ready hint", async () => {
@@ -728,14 +798,21 @@ test("expired running DO alarm claims redeliver from the ready hint", async () =
     const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
     assert.equal(tick.status, 200, tick.body);
     const tickBody = responseJson(tick);
-    assert.equal(tickBody.doAlarmDispatched, 1);
-    assert.equal(tickBody.doAlarmDelivered, 1);
-    assert.equal(redisDoAlarmJobExists(ns, "alarms", "AlarmCounter", "expired-run"), false);
-
-    const status = await gatewayFetch(ns, "/alarms/status?name=expired-run");
-    const statusText = await status.text();
-    assert.equal(status.status, 200, statusText);
-    assert.equal(responseJson({ body: statusText }).alarms, 1);
+    assert.equal(tickBody.doAlarmAdmitted, 1);
+    await waitForJson(
+      "expired running DO alarm background delivery",
+      async () => {
+        const status = await gatewayFetch(ns, "/alarms/status?name=expired-run");
+        const statusText = await status.text();
+        assert.equal(status.status, 200, statusText);
+        return {
+          alarms: responseJson({ body: statusText }).alarms,
+          jobExists: redisDoAlarmJobExists(ns, "alarms", "AlarmCounter", "expired-run"),
+        };
+      },
+      ({ alarms, jobExists }) => alarms === 1 && jobExists === false,
+      10_000
+    );
   });
 });
 

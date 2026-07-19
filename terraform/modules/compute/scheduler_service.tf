@@ -30,7 +30,6 @@ resource "aws_ecs_task_definition" "scheduler" {
       { name = "SYSTEM_RUNTIME_PORT", value = "8088" },
       { name = "WORKFLOWS_HOST", value = "workflows" },
       { name = "WORKFLOWS_PORT", value = "9120" },
-      { name = "WORKFLOWS_TICK_TIMEOUT_MS", value = "130000" },
       local.log_level_env,
     ]
 

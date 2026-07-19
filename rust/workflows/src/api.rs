@@ -30,8 +30,8 @@ use active_export::{
 };
 pub(crate) use create::{create_batch, create_instance};
 pub(crate) use do_alarms::{
-    DoAlarmCleanupRequest, DoAlarmDeleteRequest, DoAlarmSetRequest, cleanup_do_alarms_for_worker,
-    delete_do_alarm, dispatch_ready_do_alarms, set_do_alarm,
+    DoAlarmCleanupRequest, DoAlarmDeleteRequest, DoAlarmSetRequest, admit_ready_do_alarms,
+    cleanup_do_alarms_for_worker, delete_do_alarm, set_do_alarm,
 };
 use execution::{StepHistory, read_step_history, workflow_step_options};
 pub(crate) use execution::{
@@ -87,8 +87,8 @@ use routing::{
     workflow_referrer_member,
 };
 use sharded_dispatch::{
-    DuePromotionConfig, DuePromotionMember, ReadyDispatchConfig, ReadyMemberOutcome,
-    dispatch_ready_members, due_shards_with_due_members, promote_due_members,
+    DuePromotionConfig, DuePromotionMember, ReadyAdmissionConfig, ReadyAdmissionOutcome,
+    ReadyAdmissionResult, admit_ready_members, due_shards_with_due_members, promote_due_members,
     remove_ready_member_if_state_missing,
 };
 pub(crate) use status::{get_instance, list_instances, status_instance};
@@ -126,15 +126,6 @@ fn observe_instance_duration(state: &AppState, record: &HashMap<String, String>,
         state
             .metrics
             .observe("workflow_instance_duration_ms", &[], duration_ms);
-    }
-}
-
-fn emit_outcome_counts(app: &AppState, metric: &'static str, outcomes: &[(&'static str, usize)]) {
-    for (outcome, count) in outcomes {
-        if *count > 0 {
-            app.metrics
-                .increment(metric, &[("outcome", *outcome)], *count as f64);
-        }
     }
 }
 

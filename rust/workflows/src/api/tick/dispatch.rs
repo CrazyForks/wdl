@@ -85,8 +85,8 @@ return 1
 pub(super) enum RuntimeCommitOutcome {
     Completed,
     Failed,
-    SuspendedRemoveReady,
-    SuspendedKeepReady,
+    Suspended,
+    Fenced,
 }
 
 struct RuntimeTerminalCommit {
@@ -309,7 +309,7 @@ async fn commit_runtime_failed_payload(
     );
     let committed: i64 = run_terminal_commit(app, &commit).await?;
     if committed != 1 && committed != 2 {
-        return Ok(RuntimeCommitOutcome::SuspendedKeepReady);
+        return Ok(RuntimeCommitOutcome::Fenced);
     }
     observe_instance_duration(app, current, now_ms);
     log_instance_event(app, "workflow_instance_failed", identity);
@@ -347,7 +347,7 @@ pub(super) async fn commit_runtime_result(
             Some("paused" | "completed" | "failed" | "terminated")
         )
     {
-        return Ok(RuntimeCommitOutcome::SuspendedKeepReady);
+        return Ok(RuntimeCommitOutcome::Fenced);
     }
     let outcome = response
         .get("outcome")
@@ -357,13 +357,13 @@ pub(super) async fn commit_runtime_result(
     let now = now_ms.to_string();
     if outcome == "suspended" {
         return Ok(if clear_suspended_run_claim(app, identity, claim).await? {
-            RuntimeCommitOutcome::SuspendedRemoveReady
+            RuntimeCommitOutcome::Suspended
         } else {
-            RuntimeCommitOutcome::SuspendedKeepReady
+            RuntimeCommitOutcome::Fenced
         });
     }
     if current.get("runToken").map(String::as_str) != Some(claim.token.as_str()) {
-        return Ok(RuntimeCommitOutcome::SuspendedKeepReady);
+        return Ok(RuntimeCommitOutcome::Fenced);
     }
     if outcome == "completed" {
         let retention_ms = terminal_retention_ms(&current, "completed")?;
@@ -401,7 +401,7 @@ pub(super) async fn commit_runtime_result(
             return Ok(RuntimeCommitOutcome::Failed);
         }
         if committed != 1 {
-            return Ok(RuntimeCommitOutcome::SuspendedKeepReady);
+            return Ok(RuntimeCommitOutcome::Fenced);
         }
         observe_instance_duration(app, &current, now_ms);
         log_instance_event(app, "workflow_instance_completed", identity);
@@ -449,7 +449,7 @@ pub(super) async fn commit_runtime_result(
         return Ok(RuntimeCommitOutcome::Failed);
     }
     if committed != 1 {
-        return Ok(RuntimeCommitOutcome::SuspendedKeepReady);
+        return Ok(RuntimeCommitOutcome::Fenced);
     }
     observe_instance_duration(app, &current, now_ms);
     log_instance_event(app, "workflow_instance_failed", identity);

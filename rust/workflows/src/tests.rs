@@ -541,23 +541,23 @@ fn workflow_runtime_dispatch_checks_status_before_json_parse() {
 }
 
 #[test]
-fn workflow_tick_isolates_per_instance_dispatch_errors() {
+fn workflow_admission_isolates_per_instance_dispatch_errors() {
     let tick_source = include_str!("api/tick.rs");
     let dispatch_source = RUNTIME_DISPATCH_SOURCE;
-    let dispatch_ready_token = tick_source
-        .split("async fn dispatch_ready_token")
+    let prepare_ready_token = tick_source
+        .split("async fn prepare_ready_token")
         .nth(1)
-        .expect("tick.rs should define dispatch_ready_token");
+        .expect("tick.rs should define prepare_ready_token");
     assert!(
         tick_source.contains("ReadyTokenResult::DispatchError"),
         "runtime dispatch errors must become a per-token result instead of aborting the whole tick"
     );
     assert!(
-        dispatch_ready_token.contains("read_state_by_id(app, &ns, &workflow_key, &instance_id)"),
+        prepare_ready_token.contains("read_state_by_id(app, &ns, &workflow_key, &instance_id)"),
         "ready-token dispatch should read state directly from parsed identity"
     );
     assert!(
-        !dispatch_ready_token.contains("WorkflowRequest {"),
+        !prepare_ready_token.contains("WorkflowRequest {"),
         "ready-token dispatch should not build a placeholder WorkflowRequest just to read state"
     );
     assert!(

@@ -1,4 +1,4 @@
-// WDL Workflows scheduler paths: replica claiming and suspended replay.
+// WDL Workflows scheduler paths: replica claiming, detached admission, and suspended replay.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -64,6 +64,59 @@ test("scheduler replicas: workflow tick claims and completes one queued instance
     const finalBody = await readIntegrationJson(final, 200, "workflow response");
     assert.equal(finalBody.status, "completed");
     assert.equal(finalBody.steps.entries.length, 1);
+  });
+});
+
+test("later workflow ticks admit new runs while a slow run remains active", async () => {
+  const ns = uniqueNs("wfadmit");
+  await deployAndPromote(ns, "shop", {
+    code: WORKER_CODE,
+    vars: { LABEL: "runtime-ok" },
+    workflows: [
+      { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+    ],
+  });
+
+  await withServiceStopped("scheduler", async () => {
+    const created = await gatewayFetch(ns, "/shop/create?id=slow-admission&runDelayMs=12000");
+    await readIntegrationJson(created, 200, "workflow response");
+
+    const startedAt = performance.now();
+    const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
+    const elapsedMs = performance.now() - startedAt;
+    assert.equal(tick.status, 200, tick.body);
+    assert.equal(responseJson(tick).workflowAdmitted >= 1, true);
+    assert.equal(elapsedMs < 3000, true, `tick waited ${elapsedMs}ms for the workflow run`);
+
+    await waitUntil("slow admitted workflow enters running state", async () => {
+      const status = await gatewayFetch(ns, "/shop/get?id=slow-admission");
+      return (await readIntegrationJson(status, 200, "workflow response")).status === "running";
+    }, { timeoutMs: 8000, intervalMs: 100 });
+
+    const fastCreated = await gatewayFetch(ns, "/shop/create?id=fast-admission");
+    await readIntegrationJson(fastCreated, 200, "workflow response");
+    const slowBeforeNextTick = await gatewayFetch(ns, "/shop/get?id=slow-admission");
+    assert.equal(
+      (await readIntegrationJson(slowBeforeNextTick, 200, "workflow response")).status,
+      "running",
+    );
+    const nextTick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
+    assert.equal(nextTick.status, 200, nextTick.body);
+    assert.equal(responseJson(nextTick).workflowAdmitted >= 1, true);
+
+    await waitUntil("later tick completes fast workflow before the slow run", async () => {
+      const status = await gatewayFetch(ns, "/shop/get?id=fast-admission");
+      return (await readIntegrationJson(status, 200, "workflow response")).status === "completed";
+    }, { timeoutMs: 8000, intervalMs: 100 });
+    const slowAfterFast = await gatewayFetch(ns, "/shop/get?id=slow-admission");
+    assert.equal(
+      (await readIntegrationJson(slowAfterFast, 200, "workflow response")).status,
+      "running",
+    );
+    await waitUntil("slow admitted workflow completes in the background", async () => {
+      const status = await gatewayFetch(ns, "/shop/get?id=slow-admission");
+      return (await readIntegrationJson(status, 200, "workflow response")).status === "completed";
+    }, { timeoutMs: 20000, intervalMs: 100 });
   });
 });
 
@@ -148,7 +201,7 @@ test("sleep replay keeps waiting state and clears stale ready hints", async () =
   const dueKey = `wf:due:${shard}`;
   assert.equal(redisZScore(dueKey, token, { db: 2 }) !== null, true);
 
-  function tickSuspendedSleep() {
+  async function tickSuspendedSleep() {
     redisSAdd(readyKey, token, { db: 2 });
     redisSAdd("wf:ready:active", String(shard), { db: 2 });
     const tick = serviceInternalPost(
@@ -159,16 +212,18 @@ test("sleep replay keeps waiting state and clears stale ready hints", async () =
     );
     assert.equal(tick.status, 200, tick.body);
     const tickBody = responseJson(tick);
-    assert.equal(tickBody.suspended >= 1, true);
-    assert.equal(redisWorkflowStateHGet(ns, workflowKey, instanceId, "status"), "waiting");
-    assert.equal(redisWorkflowStateHGet(ns, workflowKey, instanceId, "runToken"), "");
-    assert.equal(redisWorkflowStateHGet(ns, workflowKey, instanceId, "runLeaseExpiresAtMs"), "");
-    assert.equal(redisSIsMember(readyKey, token, { db: 2 }), false);
-    assert.equal(redisZScore(dueKey, token, { db: 2 }) !== null, true);
+    assert.equal(tickBody.workflowAdmitted >= 1, true);
+    await waitUntil("sleep replay completes after tick admission", () =>
+      redisWorkflowStateHGet(ns, workflowKey, instanceId, "status") === "waiting" &&
+      redisWorkflowStateHGet(ns, workflowKey, instanceId, "runToken") === "" &&
+      redisWorkflowStateHGet(ns, workflowKey, instanceId, "runLeaseExpiresAtMs") === "" &&
+      !redisSIsMember(readyKey, token, { db: 2 }) &&
+      redisZScore(dueKey, token, { db: 2 }) !== null,
+    { timeoutMs: 10000, intervalMs: 100 });
   }
 
   await withServiceStopped("scheduler", async () => {
-    tickSuspendedSleep();
-    tickSuspendedSleep();
+    await tickSuspendedSleep();
+    await tickSuspendedSleep();
   });
 });

@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::{
-    AppState, LogLevel, Metrics, Redis, SERVICE, ShutdownState, WorkflowError, WorkflowResult,
-    check_delete_lifecycle, claim_step, commit_step_error, commit_step_success, config_from_env,
-    create_batch, create_instance, ensure_workflows_schema, get_instance, list_instances, log,
-    pause_instance, read_do_alarm_cleanup_request, read_do_alarm_delete_request,
-    read_do_alarm_set_request, read_lifecycle_check_request, read_replay_step_page,
-    read_workflow_replay_request, read_workflow_request, read_workflow_step_request,
-    register_sleep, register_wait, restart_instance, resume_instance, send_event, status_instance,
-    terminate_instance, tick_workflows, workflow_error_fields,
+    AppState, DispatchSemaphores, LogLevel, Metrics, Redis, SERVICE, ShutdownState, WorkflowError,
+    WorkflowResult, check_delete_lifecycle, claim_step, commit_step_error, commit_step_success,
+    config_from_env, create_batch, create_instance, ensure_workflows_schema, get_instance,
+    list_instances, log, pause_instance, read_do_alarm_cleanup_request,
+    read_do_alarm_delete_request, read_do_alarm_set_request, read_lifecycle_check_request,
+    read_replay_step_page, read_workflow_replay_request, read_workflow_request,
+    read_workflow_step_request, register_sleep, register_wait, restart_instance, resume_instance,
+    send_event, status_instance, terminate_instance, tick_workflows, workflow_error_fields,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -168,18 +168,11 @@ async fn tick_handler(
         "workflow_tick",
         json!({
             "request_id": request_id,
-            "dispatched": response.dispatched,
-            "completed": response.completed,
-            "failed": response.failed,
-            "suspended": response.suspended,
+            "workflow_admitted": response.workflow_admitted,
             "due_moved": response.due_moved,
             "retention_cleaned": response.retention_cleaned,
             "do_alarm_due_moved": response.do_alarm_due_moved,
-            "do_alarm_dispatched": response.do_alarm_dispatched,
-            "do_alarm_delivered": response.do_alarm_delivered,
-            "do_alarm_retried": response.do_alarm_retried,
-            "do_alarm_discarded": response.do_alarm_discarded,
-            "do_alarm_skipped": response.do_alarm_skipped,
+            "do_alarm_admitted": response.do_alarm_admitted,
         }),
     );
     workflow_json(response, "workflow tick response serializes")
@@ -478,6 +471,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         http: reqwest::Client::new(),
         metrics: Arc::new(Metrics::default()),
         shutdown: Arc::new(ShutdownState::default()),
+        dispatch: Arc::new(DispatchSemaphores::new(
+            config.ready_dispatch_concurrency,
+            config.do_alarm_dispatch_concurrency,
+        )),
         progress_callback_lookups: Arc::new(Semaphore::new(
             config.progress_callback_lookup_concurrency,
         )),

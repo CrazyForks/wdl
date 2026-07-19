@@ -75,7 +75,7 @@ fn spawn_workflows_tick_loop(state: AppState) {
                     .catch_unwind()
                     .await
                 {
-                    Ok(Ok(summary)) => summary.has_activity(),
+                    Ok(Ok(summary)) => summary.needs_active_poll(),
                     Ok(Err(err)) => {
                         log(
                             &state,

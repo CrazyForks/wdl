@@ -151,18 +151,22 @@ Key families:
   Runtime run dispatch and progress callbacks share one system-vs-user runtime endpoint
   selector inside the workflows crate.
 - 32 scheduling shards partition ready/due work. A tick interleaves candidates from
-  active shards into one global dispatch pool instead of draining shards serially.
-  `WORKFLOWS_READY_DISPATCH_CONCURRENCY` bounds that pool, defaults to `128`, and is
-  bounded to the 1–128 per-tick ready batch. Workflow and DO alarm dispatch pools run
-  concurrently. `WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY` controls the DO alarm wave,
-  defaults to `32`, and is bounded to 1–100 jobs; each tick starts one such wave.
-  Scheduler applies a separate client deadline to the tick request with
-  `WORKFLOWS_TICK_TIMEOUT_MS`, which defaults to 130 seconds. Workflows' code default
-  dispatch timeout is 60 seconds; Terraform raises it to 120 seconds, leaving 10 seconds
-  of request, Redis, and commit headroom for its default one-wave pools. This bounds how
-  long Scheduler waits, not server-side tick execution after a disconnect. Operators
-  increasing `WORKFLOWS_DISPATCH_TIMEOUT_MS` or lowering workflow dispatch concurrency
-  below the ready batch size must also raise the tick timeout.
+  active shards instead of draining shards serially, acquires a dispatch permit before
+  claim, and hands each claimed activation to a Workflows-owned background task. The
+  tick waits for maintenance, claim, and admission only; it does not wait for tenant
+  execution or DO alarm delivery to finish. `WORKFLOWS_READY_DISPATCH_CONCURRENCY`
+  bounds workflow execution across overlapping ticks on one Workflows replica, defaults
+  to `128`, and is bounded to the 1–128 ready batch. The independent DO alarm pool is
+  controlled by `WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY`, defaults to `32`, and is
+  bounded to 1–100 jobs. Admitted tasks retain their pool permit and shutdown in-flight
+  guard through runtime dispatch and fenced commit. A process loss leaves recovery to
+  the existing run lease and ready hint. Scheduler applies an independent client
+  deadline to maintenance and admission with `WORKFLOWS_TICK_TIMEOUT_MS`, which defaults
+  to 60 seconds; it is not a workflow execution deadline and is independent of the
+  Workflows runtime dispatch timeout. Scheduler uses
+  `WORKFLOWS_TICK_ACTIVE_INTERVAL_MS` (default 100 ms) while a tick reports maintenance,
+  admission, or pending work blocked on either dispatch pool; otherwise it uses
+  `WORKFLOWS_TICK_INTERVAL_MS` (default 1 second).
 - Ready tokens are deduplicated hints; instance hash state is authority.
 - Execution commits are fenced by `generation`, `runToken`, active instance status, and
   an unexpired run lease. Step commits/registers accept the same-run `running` or
@@ -228,10 +232,13 @@ Scheduling is hint-based but state-authoritative:
    `wf:ready:<shard>`.
 2. Sleep, retry, and wait timeout write/update a due token in `wf:due:<shard>`.
 3. scheduler calls `/internal/workflows/tick`; workflows promotes due tokens, samples
-   ready tokens, and claims eligible instances.
+   ready tokens, acquires per-replica dispatch permits shared across ticks and shards,
+   and claims eligible instances. The tick returns after admission rather than waiting
+   for those runs to finish.
 4. Claim validates status, generation, and lease state from the instance hash. Duplicate
    or stale ready/due tokens self-clean and do not execute user code.
-5. A runtime dispatch is bounded by `WORKFLOWS_DISPATCH_TIMEOUT_MS`. On runtime
+5. A tracked Workflows task owns each admitted runtime dispatch plus its fenced result
+   commit. The dispatch is bounded by `WORKFLOWS_DISPATCH_TIMEOUT_MS`. On runtime
    dispatch error or timeout, workflows releases the ordinary run claim so a later tick
    can retry. Generation/run-token fences prevent double durable commits, but external
    side effects in user code may repeat; workflow code and step callbacks should be
@@ -337,9 +344,10 @@ best-effort callback and records a dropped outcome; delivery is not transactiona
 workflows follows the Rust service observability shape: JSON logs, `/_healthz`,
 `/_metrics`, request in-flight tracking, shutdown drain, and bounded labels. Runtime
 emits workflow dispatch, replay cache, payload-limit, and callback outcomes. Workflows
-emits internal DO alarm delivery/retry/discard outcomes and the bounded
-`do_alarm_dispatches` metric. Scheduler logs workflow tick failures separately from
-queue/cron dispatch.
+emits bounded `workflow_dispatches` completion outcomes, including fenced no-op commits,
+and internal DO alarm delivery/retry/discard/in-flight-unknown outcomes through
+`do_alarm_dispatches`. Scheduler tick logs report admission and dispatch-pool capacity
+pressure, and log workflow tick failures separately from queue/cron dispatch.
 
 ## Deployment / Rollout Notes
 
@@ -348,8 +356,8 @@ queue/cron dispatch.
   to it.
 - do-runtime may roll only after workflows when it calls a new workflows API shape,
   including the internal Durable Object alarm mutation endpoints.
-- Scheduler may roll after workflows is deployed because it only calls the tick
-  endpoint.
+- Scheduler may roll after workflows because its only Workflows dependency is the tick
+  endpoint; its cron and queue loops are independent.
 - DB 2 is the workflow instance state boundary; do not add direct DB 2 writes from
   control/runtime/scheduler.
 - Workflows persists `wf:schema_version` in DB 2. Schema `2` stores DAG dependency edges

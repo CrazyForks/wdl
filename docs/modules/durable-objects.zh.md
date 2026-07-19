@@ -119,7 +119,7 @@ Terraform 除了 Fargate task memory limit，还会给 do-runtime workerd contai
 
 ## 可观测性
 
-do-runtime 围绕 owner resolution、dispatch、alarm execution、drain、renew 和 WebSocket 处理输出结构化日志。Workflows 输出 backend alarm retry/discard outcome 和 `do_alarm_dispatches` metrics；do-runtime metrics 覆盖 runtime operation。Gateway request log 不衡量 initial 101 之后的 backend WebSocket recovery 生命周期。
+do-runtime 围绕 owner resolution、dispatch、alarm execution、drain、renew 和 WebSocket 处理输出结构化日志。Workflows 通过 `do_alarm_dispatches` 输出 backend alarm delivery/retry/discard/in-flight-unknown outcome；do-runtime metrics 覆盖 runtime operation。Gateway request log 不衡量 initial 101 之后的 backend WebSocket recovery 生命周期。
 
 ## 部署 / Rollout 注意事项
 

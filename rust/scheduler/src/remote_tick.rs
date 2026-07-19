@@ -15,7 +15,10 @@ pub(crate) struct RemoteTickResponse {
 }
 
 pub(crate) fn json_usize(value: Option<&JsonValue>) -> usize {
-    value.and_then(JsonValue::as_u64).unwrap_or(0) as usize
+    value
+        .and_then(JsonValue::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
 }
 
 fn workflow_tick_request(
@@ -31,6 +34,19 @@ fn workflow_tick_request(
         .header("x-request-id", request_id)
         .timeout(Duration::from_millis(config.workflows_tick_timeout_ms))
         .json(&json!({}))
+}
+
+async fn read_remote_tick_text(
+    response: reqwest::Response,
+    failure_message: &str,
+) -> SchedulerResult<String> {
+    let status = response.status();
+    response.text().await.map_err(|err| {
+        SchedulerError::internal_error(format!(
+            "{failure_message} while reading HTTP {} response body: {err}",
+            status.as_u16()
+        ))
+    })
 }
 
 pub(crate) async fn post_remote_tick(
@@ -49,7 +65,7 @@ pub(crate) async fn post_remote_tick(
         .await
         .map_err(|err| SchedulerError::internal_error(format!("{failure_message}: {err}")))?;
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let text = read_remote_tick_text(response, failure_message).await?;
     let body = serde_json::from_str::<JsonValue>(&text).unwrap_or_else(|_| json!({}));
     Ok(RemoteTickResponse {
         request_id,
@@ -63,6 +79,7 @@ pub(crate) async fn post_remote_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use wdl_rust_common::test_env::with_temp_envs;
 
     #[test]
@@ -89,6 +106,39 @@ mod tests {
                     Some(Duration::from_millis(175_000))
                 );
             },
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_tick_body_read_errors_are_not_treated_as_empty_successes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{}",
+                )
+                .unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/internal/workflows/tick"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        let err = read_remote_tick_text(response, "Workflow tick failed")
+            .await
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert_eq!(err.code, "internal_error");
+        assert!(
+            err.message
+                .starts_with("Workflow tick failed while reading HTTP 503 response body:")
         );
     }
 }

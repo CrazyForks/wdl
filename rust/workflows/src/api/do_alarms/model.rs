@@ -75,17 +75,6 @@ impl DoAlarmJob {
     }
 }
 
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DoAlarmTickCounters {
-    pub(crate) due_moved: usize,
-    pub(crate) dispatched: usize,
-    pub(crate) delivered: usize,
-    pub(crate) retried: usize,
-    pub(crate) discarded: usize,
-    pub(crate) skipped: usize,
-}
-
 pub(super) fn validate_set_request(req: &DoAlarmSetRequest) -> WorkflowResult<()> {
     // The job id is hashed, but the by-worker index embeds ns/worker directly.
     // Validate the complete dispatch identity before either key family is built.
