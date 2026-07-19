@@ -21,6 +21,12 @@ fn temp_env<R>(items: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
     {
         all_items.push(("WDL_INTERNAL_AUTH_TOKEN", Some("test-internal-auth-token")));
     }
+    if !all_items
+        .iter()
+        .any(|(key, _)| *key == "WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY")
+    {
+        all_items.push(("WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY", None));
+    }
     with_temp_envs(&all_items, f)
 }
 
@@ -38,6 +44,7 @@ fn workflows_redis_url_defaults_to_db2() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
             ("WORKFLOWS_RUN_LEASE_MS", None),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379")),
@@ -52,10 +59,36 @@ fn workflows_redis_url_defaults_to_db2() {
             assert_eq!(config.system_runtime_port, 8088);
             assert_eq!(config.run_lease_ms, 70_000);
             assert_eq!(config.do_alarm_claim_lease_ms, 300_000);
+            assert_eq!(config.ready_dispatch_concurrency, 128);
+            assert_eq!(config.do_alarm_dispatch_concurrency, 32);
             assert_eq!(config.progress_callback_lookup_concurrency, 128);
             assert_eq!(config.progress_callback_concurrency, 32);
         },
     );
+}
+
+#[test]
+fn ready_dispatch_concurrency_stays_within_one_tick_batch() {
+    for (configured, expected) in [("0", 128), ("73", 73), ("129", 128)] {
+        temp_env(
+            &[("WORKFLOWS_READY_DISPATCH_CONCURRENCY", Some(configured))],
+            || {
+                assert_eq!(config_from_env().ready_dispatch_concurrency, expected);
+            },
+        );
+    }
+}
+
+#[test]
+fn do_alarm_dispatch_concurrency_stays_within_one_tick_batch() {
+    for (configured, expected) in [("0", 32), ("101", 100)] {
+        temp_env(
+            &[("WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY", Some(configured))],
+            || {
+                assert_eq!(config_from_env().do_alarm_dispatch_concurrency, expected);
+            },
+        );
+    }
 }
 
 #[test]
@@ -72,6 +105,7 @@ fn workflows_redis_db_applies_when_workflows_redis_url_unset() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
             ("WORKFLOWS_RUN_LEASE_MS", None),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379")),
@@ -98,6 +132,7 @@ fn workflows_redis_db_replaces_existing_redis_url_db_suffix() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
             ("WORKFLOWS_RUN_LEASE_MS", None),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379/1")),
@@ -124,6 +159,7 @@ fn workflows_redis_db_preserves_redis_url_query_suffix() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
             ("WORKFLOWS_RUN_LEASE_MS", None),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379/1?protocol=resp3")),
@@ -153,6 +189,7 @@ fn workflows_redis_db_preserves_redis_url_userinfo_and_ipv6_authority() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
             ("WORKFLOWS_RUN_LEASE_MS", None),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             (
@@ -187,6 +224,8 @@ fn workflows_redis_url_uses_explicit_url() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", Some("1000")),
             ("WORKFLOWS_RUN_LEASE_MS", Some("12345")),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", Some("23456")),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", Some("73")),
+            ("WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY", Some("41")),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", Some("17")),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", Some("7")),
             ("REDIS_URL", Some("redis://redis:6379")),
@@ -202,6 +241,8 @@ fn workflows_redis_url_uses_explicit_url() {
             assert_eq!(config.system_runtime_port, 18089);
             assert_eq!(config.run_lease_ms, 12345);
             assert_eq!(config.do_alarm_claim_lease_ms, 23456);
+            assert_eq!(config.ready_dispatch_concurrency, 73);
+            assert_eq!(config.do_alarm_dispatch_concurrency, 41);
             assert_eq!(config.progress_callback_lookup_concurrency, 17);
             assert_eq!(config.progress_callback_concurrency, 7);
         },
@@ -221,6 +262,7 @@ fn workflows_run_lease_clamps_above_dispatch_timeout() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", Some("60000")),
             ("WORKFLOWS_RUN_LEASE_MS", Some("12345")),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379")),
@@ -248,6 +290,7 @@ fn workflows_do_alarm_claim_lease_clamps_above_dispatch_timeout() {
             ("WORKFLOWS_DISPATCH_TIMEOUT_MS", Some("60000")),
             ("WORKFLOWS_RUN_LEASE_MS", None),
             ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", Some("12345")),
+            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379")),

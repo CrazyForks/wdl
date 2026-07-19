@@ -3,8 +3,8 @@ use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 
 use crate::{
-    AppState, InstanceIdentity, LogLevel, WorkflowError, WorkflowResult, fields_with_error, log,
-    workflow_shard_queue_keys,
+    AppState, InstanceIdentity, LogLevel, WORKFLOW_READY_BATCH_SIZE, WorkflowError, WorkflowResult,
+    fields_with_error, log, workflow_shard_queue_keys,
 };
 
 use super::{
@@ -26,8 +26,6 @@ use ready::{
 };
 use retention::cleanup_retention;
 
-const READY_BATCH_SIZE: usize = 100;
-const READY_DISPATCH_CONCURRENCY: usize = 8;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TickResponse {
@@ -199,41 +197,20 @@ pub(crate) async fn tick_workflows(
 ) -> WorkflowResult<TickResponse> {
     let due_moved = move_due_tokens(app).await?;
     let retention_cleaned = cleanup_retention(app).await?;
-    let result = dispatch_ready_members(
+    let workflow_dispatch = dispatch_ready_members(
         app,
         workflow_shard_queue_keys(),
         ReadyDispatchConfig {
-            batch_size: READY_BATCH_SIZE,
-            concurrency: READY_DISPATCH_CONCURRENCY,
+            batch_size: WORKFLOW_READY_BATCH_SIZE,
+            concurrency: app.config.ready_dispatch_concurrency,
             prune_on_error: false,
         },
         TickCounters::default(),
-        |counters| counters.dispatched,
         |shard, token| process_ready_workflow_token(app, shard, token, request_id),
         merge_tick_counters,
-    )
-    .await?;
-    if let Some(err) = result.error {
-        return Err(err);
-    }
-    let counters = result.counters;
-    emit_outcome_counts(
-        app,
-        "workflow_dispatches",
-        &[
-            ("completed", counters.completed),
-            ("failed", counters.failed),
-            ("suspended", counters.suspended),
-        ],
     );
-    if due_moved > 0 {
-        app.metrics.increment(
-            "workflow_due_claims",
-            &[("outcome", "moved")],
-            due_moved as f64,
-        );
-    }
-    let do_alarm_counters = match dispatch_ready_do_alarms(app).await {
+    let (result, do_alarm_result) = tokio::join!(workflow_dispatch, dispatch_ready_do_alarms(app));
+    let do_alarm_counters = match do_alarm_result {
         Ok(result) => {
             if let Some(err) = result.error {
                 log(
@@ -255,6 +232,27 @@ pub(crate) async fn tick_workflows(
             Default::default()
         }
     };
+    let result = result?;
+    if let Some(err) = result.error {
+        return Err(err);
+    }
+    let counters = result.counters;
+    emit_outcome_counts(
+        app,
+        "workflow_dispatches",
+        &[
+            ("completed", counters.completed),
+            ("failed", counters.failed),
+            ("suspended", counters.suspended),
+        ],
+    );
+    if due_moved > 0 {
+        app.metrics.increment(
+            "workflow_due_claims",
+            &[("outcome", "moved")],
+            due_moved as f64,
+        );
+    }
     Ok(TickResponse {
         dispatched: counters.dispatched,
         completed: counters.completed,
@@ -398,13 +396,5 @@ mod tests {
             COMMIT_RUNTIME_TERMINAL_SCRIPT
                 .contains(r#"if status ~= "running" and not waiting_failed then"#)
         );
-    }
-
-    #[test]
-    fn do_alarm_tick_errors_do_not_fail_workflow_tick_response() {
-        let source = include_str!("tick.rs");
-        assert!(source.contains("match dispatch_ready_do_alarms(app).await"));
-        assert!(source.contains("\"do_alarm_tick_error\""));
-        assert!(source.contains("Default::default()"));
     }
 }

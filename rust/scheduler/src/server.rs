@@ -75,6 +75,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "workflows": config.workflows_host.as_ref().map(|host| format!("{}:{}", host, config.workflows_port)),
             "workflows_tick_interval_ms": config.workflows_tick_interval_ms,
             "workflows_tick_active_interval_ms": config.workflows_tick_active_interval_ms,
+            "workflows_tick_timeout_ms": config.workflows_tick_timeout_ms,
             "max_concurrency": config.max_concurrency,
             "cron_max_concurrency": config.cron_max_concurrency,
             "queue_max_concurrency": config.queue_max_concurrency,

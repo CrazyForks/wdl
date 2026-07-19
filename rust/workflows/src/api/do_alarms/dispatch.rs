@@ -9,8 +9,8 @@ use wdl_rust_common::worker_contract::{
 };
 
 use crate::{
-    AppState, DoAlarmJobKeys, LogLevel, WorkflowError, WorkflowResult, do_alarm_shard_queue_keys,
-    log,
+    AppState, DO_ALARM_READY_BATCH_MAX, DoAlarmJobKeys, LogLevel, WorkflowError, WorkflowResult,
+    do_alarm_shard_queue_keys, log,
 };
 
 use super::super::{
@@ -24,8 +24,14 @@ use super::scripts::{
 };
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
-const DO_ALARM_READY_BATCH_SIZE: usize = 100;
-const DO_ALARM_DISPATCH_CONCURRENCY: usize = 8;
+
+fn do_alarm_ready_dispatch_config(concurrency: usize) -> ReadyDispatchConfig {
+    ReadyDispatchConfig {
+        batch_size: concurrency.min(DO_ALARM_READY_BATCH_MAX),
+        concurrency,
+        prune_on_error: true,
+    }
+}
 
 fn saturating_i64_ms(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
@@ -512,13 +518,8 @@ pub(crate) async fn dispatch_ready_do_alarms(app: &AppState) -> WorkflowResult<D
     let result = dispatch_ready_members(
         app,
         do_alarm_shard_queue_keys(),
-        ReadyDispatchConfig {
-            batch_size: DO_ALARM_READY_BATCH_SIZE,
-            concurrency: DO_ALARM_DISPATCH_CONCURRENCY,
-            prune_on_error: true,
-        },
+        do_alarm_ready_dispatch_config(app.config.do_alarm_dispatch_concurrency),
         counters,
-        |counters| counters.dispatched,
         |_, job_id| process_ready_do_alarm_job(app, job_id),
         merge_counters,
     )
@@ -541,7 +542,16 @@ pub(crate) async fn dispatch_ready_do_alarms(app: &AppState) -> WorkflowResult<D
 
 #[cfg(test)]
 mod tests {
-    use super::{retry_delay_ms_from_parts, saturating_i64_ms};
+    use super::{do_alarm_ready_dispatch_config, retry_delay_ms_from_parts, saturating_i64_ms};
+
+    #[test]
+    fn ready_batch_is_one_bounded_dispatch_wave() {
+        let config = do_alarm_ready_dispatch_config(32);
+
+        assert_eq!(config.batch_size, 32);
+        assert_eq!(config.concurrency, 32);
+        assert!(config.prune_on_error);
+    }
 
     #[test]
     fn retry_delay_caps_with_zero_jitter() {

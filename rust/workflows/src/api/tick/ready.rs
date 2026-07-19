@@ -1,11 +1,12 @@
-use crate::{AppState, WorkflowResult, instance_state_key, workflow_shard_queue_keys};
+use crate::{
+    AppState, WORKFLOW_READY_BATCH_SIZE, WorkflowResult, instance_state_key,
+    workflow_shard_queue_keys,
+};
 
 use super::super::{
     DuePromotionConfig, DuePromotionMember, eval_script, parse_ready_token, promote_due_members,
     remove_ready_member_if_state_missing,
 };
-use super::READY_BATCH_SIZE;
-
 pub(super) const REMOVE_READY_TOKEN_IF_TERMINAL_SCRIPT: &str = r#"
 local generation = redis.call("HGET", KEYS[1], "generation")
 local status = redis.call("HGET", KEYS[1], "status")
@@ -65,8 +66,8 @@ pub(super) async fn move_due_tokens(app: &AppState) -> WorkflowResult<usize> {
         app,
         workflow_shard_queue_keys(),
         DuePromotionConfig {
-            total_limit: READY_BATCH_SIZE,
-            per_shard_limit: READY_BATCH_SIZE,
+            total_limit: WORKFLOW_READY_BATCH_SIZE,
+            per_shard_limit: WORKFLOW_READY_BATCH_SIZE,
             scan_overfetch_factor: DUE_SCAN_OVERFETCH_FACTOR,
         },
         MOVE_DUE_TOKEN_SCRIPT,
@@ -166,8 +167,8 @@ mod tests {
         let shared_source = include_str!("../sharded_dispatch.rs");
         assert!(source.contains("DUE_SCAN_OVERFETCH_FACTOR"));
         assert!(source.contains("promote_due_members"));
-        assert!(source.contains("total_limit: READY_BATCH_SIZE"));
-        assert!(source.contains("per_shard_limit: READY_BATCH_SIZE"));
+        assert!(source.contains("total_limit: WORKFLOW_READY_BATCH_SIZE"));
+        assert!(source.contains("per_shard_limit: WORKFLOW_READY_BATCH_SIZE"));
         assert!(shared_source.contains("fn due_shards_with_due_members"));
         assert!(shared_source.contains(r#".cmd("ZRANGEBYSCORE")"#));
         assert!(shared_source.contains("config.scan_overfetch_factor"));

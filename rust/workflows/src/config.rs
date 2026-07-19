@@ -5,6 +5,9 @@ use wdl_rust_common::env::{env_u16, env_u64, env_usize, positive_or};
 use wdl_rust_common::internal_auth::{InternalAuthTokens, internal_auth_tokens_from_env};
 use wdl_rust_common::log::{LogLevel, emit_log_line, log_level_from_env};
 
+pub(crate) const WORKFLOW_READY_BATCH_SIZE: usize = 128;
+pub(crate) const DO_ALARM_READY_BATCH_MAX: usize = 100;
+
 #[derive(Clone)]
 pub(crate) struct Config {
     pub(crate) redis_url: String,
@@ -17,6 +20,8 @@ pub(crate) struct Config {
     pub(crate) do_runtime_port: u16,
     pub(crate) metrics_port: u16,
     pub(crate) dispatch_timeout_ms: u64,
+    pub(crate) ready_dispatch_concurrency: usize,
+    pub(crate) do_alarm_dispatch_concurrency: usize,
     pub(crate) run_lease_ms: u64,
     pub(crate) do_alarm_claim_lease_ms: u64,
     pub(crate) do_alarm_retry_delay_ms: u64,
@@ -137,6 +142,13 @@ pub(crate) fn config_from_env() -> Config {
         runtime_port,
         metrics_port: env_u16("WORKFLOWS_PORT", 9120),
         dispatch_timeout_ms,
+        ready_dispatch_concurrency: env_usize(
+            "WORKFLOWS_READY_DISPATCH_CONCURRENCY",
+            WORKFLOW_READY_BATCH_SIZE,
+        )
+        .clamp(1, WORKFLOW_READY_BATCH_SIZE),
+        do_alarm_dispatch_concurrency: env_usize("WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY", 32)
+            .clamp(1, DO_ALARM_READY_BATCH_MAX),
         run_lease_ms,
         do_alarm_claim_lease_ms,
         do_alarm_retry_delay_ms: env_u64("WORKFLOWS_DO_ALARM_RETRY_DELAY_MS", 5_000),

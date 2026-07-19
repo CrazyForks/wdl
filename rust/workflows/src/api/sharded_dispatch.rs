@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::future::Future;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -102,22 +103,47 @@ pub(crate) async fn active_ready_shards(
     Ok(rotate_active_shards(shards, cursor.max(0) as usize))
 }
 
-pub(crate) async fn sample_ready_members(
+async fn sample_ready_members(
     app: &AppState,
     keys: ShardQueueKeys,
-    shard: usize,
+    shards: &[usize],
     limit: usize,
-) -> WorkflowResult<Vec<String>> {
-    app.redis
+) -> WorkflowResult<Vec<(usize, Vec<String>)>> {
+    if shards.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let pages: Vec<Vec<String>> = app
+        .redis
         .with_conn(async |mut conn| {
-            redis::cmd("SRANDMEMBER")
-                .arg(keys.ready(shard))
-                .arg(limit)
-                .query_async(&mut conn)
-                .await
+            let mut pipe = redis::pipe();
+            for shard in shards {
+                pipe.cmd("SRANDMEMBER").arg(keys.ready(*shard)).arg(limit);
+            }
+            pipe.query_async(&mut conn).await
         })
-        .await
-        .map_err(Into::into)
+        .await?;
+    Ok(shards.iter().copied().zip(pages).collect())
+}
+
+fn interleave_ready_members(sampled: Vec<(usize, Vec<String>)>) -> VecDeque<(usize, String)> {
+    let mut shards = sampled
+        .into_iter()
+        .map(|(shard, members)| (shard, VecDeque::from(members)))
+        .collect::<Vec<_>>();
+    let mut candidates = VecDeque::new();
+    loop {
+        let mut added = false;
+        for (shard, members) in &mut shards {
+            if let Some(member) = members.pop_front() {
+                candidates.push_back((*shard, member));
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    candidates
 }
 
 pub(crate) async fn prune_ready_shard_if_empty(
@@ -288,75 +314,112 @@ pub(crate) async fn due_shards_with_due_members(
         .collect())
 }
 
-pub(crate) async fn dispatch_ready_members<C, F, Fut, D, M>(
+pub(crate) async fn dispatch_ready_members<C, F, Fut, M>(
     app: &AppState,
     keys: ShardQueueKeys,
     config: ReadyDispatchConfig,
-    mut counters: C,
-    dispatched_count: D,
+    counters: C,
     process_member: F,
-    mut merge_counters: M,
+    merge_counters: M,
 ) -> WorkflowResult<ReadyDispatchResult<C>>
 where
     F: Fn(usize, String) -> Fut + Copy,
     Fut: Future<Output = WorkflowResult<ReadyMemberOutcome<C>>>,
-    D: Fn(&C) -> usize + Copy,
     M: FnMut(&mut C, C),
 {
-    let mut tick_error = None;
-    let concurrency = config.concurrency.max(1);
     let active_shards = active_ready_shards(app, keys).await?;
-    for shard in active_shards {
-        if dispatched_count(&counters) >= config.batch_size {
-            break;
+    let sampled = sample_ready_members(app, keys, &active_shards, config.batch_size).await?;
+    let mut prune_shards = sampled
+        .iter()
+        .filter_map(|(shard, members)| members.is_empty().then_some(*shard))
+        .collect::<Vec<_>>();
+    let candidates = interleave_ready_members(sampled);
+    let run = run_ready_candidates(
+        &config,
+        candidates,
+        counters,
+        process_member,
+        merge_counters,
+    )
+    .await;
+    for shard in run.touched_shards {
+        if !prune_shards.contains(&shard) {
+            prune_shards.push(shard);
         }
-        let remaining = config.batch_size - dispatched_count(&counters);
-        let members = sample_ready_members(app, keys, shard, remaining).await?;
-        let mut in_flight = FuturesUnordered::new();
-        let mut first_error = None;
-        let mut stop_after_current_batch = false;
-        for member in members {
-            while in_flight.len() >= concurrency {
-                let Some(result) = in_flight.next().await else {
-                    break;
-                };
-                apply_ready_member_result(
-                    result,
-                    &mut counters,
-                    &mut first_error,
-                    &mut stop_after_current_batch,
-                    &mut merge_counters,
-                );
-            }
-            if first_error.is_some() || stop_after_current_batch {
-                break;
-            }
-            in_flight.push(process_member(shard, member));
-        }
-        while let Some(result) = in_flight.next().await {
-            apply_ready_member_result(
-                result,
-                &mut counters,
-                &mut first_error,
-                &mut stop_after_current_batch,
-                &mut merge_counters,
-            );
-        }
-        if config.prune_on_error || first_error.is_none() {
+    }
+    for shard in prune_shards {
+        if config.prune_on_error || !run.error_shards.contains(&shard) {
             prune_ready_shard_if_empty(app, keys, shard).await?;
-        }
-        if let Some(err) = first_error {
-            tick_error = Some(err);
-            break;
-        }
-        if stop_after_current_batch {
-            break;
         }
     }
     Ok(ReadyDispatchResult {
-        counters,
-        error: tick_error,
+        counters: run.counters,
+        error: run.error,
     })
+}
+
+struct ReadyCandidateRun<C> {
+    counters: C,
+    error: Option<WorkflowError>,
+    touched_shards: Vec<usize>,
+    error_shards: Vec<usize>,
+}
+
+async fn run_ready_candidates<C, F, Fut, M>(
+    config: &ReadyDispatchConfig,
+    mut candidates: VecDeque<(usize, String)>,
+    mut counters: C,
+    process_member: F,
+    mut merge_counters: M,
+) -> ReadyCandidateRun<C>
+where
+    F: Fn(usize, String) -> Fut + Copy,
+    Fut: Future<Output = WorkflowResult<ReadyMemberOutcome<C>>>,
+    M: FnMut(&mut C, C),
+{
+    let concurrency = config.concurrency.max(1);
+    let mut in_flight = FuturesUnordered::new();
+    let mut first_error = None;
+    let mut stop_after_current_batch = false;
+    let mut started_count = 0;
+    let mut touched_shards = Vec::new();
+    let mut error_shards = Vec::new();
+    loop {
+        while first_error.is_none()
+            && !stop_after_current_batch
+            && in_flight.len() < concurrency
+            && started_count < config.batch_size
+        {
+            let Some((shard, member)) = candidates.pop_front() else {
+                break;
+            };
+            if !touched_shards.contains(&shard) {
+                touched_shards.push(shard);
+            }
+            started_count += 1;
+            in_flight.push(async move { (shard, process_member(shard, member).await) });
+        }
+
+        let Some((shard, result)) = in_flight.next().await else {
+            break;
+        };
+        if result.is_err() && !error_shards.contains(&shard) {
+            error_shards.push(shard);
+        }
+        apply_ready_member_result(
+            result,
+            &mut counters,
+            &mut first_error,
+            &mut stop_after_current_batch,
+            &mut merge_counters,
+        );
+    }
+    ReadyCandidateRun {
+        counters,
+        error: first_error,
+        touched_shards,
+        error_shards,
+    }
 }
 
 fn apply_ready_member_result<C, M>(
@@ -382,6 +445,16 @@ fn apply_ready_member_result<C, M>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::{Barrier, Semaphore};
+    use tokio::time::{sleep, timeout};
+
+    #[derive(Clone, Copy)]
+    enum HaltMode {
+        Error,
+        Stop,
+    }
 
     #[test]
     fn active_shards_rotate_from_stable_order() {
@@ -411,32 +484,187 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_drains_in_flight_before_reporting_first_error() {
-        let source = include_str!("sharded_dispatch.rs");
-        let implementation = source
-            .split("\n#[cfg(test)]")
-            .next()
-            .expect("dispatcher implementation should precede tests");
+    fn ready_members_are_interleaved_across_shards() {
+        let candidates = interleave_ready_members(vec![
+            (2, vec!["2a".to_string(), "2b".to_string()]),
+            (7, vec!["7a".to_string()]),
+            (9, vec!["9a".to_string(), "9b".to_string()]),
+        ]);
 
-        assert!(implementation.contains("let mut first_error = None;"));
-        assert!(implementation.contains("while let Some(result) = in_flight.next().await"));
-        assert!(implementation.contains("tick_error = Some(err);"));
+        assert_eq!(
+            candidates.into_iter().collect::<Vec<_>>(),
+            vec![
+                (2, "2a".to_string()),
+                (7, "7a".to_string()),
+                (9, "9a".to_string()),
+                (2, "2b".to_string()),
+                (9, "9b".to_string()),
+            ]
+        );
     }
 
-    #[test]
-    fn dispatcher_stops_starting_new_members_after_batch_stop_signal() {
-        let source = include_str!("sharded_dispatch.rs");
-        let implementation = source
-            .split("\n#[cfg(test)]")
-            .next()
-            .expect("dispatcher implementation should precede tests");
-        let stop_check = implementation
-            .find("if first_error.is_some() || stop_after_current_batch")
-            .expect("dispatcher should stop filling after a stop signal");
-        let push = implementation
-            .find("in_flight.push(process_member(shard, member));")
-            .expect("dispatcher should start work after checking stop conditions");
+    #[tokio::test]
+    async fn ready_dispatch_uses_one_global_limit_across_shards() {
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let started = AtomicUsize::new(0);
+        let first_wave_shards = AtomicUsize::new(0);
+        let wave = Barrier::new(3);
+        let candidates = interleave_ready_members(vec![
+            (0, vec!["0a".to_string(), "0b".to_string()]),
+            (1, vec!["1a".to_string(), "1b".to_string()]),
+            (2, vec!["2a".to_string(), "2b".to_string()]),
+        ]);
+        let config = ReadyDispatchConfig {
+            batch_size: 6,
+            concurrency: 3,
+            prune_on_error: false,
+        };
+        let active_ref = &active;
+        let peak_ref = &peak;
+        let started_ref = &started;
+        let first_wave_shards_ref = &first_wave_shards;
+        let wave_ref = &wave;
+        let run = timeout(
+            Duration::from_secs(1),
+            run_ready_candidates(
+                &config,
+                candidates,
+                0_usize,
+                move |shard, _| async move {
+                    let ordinal = started_ref.fetch_add(1, Ordering::SeqCst);
+                    if ordinal < 3 {
+                        first_wave_shards_ref.fetch_or(1 << shard, Ordering::SeqCst);
+                    }
+                    let current = active_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak_ref.fetch_max(current, Ordering::SeqCst);
+                    wave_ref.wait().await;
+                    active_ref.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, WorkflowError>(ReadyMemberOutcome::new(1))
+                },
+                |count, delta| *count += delta,
+            ),
+        )
+        .await
+        .expect("three shards should dispatch concurrently");
 
-        assert!(stop_check < push);
+        assert_eq!(run.counters, 6);
+        assert!(run.error.is_none());
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+        assert_eq!(first_wave_shards.load(Ordering::SeqCst), 0b111);
+    }
+
+    #[tokio::test]
+    async fn ready_dispatch_caps_started_candidates_at_batch_size() {
+        let started = AtomicUsize::new(0);
+        let candidates = VecDeque::from(
+            (0..10)
+                .map(|index| (index % 2, index.to_string()))
+                .collect::<Vec<_>>(),
+        );
+        let config = ReadyDispatchConfig {
+            batch_size: 4,
+            concurrency: 3,
+            prune_on_error: false,
+        };
+
+        let run = run_ready_candidates(
+            &config,
+            candidates,
+            0_usize,
+            |_, _| async {
+                started.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, WorkflowError>(ReadyMemberOutcome::new(0))
+            },
+            |count, delta| *count += delta,
+        )
+        .await;
+
+        assert_eq!(run.counters, 0);
+        assert!(run.error.is_none());
+        assert_eq!(started.load(Ordering::SeqCst), 4);
+    }
+
+    async fn assert_halt_stops_new_work_and_drains_in_flight(mode: HaltMode) {
+        let started = AtomicUsize::new(0);
+        let halt_returned = AtomicUsize::new(0);
+        let release = Semaphore::new(0);
+        let candidates = VecDeque::from(vec![
+            (0, "halt".to_string()),
+            (1, "one".to_string()),
+            (2, "two".to_string()),
+            (0, "three".to_string()),
+            (1, "four".to_string()),
+            (2, "five".to_string()),
+        ]);
+        let config = ReadyDispatchConfig {
+            batch_size: 6,
+            concurrency: 3,
+            prune_on_error: false,
+        };
+        let started_ref = &started;
+        let halt_returned_ref = &halt_returned;
+        let release_ref = &release;
+        let run = run_ready_candidates(
+            &config,
+            candidates,
+            0_usize,
+            |_, member| async move {
+                started_ref.fetch_add(1, Ordering::SeqCst);
+                if member == "halt" {
+                    halt_returned_ref.store(1, Ordering::SeqCst);
+                    return match mode {
+                        HaltMode::Error => Err(WorkflowError::internal_error("halt")),
+                        HaltMode::Stop => Ok(ReadyMemberOutcome::stop_after_current_batch(1)),
+                    };
+                }
+                release_ref
+                    .acquire()
+                    .await
+                    .expect("test semaphore should stay open")
+                    .forget();
+                Ok(ReadyMemberOutcome::new(1))
+            },
+            |count, delta| *count += delta,
+        );
+        let controller = async {
+            while started.load(Ordering::SeqCst) < 3 || halt_returned.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            sleep(Duration::from_millis(10)).await;
+            assert_eq!(started.load(Ordering::SeqCst), 3);
+            release.add_permits(2);
+        };
+
+        let (run, ()) = timeout(Duration::from_secs(1), async {
+            tokio::join!(run, controller)
+        })
+        .await
+        .expect("halted dispatch should drain its initial in-flight work");
+
+        assert_eq!(started.load(Ordering::SeqCst), 3);
+        match mode {
+            HaltMode::Error => {
+                assert_eq!(run.counters, 2);
+                assert_eq!(
+                    run.error.as_ref().map(|err| err.code),
+                    Some("internal_error")
+                );
+            }
+            HaltMode::Stop => {
+                assert_eq!(run.counters, 3);
+                assert!(run.error.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_dispatch_error_stops_new_work_and_drains_in_flight() {
+        assert_halt_stops_new_work_and_drains_in_flight(HaltMode::Error).await;
+    }
+
+    #[tokio::test]
+    async fn ready_dispatch_stop_signal_stops_new_work_and_drains_in_flight() {
+        assert_halt_stops_new_work_and_drains_in_flight(HaltMode::Stop).await;
     }
 }

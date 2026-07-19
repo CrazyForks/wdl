@@ -150,7 +150,19 @@ Key families:
   and revalidates that contract before persistence and dispatch.
   Runtime run dispatch and progress callbacks share one system-vs-user runtime endpoint
   selector inside the workflows crate.
-- 32 scheduling shards partition ready/due work.
+- 32 scheduling shards partition ready/due work. A tick interleaves candidates from
+  active shards into one global dispatch pool instead of draining shards serially.
+  `WORKFLOWS_READY_DISPATCH_CONCURRENCY` bounds that pool, defaults to `128`, and is
+  bounded to the 1–128 per-tick ready batch. Workflow and DO alarm dispatch pools run
+  concurrently. `WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY` controls the DO alarm wave,
+  defaults to `32`, and is bounded to 1–100 jobs; each tick starts one such wave.
+  Scheduler applies a separate client deadline to the tick request with
+  `WORKFLOWS_TICK_TIMEOUT_MS`, which defaults to 130 seconds. Workflows' code default
+  dispatch timeout is 60 seconds; Terraform raises it to 120 seconds, leaving 10 seconds
+  of request, Redis, and commit headroom for its default one-wave pools. This bounds how
+  long Scheduler waits, not server-side tick execution after a disconnect. Operators
+  increasing `WORKFLOWS_DISPATCH_TIMEOUT_MS` or lowering workflow dispatch concurrency
+  below the ready batch size must also raise the tick timeout.
 - Ready tokens are deduplicated hints; instance hash state is authority.
 - Execution commits are fenced by `generation`, `runToken`, active instance status, and
   an unexpired run lease. Step commits/registers accept the same-run `running` or

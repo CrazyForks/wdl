@@ -18,6 +18,7 @@ pub(crate) struct Config {
     pub(crate) workflows_port: u16,
     pub(crate) workflows_tick_interval_ms: u64,
     pub(crate) workflows_tick_active_interval_ms: u64,
+    pub(crate) workflows_tick_timeout_ms: u64,
     pub(crate) metrics_port: u16,
     pub(crate) fire_timeout_ms: u64,
     pub(crate) lease_ttl_s: u64,
@@ -55,6 +56,7 @@ pub(crate) fn config_from_env() -> Config {
         workflows_port: env_u16("WORKFLOWS_PORT", 9120),
         workflows_tick_interval_ms: env_u64("WORKFLOWS_TICK_INTERVAL_MS", 1_000),
         workflows_tick_active_interval_ms: env_u64("WORKFLOWS_TICK_ACTIVE_INTERVAL_MS", 100),
+        workflows_tick_timeout_ms: env_u64("WORKFLOWS_TICK_TIMEOUT_MS", 130_000),
         runtime_host,
         runtime_port,
         metrics_port: env_u16("SCHEDULER_METRICS_PORT", 9110),
@@ -89,7 +91,30 @@ fn queue_pel_idle_ms(fire_timeout_ms: u64, configured_idle_ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{QUEUE_PEL_IDLE_SAFETY_MS, queue_pel_idle_ms};
+    use super::{QUEUE_PEL_IDLE_SAFETY_MS, config_from_env, queue_pel_idle_ms};
+    use wdl_rust_common::test_env::with_temp_envs;
+
+    #[test]
+    fn workflow_tick_timeout_defaults_to_dedicated_request_deadline() {
+        with_temp_envs(
+            &[
+                ("WDL_INTERNAL_AUTH_TOKEN", Some("test-internal-auth-token")),
+                ("WORKFLOWS_TICK_TIMEOUT_MS", None),
+            ],
+            || assert_eq!(config_from_env().workflows_tick_timeout_ms, 130_000),
+        );
+    }
+
+    #[test]
+    fn workflow_tick_timeout_accepts_operator_override() {
+        with_temp_envs(
+            &[
+                ("WDL_INTERNAL_AUTH_TOKEN", Some("test-internal-auth-token")),
+                ("WORKFLOWS_TICK_TIMEOUT_MS", Some("175000")),
+            ],
+            || assert_eq!(config_from_env().workflows_tick_timeout_ms, 175_000),
+        );
+    }
 
     #[test]
     fn queue_pel_idle_default_has_fire_timeout_margin() {

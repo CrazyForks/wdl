@@ -499,6 +499,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "instance": state.instance_id,
             "redis_configured": redis_configured,
             "port": config.metrics_port,
+            "ready_dispatch_concurrency": config.ready_dispatch_concurrency,
+            "do_alarm_dispatch_concurrency": config.do_alarm_dispatch_concurrency,
             "progress_callback_lookup_concurrency": config.progress_callback_lookup_concurrency,
             "progress_callback_concurrency": config.progress_callback_concurrency,
         }),
