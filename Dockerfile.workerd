@@ -62,8 +62,9 @@ ARG VCS_REF
 ARG BUILD_DATE
 LABEL org.opencontainers.image.title="WDL workerd runtime" \
       org.opencontainers.image.description="WDL gateway, runtime, D1, and Durable Object workerd image" \
+      org.opencontainers.image.url="https://wdl.dev" \
       org.opencontainers.image.source="https://github.com/wdl-dev/wdl" \
-      org.opencontainers.image.documentation="https://github.com/wdl-dev/wdl/tree/main/docs" \
+      org.opencontainers.image.documentation="https://wdl.md" \
       org.opencontainers.image.vendor="Sean Consulting OÜ" \
       org.opencontainers.image.authors="Sean Consulting OÜ" \
       org.opencontainers.image.licenses="Apache-2.0" \

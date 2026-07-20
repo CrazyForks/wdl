@@ -329,6 +329,10 @@ before scaling beyond one task.
 | `test-workers/` | Integration fixtures. |
 | `examples/` | Manual demos and reference projects. |
 | `deploy/`, `terraform/` | Deployment manifests and infrastructure. |
+| `docs/` | Architecture, operations, and module contracts. |
+| `scripts/` | Build, compile, and test-runner implementations behind the npm scripts. |
+| `tests/` | Unit and integration suites. |
+| `licenses/` | Image NOTICE files and generated third-party license bundles. |
 
 The more detailed ownership map lives in [docs/source-map.md](docs/source-map.md).
 

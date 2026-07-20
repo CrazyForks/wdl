@@ -240,6 +240,10 @@ Integration runner 行为、sharding、artifacts 和 debug flags 见 [docs/testi
 | `test-workers/` | Integration fixtures。 |
 | `examples/` | 手工 demo 和 reference projects。 |
 | `deploy/`、`terraform/` | Deployment manifests 和 infrastructure。 |
+| `docs/` | 架构、运维和 module 契约文档。 |
+| `scripts/` | npm scripts 背后的 build、compile 和 test-runner 实现。 |
+| `tests/` | 单元和集成测试套件。 |
+| `licenses/` | 镜像 NOTICE 文件和生成的第三方许可证包。 |
 
 更详细的 ownership map 见 [docs/source-map.zh.md](docs/source-map.zh.md)。
 

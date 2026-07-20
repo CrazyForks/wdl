@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Decoupled Workflows scheduler ticks from tenant run and DO alarm completion: ticks now perform bounded maintenance, claim, and admission, while tracked Workflows tasks hold per-replica dispatch permits through runtime dispatch and the fenced commit. Restored Scheduler's independent tick deadline to 60 seconds and removed the obsolete Terraform coupling to the 120-second runtime dispatch timeout.
-- Replaced internal Workflows tick completion counters with admission and capacity-pressure fields in responses and tick logs, separated fenced workflow commits and unknown in-flight DO alarm outcomes into bounded metrics, and made Scheduler response-body read failures explicit instead of treating them as empty ticks.
+## wdl.20260719.2 - 2026-07-20
+
+- Decoupled Scheduler ticks from tenant Workflow and DO alarm completion: ticks now perform bounded maintenance and admission while admitted work continues in tracked per-replica tasks. Workflow permits remain held through runtime dispatch and fenced commit, and Scheduler uses an independent 60-second tick deadline.
+- Replaced tick completion counters with admission and capacity-pressure signals, added bounded metrics for fenced Workflow commits and unknown in-flight alarm outcomes, and made Scheduler response-body read failures explicit.
 
 ## wdl.20260719.1 - 2026-07-19
 
