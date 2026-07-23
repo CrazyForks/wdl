@@ -6,16 +6,29 @@ import {
   delay,
   deployAndPromote,
   gatewayWorkerId,
+  parseJsonText,
   runtimeInternalPost,
+  sh,
   uniqueNs,
   waitUntil,
   withServiceStopped,
   responseJson,
   queueDelayedKey,
+  QUEUE_DELAYED_INDEX_KEY,
+  QUEUE_DELAYED_WAKE_STREAM,
   queueDlqKey,
   queueStreamKey,
 } from "./helpers/index.js";
-import { redisXLen, redisXPendingCount, redisZCard } from "./helpers/redis.js";
+import {
+  redisDel,
+  redisCommandCalls,
+  redisSet,
+  redisSMembers,
+  redisXLen,
+  redisXPendingCount,
+  redisZCard,
+  redisZRange,
+} from "./helpers/redis.js";
 import {
   ALWAYS_THROWS_QUEUE_CONSUMER,
   ATTEMPT_RECORDER_THROWS_QUEUE_CONSUMER,
@@ -31,6 +44,66 @@ import {
 } from "./helpers/queue-scenarios.js";
 
 setupQueueIntegrationSuite();
+
+/** @returns {any[]} */
+function queueTransitionFailureLogs() {
+  const raw = sh("docker compose logs --no-color --tail=500 scheduler");
+  /** @type {any[]} */
+  const failures = [];
+  for (const line of raw.split("\n")) {
+    const jsonStart = line.indexOf("{");
+    if (jsonStart < 0) continue;
+    const candidate = line.slice(jsonStart);
+    if (!candidate.includes("\"event\":\"queue_message_transition_failed\"")) continue;
+    try {
+      const entry = parseJsonText(candidate, "queue transition failure log");
+      if (entry.event === "queue_message_transition_failed") failures.push(entry);
+    } catch {
+      // Docker may interleave non-JSON service output with structured lines.
+    }
+  }
+  return failures;
+}
+
+test("producer sendBatch batches delayed ZADD and emits one earliest-due wake", async () => {
+  const ns = uniqueNs("qdelaybatch");
+  const queueName = "delayq";
+  const producerVersion = await deployAndPromote(ns, "producer", {
+    code: `
+      export default {
+        async fetch(req, env) {
+          await env.MY_Q.sendBatch([
+            { body: "immediate", contentType: "text", delaySeconds: 0 },
+            { body: "later", contentType: "text", delaySeconds: 60 },
+            { body: "sooner", contentType: "text", delaySeconds: 30 },
+          ]);
+          return new Response("ok");
+        },
+      };`,
+    bindings: { MY_Q: { type: "queue", id: queueName } },
+  });
+
+  await withServiceStopped("scheduler", async () => {
+    const delayedKey = queueDelayedKey(ns, queueName);
+    const zaddBefore = redisCommandCalls("zadd");
+    const wakesBefore = redisXLen(QUEUE_DELAYED_WAKE_STREAM, { db: 1 });
+
+    const sendRes = sendQueueMessage(ns, "producer", producerVersion, null);
+    assertStatus(sendRes, 200, "mixed delayed batch send");
+
+    assert.equal(redisCommandCalls("zadd"), zaddBefore + 1);
+    assert.equal(redisXLen(queueStreamKey(ns, queueName), { db: 1 }), 1);
+    assert.equal(redisZCard(delayedKey, { db: 1 }), 2);
+    assert.equal(redisXLen(QUEUE_DELAYED_WAKE_STREAM, { db: 1 }), wakesBefore + 1);
+    assert.deepEqual(
+      redisZRange(delayedKey, 0, -1, { db: 1 }).map((member) => {
+        const entry = JSON.parse(member);
+        return Buffer.from(entry.body_b64, "base64").toString("utf8");
+      }),
+      ["sooner", "later"]
+    );
+  });
+});
 
 test("handler throw → implicit retryAll → default retry delay → second attempt delivered", async () => {
   const ns = uniqueNs("q");
@@ -79,6 +152,158 @@ test("maxRetries caps implicit retry — bad message goes to DLQ, not looped for
 
   const dlqLen = redisXLen(queueDlqKey(ns, "capq"), { db: 1 });
   assert.equal(dlqLen, 1, `DLQ should have 1 entry, got ${dlqLen}`);
+});
+
+test("retry and DLQ target failures retain their source messages", async () => {
+  const ns = uniqueNs("qtransitionfail");
+  const suffix = Math.random().toString(36).slice(2, 10);
+  const retryQueue = `retry-${suffix}`;
+  const terminalQueue = `terminal-${suffix}`;
+  const dlqQueue = `failures-${suffix}`;
+  const retryStream = queueStreamKey(ns, retryQueue);
+  const terminalStream = queueStreamKey(ns, terminalQueue);
+  const delayedKey = queueDelayedKey(ns, retryQueue);
+  const dlqKey = queueDlqKey(ns, dlqQueue);
+
+  await deployConsumer(ns, ALWAYS_THROWS_QUEUE_CONSUMER, [
+    {
+      queue: retryQueue,
+      maxBatchSize: 1,
+      maxBatchTimeoutMs: 2000,
+      maxRetries: 3,
+      retryDelaySeconds: 2,
+    },
+    {
+      queue: terminalQueue,
+      maxBatchSize: 1,
+      maxBatchTimeoutMs: 2000,
+      maxRetries: 0,
+      deadLetterQueue: dlqQueue,
+    },
+  ]);
+  const producerVersion = await deployAndPromote(ns, "producer", {
+    code: `
+      export default {
+        async fetch(_req, env) {
+          await Promise.all([
+            env.RETRY.send("retry"),
+            env.TERMINAL.send("terminal"),
+          ]);
+          return new Response("ok");
+        },
+      };`,
+    bindings: {
+      RETRY: { type: "queue", id: retryQueue },
+      TERMINAL: { type: "queue", id: terminalQueue },
+    },
+  });
+
+  redisSet(delayedKey, "wrong-type", { db: 1 });
+  redisSet(dlqKey, "wrong-type", { db: 1 });
+  const sendRes = sendQueueMessage(ns, "producer", producerVersion, null);
+  assertStatus(sendRes, 200, "target-failure producer send");
+
+  /** @type {any[]} */
+  let transitionFailures = [];
+  await waitUntil("both failed queue transitions logged", () => {
+    transitionFailures = queueTransitionFailureLogs();
+    return transitionFailures.some((entry) => entry.queue === retryQueue && entry.action === "delay")
+      && transitionFailures.some((entry) => entry.queue === terminalQueue && entry.action === "dlq");
+  }, { timeoutMs: 20_000, intervalMs: 250 });
+  const retryFailure = transitionFailures.find(
+    (entry) => entry.queue === retryQueue && entry.action === "delay"
+  );
+  const terminalFailure = transitionFailures.find(
+    (entry) => entry.queue === terminalQueue && entry.action === "dlq"
+  );
+  assert.match(retryFailure.error_message, /WRONGTYPE/i);
+  assert.match(terminalFailure.error_message, /WRONGTYPE/i);
+
+  assert.equal(redisXLen(retryStream, { db: 1 }), 1);
+  assert.equal(redisXPendingCount(retryStream, "wdl-scheduler", { db: 1 }), 1);
+  assert.equal(redisXLen(terminalStream, { db: 1 }), 1);
+  assert.equal(redisXPendingCount(terminalStream, "wdl-scheduler", { db: 1 }), 1);
+  await waitUntil("wrong-type delayed target removed from discovery", async () => {
+    return !redisSMembers(QUEUE_DELAYED_INDEX_KEY, { db: 1 }).includes(delayedKey);
+  }, { timeoutMs: 10_000, intervalMs: 500 });
+
+  redisDel(delayedKey, { db: 1 });
+  redisDel(dlqKey, { db: 1 });
+});
+
+test("one failed transition does not block a healthy sibling in the same batch", async () => {
+  const ns = uniqueNs("qtransitionmixed");
+  const queueName = `mixed-${Math.random().toString(36).slice(2, 10)}`;
+  const streamKey = queueStreamKey(ns, queueName);
+  const delayedKey = queueDelayedKey(ns, queueName);
+  const consumerVersion = await deployConsumer(ns, `
+    const batches = [];
+    const completed = [];
+    export default {
+      fetch() {
+        return Response.json({ batches, completed });
+      },
+      async queue(batch) {
+        batches.push(batch.messages.map((msg) => ({
+          kind: msg.body.kind,
+          attempts: msg.attempts,
+        })));
+        for (const msg of batch.messages) {
+          if (msg.body.kind === "blocked") {
+            msg.retry({ delaySeconds: 2 });
+          } else if (msg.attempts === 1) {
+            msg.retry({ delaySeconds: 0 });
+          } else {
+            completed.push({ kind: msg.body.kind, attempts: msg.attempts });
+            msg.ack();
+          }
+        }
+      },
+    };
+  `, [{
+    queue: queueName,
+    maxBatchSize: 2,
+    maxBatchTimeoutMs: 2000,
+    maxRetries: 3,
+  }]);
+  const producerVersion = await deployQueueProducer(ns, queueName);
+
+  await withServiceStopped("scheduler", async () => {
+    redisSet(delayedKey, "wrong-type", { db: 1 });
+    const sendRes = sendQueueMessage(ns, "producer", producerVersion, [
+      { kind: "blocked" },
+      { kind: "healthy" },
+    ]);
+    assertStatus(sendRes, 200, "mixed transition producer send");
+    assert.equal(redisXLen(streamKey, { db: 1 }), 2);
+  });
+
+  await waitUntil("mixed batch failure and healthy retry both complete", () => {
+    const failures = queueTransitionFailureLogs();
+    const consumerState = responseJson(runtimeInternalPost("/", {
+      "x-worker-id": gatewayWorkerId(ns, "consumer", consumerVersion),
+    }, ""));
+    return failures.some((entry) => (
+      entry.queue === queueName && entry.action === "delay"
+    )) && consumerState.completed.some((/** @type {any} */ entry) => (
+      entry.kind === "healthy" && entry.attempts === 2
+    ));
+  }, { timeoutMs: 20_000, intervalMs: 250 });
+
+  const consumerState = responseJson(runtimeInternalPost("/", {
+    "x-worker-id": gatewayWorkerId(ns, "consumer", consumerVersion),
+  }, ""));
+  assert.deepEqual(
+    consumerState.batches[0].map((/** @type {any} */ entry) => entry.kind).sort(),
+    ["blocked", "healthy"],
+  );
+  assert.deepEqual(consumerState.completed, [{ kind: "healthy", attempts: 2 }]);
+  await waitUntil("only the failed source message remains", () => (
+    redisXLen(streamKey, { db: 1 }) === 1
+      && redisXPendingCount(streamKey, "wdl-scheduler", { db: 1 }) === 1
+  ), { timeoutMs: 10_000, intervalMs: 250 });
+
+  redisDel(delayedKey, { db: 1 });
 });
 
 test("maxRetries=N means handler sees the message N+1 times before DLQ", async () => {
