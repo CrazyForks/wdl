@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Added Wrangler `workers_dev = false` support for workers with custom route patterns, allowing pattern routes to remain active while that Worker's platform-domain path returns 404; promote responses now report the active platform and pattern-route URL hints.
+## wdl.20260724.1 - 2026-07-25
+
+- Added Wrangler `workers_dev = false` support for workers with custom route patterns, allowing pattern routes to remain active while that Worker's platform-domain path returns 404; promote responses now report the active platform and pattern-route URL hints. Unlike Cloudflare, where the flag gates a `workers.dev` preview subdomain, the WDL platform-domain path is an ordinary serving route, so the opt-out requires at least one route pattern.
 - Updated the bundled workerd and Workers types pins to `1.20260724.1` and `5.20260724.1`.
 
 ## wdl.20260723.1 - 2026-07-23
