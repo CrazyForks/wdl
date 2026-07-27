@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## wdl.20260727.1 - 2026-07-27
+
 - Hardened custom route and host declarations by normalizing them to canonical ASCII DNS hostnames and rejecting URL-authority delimiters or non-canonical IPv4 shorthand before routing metadata is written.
 - Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.6.0` and added end-to-end coverage for Wrangler `workers_dev` opt-out and route-only URL output.
 - Updated the bundled workerd and Workers types pins to `1.20260727.1` and `5.20260727.1`.
