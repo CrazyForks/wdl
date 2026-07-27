@@ -145,6 +145,7 @@ Tail 是 live debug 路径，不是 audit storage。Tail protocol 细节见 [Log
 - `tests/integration/auth-platform.test.js`
 - `tests/integration/cli-multi-env.test.js`
 - `tests/integration/cli-smoke.test.js`
+- `tests/integration/cli-workers-dev-optout.test.js`
 - `tests/integration/log-tail.test.js`
 - `tests/integration/pages-assets-demo.test.js`
 - `tests/integration/r2-cli-binding.test.js`

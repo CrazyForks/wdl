@@ -16,12 +16,40 @@ import {
   JS_IDENTIFIER_RE,
   WDL_RESERVED_BINDING_RE,
   KV_ID_RE,
+  isValidAsciiDnsHostname,
   isValidWorkerName,
   isValidWorkflowName,
   isValidQueueName,
   isValidKvId,
   isValidJsIdentifier,
 } from "../../shared/ns-pattern.js";
+
+test("isValidAsciiDnsHostname owns shared DNS label and length validation", () => {
+  const maxHost = [63, 63, 63, 61].map((length) => "a".repeat(length)).join(".");
+  const overlongHost = [63, 63, 63, 62].map((length) => "a".repeat(length)).join(".");
+  for (const valid of [
+    "API-1.Example",
+    "127.0.0.1",
+    `${"a".repeat(63)}.example`,
+    maxHost,
+  ]) {
+    assert.equal(isValidAsciiDnsHostname(valid), true, valid);
+  }
+  for (const invalid of [
+    "",
+    ".workers.example",
+    "workers.example.",
+    "workers..example",
+    "under_score.example",
+    "-leading.example",
+    "trailing-.example",
+    "bücher.example",
+    `${"a".repeat(64)}.example`,
+    overlongHost,
+  ]) {
+    assert.equal(isValidAsciiDnsHostname(invalid), false, invalid);
+  }
+});
 
 test("NS_PATTERN anchored matches full namespace", () => {
   const re = new RegExp(`^${NS_PATTERN}$`);

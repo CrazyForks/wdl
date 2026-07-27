@@ -1301,6 +1301,11 @@ test("normalizeHost: lowercases and strips :port", () => {
   assert.equal(normalizeHost("Workers.Example"), "workers.example");
   assert.equal(normalizeHost("Workers.example:8080"), "workers.example");
   assert.equal(normalizeHost("  api.workers.example  "), "api.workers.example");
+  assert.equal(
+    normalizeHost("API-1.XN--BCHER-KVA.Example"),
+    "api-1.xn--bcher-kva.example"
+  );
+  assert.equal(normalizeHost("127.0.0.1"), "127.0.0.1");
 });
 
 test("normalizeHost: rejects empty / non-string / invalid shapes", () => {
@@ -1311,6 +1316,21 @@ test("normalizeHost: rejects empty / non-string / invalid shapes", () => {
   assert.throws(() => normalizeHost("has/slash"), /invalid host/);
   assert.throws(() => normalizeHost("has space"), /invalid host/);
   assert.throws(() => normalizeHost("has\ttab"), /invalid host/);
+});
+
+test("normalizeHost: rejects non-canonical DNS and URL authority shapes", () => {
+  for (const raw of [
+    "user@workers.example",
+    "workers.example\\evil",
+    "under_score.example",
+    "bücher.example",
+    "127.1",
+    "2130706433",
+    "0x7f.0.0.1",
+    "①②⑦.⓪.⓪.①",
+  ]) {
+    assert.throws(() => normalizeHost(raw), /invalid host/);
+  }
 });
 
 test("normalizeHost: idempotent", () => {
@@ -1379,6 +1399,10 @@ test("parsePattern: host is normalized", () => {
   assert.deepEqual(parsePattern("Workers.Example:443/api/*", "workers.local"), {
     host: "workers.example", slot: "/api/*", kind: "prefix", value: "/api/",
   });
+});
+
+test("parsePattern: rejects non-canonical host spellings", () => {
+  assert.throws(() => parsePattern("127.1/*", "workers.local"), /invalid host/);
 });
 
 test("parsePattern: bare host rejected", () => {
@@ -1510,6 +1534,13 @@ test("parseHostList: normalizes and dedupes", () => {
   assert.deepEqual(
     parseHostList(["Workers.example", "workers.example:8080", "api.workers.example"], "workers.local"),
     ["workers.example", "api.workers.example"]
+  );
+});
+
+test("parseHostList: rejects URL authority syntax", () => {
+  assert.throws(
+    () => parseHostList(["user@workers.example"], "workers.local"),
+    /invalid host/
   );
 });
 

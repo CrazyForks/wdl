@@ -70,7 +70,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/observability.js` | Structured logger, metrics registry, request-id helpers, and log-level handling for JS tiers. |
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
-| `shared/ns-pattern.js` | Platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
+| `shared/ns-pattern.js` | ASCII DNS hostname grammar and platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
 | `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner-scope key, and route-invalidation channel helpers. |
 | `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date, unsupported-flag, and error-serialization policy. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |

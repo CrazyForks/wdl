@@ -40,10 +40,11 @@ export function isWebSocketUpgrade(request) {
   return (request.headers.get("Upgrade") || "").toLowerCase() === "websocket";
 }
 
-// Must stay aligned with control/topology.js#normalizeHost output; gateway
-// only validates pub/sub payloads here, while control remains the writer.
+// Internal pub/sub payload guard, not route-host validation. Control remains
+// the canonical writer; accepting a broader stable key here can only widen
+// cache invalidation, not create a route.
 /** @param {unknown} host */
-export function isCanonicalPatternHost(host) {
+export function isPatternInvalidationKey(host) {
   return typeof host === "string" &&
     host.length > 0 &&
     host === host.toLowerCase() &&

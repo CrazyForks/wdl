@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+- Hardened custom route and host declarations by normalizing them to canonical ASCII DNS hostnames and rejecting URL-authority delimiters or non-canonical IPv4 shorthand before routing metadata is written.
+- Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.6.0` and added end-to-end coverage for Wrangler `workers_dev` opt-out and route-only URL output.
+- Updated the bundled workerd and Workers types pins to `1.20260727.1` and `5.20260727.1`.
+
 ## wdl.20260724.1 - 2026-07-25
 
-- Added Wrangler `workers_dev = false` support for workers with custom route patterns, allowing pattern routes to remain active while that Worker's platform-domain path returns 404; promote responses now report the active platform and pattern-route URL hints. Unlike Cloudflare, where the flag gates a `workers.dev` preview subdomain, the WDL platform-domain path is an ordinary serving route, so the opt-out requires at least one route pattern.
+- Added Control API `workersDev=false` support for workers with custom route patterns, allowing pattern routes to remain active while that Worker's platform-domain path returns 404; promote responses now report the active platform and pattern-route URL hints. Cloudflare uses the corresponding Wrangler `workers_dev` field for the Worker's `*.workers.dev` route, while versioned preview URLs are controlled separately by `preview_urls`, which defaults to `workers_dev`. WDL maps the setting to an ordinary platform-domain serving route, so the opt-out requires at least one route pattern.
 - Updated the bundled workerd and Workers types pins to `1.20260724.1` and `5.20260724.1`.
 
 ## wdl.20260723.1 - 2026-07-23

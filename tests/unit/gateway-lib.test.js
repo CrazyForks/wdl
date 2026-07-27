@@ -4,7 +4,7 @@ import {
   deleteGatewayInternalHeaders,
   escapeRegex,
   classifyHost,
-  isCanonicalPatternHost,
+  isPatternInvalidationKey,
   normalizeRequestHost,
   sortPatterns,
   matchPatternWithStats,
@@ -90,16 +90,16 @@ test("classifyHost: trailing-dot pattern host normalized so cache hits a single 
   assert.equal(r.host, "workers.example");
 });
 
-test("isCanonicalPatternHost accepts only control-canonical host keys", () => {
-  assert.equal(isCanonicalPatternHost("workers.example"), true);
-  assert.equal(isCanonicalPatternHost("api.workers.example"), true);
-  assert.equal(isCanonicalPatternHost("workers.example."), false);
-  assert.equal(isCanonicalPatternHost("Workers.example"), false);
-  assert.equal(isCanonicalPatternHost("workers.example:443"), false);
-  assert.equal(isCanonicalPatternHost("workers.example/path"), false);
-  assert.equal(isCanonicalPatternHost("example .com"), false);
-  assert.equal(isCanonicalPatternHost("example\t.com"), false);
-  assert.equal(isCanonicalPatternHost(""), false);
+test("isPatternInvalidationKey accepts stable lowercase cache keys", () => {
+  assert.equal(isPatternInvalidationKey("workers.example"), true);
+  assert.equal(isPatternInvalidationKey("api.workers.example"), true);
+  assert.equal(isPatternInvalidationKey("workers.example."), false);
+  assert.equal(isPatternInvalidationKey("Workers.example"), false);
+  assert.equal(isPatternInvalidationKey("workers.example:443"), false);
+  assert.equal(isPatternInvalidationKey("workers.example/path"), false);
+  assert.equal(isPatternInvalidationKey("example .com"), false);
+  assert.equal(isPatternInvalidationKey("example\t.com"), false);
+  assert.equal(isPatternInvalidationKey(""), false);
 });
 
 // ---- matchPatternEntry ----

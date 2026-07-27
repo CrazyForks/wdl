@@ -61,6 +61,15 @@ test("POST /ns/<ns>/hosts: rejects platform-domain entries", async () => {
   assert.match(res.json.message, /platform domain/);
 });
 
+test("POST /ns/<ns>/hosts: rejects invalid URL authority spellings", async () => {
+  const ns = uniqueNs("hosts-authority");
+  for (const host of ["user@workers.example", "127.1"]) {
+    const res = await adminPost(`/ns/${ns}/hosts`, { hosts: [host] });
+    assert.equal(res.status, 400);
+    assert.match(res.json.message, /invalid host/);
+  }
+});
+
 test("POST /ns/<ns>/hosts: remove blocked by live pattern", async () => {
   const ns = uniqueNs("hosts-blockrm");
   const host = "blockrm.workers.example";

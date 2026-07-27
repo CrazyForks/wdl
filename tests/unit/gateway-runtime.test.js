@@ -27,7 +27,7 @@ export function decodePatternProjection(raw) {
 }
 `);
 const gatewayLibUrl = moduleDataUrl(`
-export function isCanonicalPatternHost() { return true; }
+export function isPatternInvalidationKey() { return true; }
 export function sortPatterns(entries) { return { sorted: entries, errors: [] }; }
 `);
 

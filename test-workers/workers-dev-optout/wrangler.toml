@@ -1,0 +1,9 @@
+name = "workers-dev-optout"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+workers_dev = false
+
+routes = [
+  "optout.workers.example/*",
+]

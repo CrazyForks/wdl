@@ -21,7 +21,7 @@ import {
   platformDomainDisabledKey,
   routesKey,
 } from "shared-worker-contract";
-import { isCanonicalPatternHost, sortPatterns } from "gateway-lib";
+import { isPatternInvalidationKey, sortPatterns } from "gateway-lib";
 
 /**
  * @typedef {import("shared-route-projection").PatternProjection & { slot: string }} PatternEntry
@@ -271,7 +271,7 @@ export function ensureGatewaySubscriber(redisAddr) {
         if (channel === PATTERNS_CHANNEL) {
           if (value === "*") {
             clearPatternState();
-          } else if (isCanonicalPatternHost(value)) {
+          } else if (isPatternInvalidationKey(value)) {
             patternStateEpoch += 1;
             patternCache.delete(value);
             knownPatternHosts = null;

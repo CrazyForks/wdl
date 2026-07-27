@@ -3,7 +3,11 @@
 // Redis-facing writes that consume these live in control/routing.js.
 
 import { parseCron } from "shared-cron-time";
-import { isValidQueueName, QUEUE_NAME_RE } from "shared-ns-pattern";
+import {
+  isValidAsciiDnsHostname,
+  isValidQueueName,
+  QUEUE_NAME_RE,
+} from "shared-ns-pattern";
 import { errorMessage } from "shared-errors";
 import { MAX_QUEUE_DELAY_SECONDS } from "control-lib";
 
@@ -14,8 +18,9 @@ import { MAX_QUEUE_DELAY_SECONDS } from "control-lib";
  * @typedef {{ queue: string, maxBatchSize: number, maxBatchTimeoutMs: number, maxRetries: number, retryDelaySeconds?: number, deadLetterQueue?: string }} QueueConsumer
  */
 
-// Lowercase + strip :port + strip trailing FQDN dots — otherwise the
-// platform-domain check is bypassable via "demo.workers.local.".
+// Lowercase + strip :port + strip trailing FQDN dots, then require canonical
+// ASCII DNS labels. Hosts are interpolated into URL authorities and routing
+// keys, so accepting delimiters such as "@" or "\\" would change URL parsing.
 /** @param {unknown} raw */
 export function normalizeHost(raw) {
   if (typeof raw !== "string") throw new Error("host must be a string");
@@ -29,7 +34,16 @@ export function normalizeHost(raw) {
   host = host.replace(/\.+$/, "");
   host = host.toLowerCase();
   if (!host) throw new Error("host must not be empty after normalization");
-  if (host.includes(":") || host.includes("/") || /\s/.test(host)) {
+  if (!isValidAsciiDnsHostname(host)) {
+    throw new Error(`invalid host ${JSON.stringify(raw)}`);
+  }
+  let canonicalHost;
+  try {
+    canonicalHost = new URL(`https://${host}/`).host;
+  } catch {
+    throw new Error(`invalid host ${JSON.stringify(raw)}`);
+  }
+  if (canonicalHost !== host) {
     throw new Error(`invalid host ${JSON.stringify(raw)}`);
   }
   return host;

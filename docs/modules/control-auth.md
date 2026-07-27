@@ -52,7 +52,7 @@ Worker lifecycle:
 |---|---|---|
 | `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, secret-only, and workflow-definitions-only workers. Each result reports `hasSecrets` and `hasWorkflowDefs`. |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | Lists retained versions and active status. |
-| `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, `workersDev`, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata, and the 201 response echoes the resolved `workersDev`. Python modules and upstream experimental compatibility flags are rejected before commit. |
+| `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, `workersDev`, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata, and the 201 response echoes the resolved `workersDev`. Route hosts are normalized to canonical ASCII DNS hostnames and reject URL-authority delimiters or non-canonical IPv4 spellings before commit. Python modules and upstream experimental compatibility flags are rejected before commit. |
 | `POST` | `/ns/<ns>/worker/<name>/promote` | Promotes `{"version":"vN"}` through the WATCH/MULTI routing path. The success response preserves `platformDomain` and `workersDev`, and reports canonical URL hints as `urls.platform` when enabled plus one hint per active pattern in `urls.routes[]`, each built from the operator's original pattern so prefix routes keep their trailing `*`. Host declaration failures are 403; live pattern conflicts are 409; exhausted transaction contention is 503. |
 | `DELETE` | `/ns/<ns>/worker/<name>/versions/<version>` | Deletes one retained non-active version after active-route, service-ref, lifecycle, and delete-lock blockers pass. Referrer redaction is principal-aware. |
 | `POST` | `/ns/<ns>/worker/<name>/delete` | Whole-worker delete. `?dry_run=1` returns computed impact and blockers without writing. Redaction matches single-version delete. |
@@ -61,7 +61,7 @@ Host, secret, data, and auth operations:
 
 | Method | Path | Contract |
 |---|---|---|
-| `GET` / `POST` | `/ns/<ns>/hosts` | Lists or reconciles declared hosts. Reconcile normalizes hosts, rejects platform-domain hosts, and returns 409 when removing a host with live owned patterns. |
+| `GET` / `POST` | `/ns/<ns>/hosts` | Lists or reconciles declared hosts. Reconcile normalizes inputs to canonical ASCII DNS hostnames, rejects platform-domain hosts, and returns 409 when removing a host with live owned patterns. |
 | `POST` | `/reload` | Ops-only route resync: rebuilds the declared-host gate from `hosts:<ns>` under the host-declaration revision fence, then publishes `routes:flush ""` and `patterns:invalidate "*"`. The repair incrementally bounds key scans and preflights set cardinalities, rejecting more than 10,000 combined source keys, declaration members, and stale reverse-index keys before member materialization or mutation. |
 | `GET` | `/ns/<ns>/worker/<name>/secrets` | Lists worker-level secret keys only; there is no API that reads secret values back. |
 | `PUT` / `DELETE` | `/ns/<ns>/worker/<name>/secrets/<KEY>` | Mutates one worker-level secret. PUT stores a `WDL-ENC:` envelope; active workers are bumped and promoted to force fresh cold-loads. |

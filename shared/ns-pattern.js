@@ -1,21 +1,22 @@
-// Single source of truth for the tenant namespace grammar.
+// Single source of truth for shared DNS hostname and tenant namespace grammar.
 //
-// Both admin (validates deploy requests) and gateway (matches the subdomain)
-// import this. Keeping it in one place means a change to the allowed
-// character set can never drift between the tier that accepts deploys and
-// the tier that routes traffic.
+// Control validates deploy and host inputs while gateway matches subdomains.
+// Keeping their shared grammar here prevents acceptance and routing drift.
 export const NS_PATTERN = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
 export const DEFAULT_PLATFORM_DOMAIN = "workers.local";
 export const MAX_PLATFORM_DOMAIN_BYTES = 126;
+const MAX_DNS_HOSTNAME_BYTES = 253;
 const DNS_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const DNS_FINAL_LABEL_RE = /^[A-Za-z]+$/;
 
-/** @param {string} value */
-function isAscii(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    if (value.charCodeAt(index) > 0x7f) return false;
-  }
-  return true;
+/** @param {unknown} value */
+export function isValidAsciiDnsHostname(value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_DNS_HOSTNAME_BYTES
+  ) return false;
+  return value.split(".").every((label) => DNS_LABEL_RE.test(label));
 }
 
 /** @param {unknown} value */
@@ -23,12 +24,11 @@ export function configuredHostname(value) {
   if (typeof value !== "string" || !value.trim()) return null;
   const trimmed = value.trim();
   const rawHost = trimmed.endsWith(".") ? trimmed.slice(0, -1) : trimmed;
-  if (!isAscii(rawHost)) return null;
-  if (rawHost.length === 0 || rawHost.length > MAX_PLATFORM_DOMAIN_BYTES) return null;
-  const labels = rawHost.split(".");
+  const finalLabel = rawHost.slice(rawHost.lastIndexOf(".") + 1);
   if (
-    labels.some((label) => !DNS_LABEL_RE.test(label)) ||
-    !DNS_FINAL_LABEL_RE.test(labels.at(-1) || "")
+    rawHost.length > MAX_PLATFORM_DOMAIN_BYTES ||
+    !isValidAsciiDnsHostname(rawHost) ||
+    !DNS_FINAL_LABEL_RE.test(finalLabel)
   ) return null;
   return rawHost.toLowerCase();
 }

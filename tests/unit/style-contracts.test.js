@@ -368,9 +368,13 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
   assert.deepEqual(offenders, [], `worker contract key literals must use shared helpers:\n${offenders.join("\n")}`);
 });
 
-test("platform domain configuration uses the shared normalized owner", () => {
+test("DNS hostname and platform domain validation use the shared owner", () => {
   const owner = withoutLineComments(readRepoFile("shared/ns-pattern.js"));
   assert.match(owner, /DEFAULT_PLATFORM_DOMAIN = "workers\.local"/);
+  assert.match(owner, /\bisValidAsciiDnsHostname\b/);
+  const topology = withoutLineComments(readRepoFile("control/topology.js"));
+  assert.match(topology, /\bisValidAsciiDnsHostname\b/);
+  assert.doesNotMatch(topology, /\bDNS_HOST_LABEL_RE\b/);
   for (const file of [
     "control/handlers/deploy.js",
     "control/handlers/promote.js",
@@ -380,6 +384,30 @@ test("platform domain configuration uses the shared normalized owner", () => {
     const source = withoutLineComments(readRepoFile(file));
     assert.match(source, /\bplatformDomainFromEnv\b/, file);
     assert.doesNotMatch(source, /"workers\.local"/, file);
+  }
+});
+
+test("published CLI pin stays aligned across CI and operator docs", () => {
+  const [document] = yamlDocuments(".github/workflows/ci.yml");
+  const workflow = /** @type {{ env?: { WDL_CLI_PACKAGE?: unknown } }} */ (
+    document.toJS()
+  );
+  const packageSpec = workflow.env?.WDL_CLI_PACKAGE;
+  if (typeof packageSpec !== "string") {
+    assert.fail("ci.yml must define WDL_CLI_PACKAGE");
+  }
+  assert.match(packageSpec, /^@wdl-dev\/cli@\d+\.\d+\.\d+$/);
+  for (const file of [
+    "README.md",
+    "README.zh.md",
+    "docs/testing.md",
+    "docs/testing.zh.md",
+  ]) {
+    assert.match(
+      readRepoFile(file),
+      new RegExp(`npm install -g ${RegExp.escape(packageSpec)}`),
+      file
+    );
   }
 });
 
