@@ -57,9 +57,9 @@ Worker 看到的 request path 会去掉 `/<worker-name>` 前缀。
 
 兼容性差异分为三类：更强、不同、未实现。WDL 也增加 platform bindings 等 platform-owned capability。逐 surface 状态见 [compatibility matrix](docs/compatibility.zh.md)。
 
-## 托管平台预览
+## 托管预览
 
-WDL 首先是基础设施项目：operator 运行自己的 platform，tenant 用 `wdl` CLI 部署。WDL Team 可能会运行一个实验性托管预览环境，control plane 在 `api.wdl.dev`，worker 入口是 `*.wdl.sh`，仅用于展示 WDL 能力，并运行 WDL 自己的 workload。它不是产品化公开平台，目前尚未上线；如果想参与测试，可以发邮件到 <hi@wdl.dev>。
+WDL 首先是基础设施项目：operator 运行自己的 platform，tenant 用 `wdl` CLI 部署。WDL Team 运行着一个托管预览，control plane 在 `api.wdl.dev`，worker 入口是 `*.wdl.sh`，跑的是 WDL 自己的 workload。它会一直作为 demo 存在，不是一项商业服务：会随平台迭代随时滚动更新，可能不稳定，也不提供任何承诺——但它展示的就是 WDL 的真实能力。WDL Team 无意把它变成对外提供承诺服务的公共 FaaS——这条赛道已经足够拥挤，我们专注在 self-hosted 基础设施上。预览目前可用；想在上面测试，可以发邮件到 <hi@wdl.dev>。
 
 ## 架构摘要
 

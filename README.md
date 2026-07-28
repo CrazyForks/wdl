@@ -96,13 +96,16 @@ Compatibility differences fall into three categories: stronger, different, and n
 implemented. WDL also adds platform-owned capabilities such as platform bindings.
 The surface-by-surface status lives in the [compatibility matrix](docs/compatibility.md).
 
-## Hosted Platform Preview
+## Hosted Preview
 
 WDL is infrastructure first: operators run their own platform and tenants deploy to it
-with the `wdl` CLI. The WDL Team may run an experimental hosted preview, with control
-at `api.wdl.dev` and workers serving from `*.wdl.sh`, purely to showcase what WDL can
-do with WDL-owned workloads. It is not a productized public platform and is not live
-yet; to help test it, email <hi@wdl.dev>.
+with the `wdl` CLI. The WDL Team runs a hosted preview, with control at `api.wdl.dev`
+and workers serving from `*.wdl.sh`, running WDL's own workloads. It is a permanent
+demo, not a commercial service: it is redeployed at any time as the platform iterates,
+may be unstable, and comes with no commitments — but what it shows is exactly what WDL
+can do. The WDL Team has no intention of turning it into a public FaaS with service
+commitments — that space is crowded enough already; the focus is self-hosted
+infrastructure. It is available today; to test on it, email <hi@wdl.dev>.
 
 ## Architecture Summary
 
