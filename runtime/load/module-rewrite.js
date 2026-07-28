@@ -35,6 +35,16 @@ export const HOST_BINDING_RESERVED_MODULES = new Set(HOST_BINDING_RESERVED_MODUL
  * @typedef {{ start: number, end: number, value: string }} Replacement
  */
 
+const EXPRESSION_PREFIX_CHARS = "([{=,:;!&|?+-*~^<>";
+const EXPRESSION_CONTEXT_KEYWORDS = new Set([
+  "return", "throw", "case", "yield", "await", "else",
+  "typeof", "void", "delete", "in", "instanceof",
+]);
+const STATEMENT_HEAD_KEYWORDS = new Set(["if", "while", "for", "with", "catch", "switch"]);
+const EXPRESSION_HEAD_KEYWORDS = new Set(["if", "while", "for", "with"]);
+const DECLARATION_MODIFIER_KEYWORDS = new Set(["async", "default", "export"]);
+const BLOCK_LEAD_KEYWORDS = new Set(["try", "finally", "else"]);
+
 /** @param {{ modules: Record<string, unknown> }} workerCode */
 export function rewriteCloudflareWorkflowsImports(workerCode) {
   for (const [name, source] of Object.entries(workerCode.modules)) {
@@ -238,13 +248,13 @@ function previousIdentifierBefore(source, index, lowerBound = 0) {
 function looksLikeRegexLiteralForPairScan(source, index, start = 0) {
   const prevIndex = previousSignificantIndex(source, index, start);
   const prev = prevIndex === -1 ? "" : source[prevIndex];
-  if (!prev || "([{=,:;!&|?+-*~^<>".includes(prev)) return true;
+  if (!prev || EXPRESSION_PREFIX_CHARS.includes(prev)) return true;
   if (prev === "}" && hasLineTerminatorSincePreviousSignificantChar(source, index)) return true;
   if (prev === ")") return false;
   const previousIdentifier = previousIdentifierBefore(source, index, start);
   const beforeIdentifier = previousSignificantIndex(source, previousIdentifier.start, start);
   if (beforeIdentifier >= 0 && (source[beforeIdentifier] === "." || source[beforeIdentifier] === "#")) return false;
-  return new Set(["return", "throw", "case", "yield", "await", "else", "typeof", "void", "delete", "in", "instanceof"]).has(previousIdentifier.token);
+  return EXPRESSION_CONTEXT_KEYWORDS.has(previousIdentifier.token);
 }
 
 /** @param {string} source @param {number} closeIndex @param {number} [start] */
@@ -287,13 +297,13 @@ function matchingOpenParenIndex(source, closeIndex, start = 0) {
 function looksLikeRegexLiteralForBraceScan(source, index) {
   const prevIndex = previousSignificantIndex(source, index);
   const prev = prevIndex === -1 ? "" : source[prevIndex];
-  if (!prev || "([{=,:;!&|?+-*~^<>".includes(prev)) return true;
+  if (!prev || EXPRESSION_PREFIX_CHARS.includes(prev)) return true;
   if (prev === "}" && hasLineTerminatorSincePreviousSignificantChar(source, index)) return true;
-  if (prev === ")") return new Set(["if", "while", "for", "with", "catch", "switch"]).has(controlKeywordBeforeClosingParen(source, prevIndex));
+  if (prev === ")") return STATEMENT_HEAD_KEYWORDS.has(controlKeywordBeforeClosingParen(source, prevIndex));
   const previousIdentifier = previousIdentifierBefore(source, index);
   const beforeIdentifier = previousSignificantIndex(source, previousIdentifier.start);
   if (beforeIdentifier >= 0 && (source[beforeIdentifier] === "." || source[beforeIdentifier] === "#")) return false;
-  return new Set(["return", "throw", "case", "yield", "await", "else", "typeof", "void", "delete", "in", "instanceof"]).has(previousIdentifier.token);
+  return EXPRESSION_CONTEXT_KEYWORDS.has(previousIdentifier.token);
 }
 
 /** @param {string} source @param {number} closeIndex @param {number} [start] */
@@ -350,7 +360,7 @@ function declarationStartIndex(source, keywordStart, lowerBound = 0) {
   let cursor = keywordStart;
   for (;;) {
     const previous = previousIdentifierBefore(source, cursor, lowerBound);
-    if (!new Set(["async", "default", "export"]).has(previous.token)) return cursor;
+    if (!DECLARATION_MODIFIER_KEYWORDS.has(previous.token)) return cursor;
     cursor = previous.start;
   }
 }
@@ -400,11 +410,11 @@ function looksLikeStatementBlockClose(source, closeBraceIndex, start = 0) {
   if (beforeBrace === -1) return true;
   if ([";", "{", "}"].includes(source[beforeBrace])) return true;
   if (source[beforeBrace] === ")") {
-    if (new Set(["if", "while", "for", "with", "catch", "switch"]).has(controlKeywordBeforeClosingParen(source, beforeBrace, start))) return true;
+    if (STATEMENT_HEAD_KEYWORDS.has(controlKeywordBeforeClosingParen(source, beforeBrace, start))) return true;
     return looksLikeFunctionBlockOpen(source, openBrace, start) || looksLikeClassBlockOpen(source, openBrace, start);
   }
   const beforeBlock = previousIdentifierBefore(source, openBrace, start);
-  if (new Set(["try", "finally", "else"]).has(beforeBlock.token)) return true;
+  if (BLOCK_LEAD_KEYWORDS.has(beforeBlock.token)) return true;
   if (source[beforeBrace] === ":") return true;
   if (looksLikeClassBlockOpen(source, openBrace, start)) return true;
   return false;
@@ -446,19 +456,19 @@ function skipRegexLiteral(source, index, end = source.length) {
 function looksLikeRegexLiteral(source, index, start = 0) {
   const prevIndex = previousSignificantIndex(source, index, start);
   const prev = prevIndex === -1 ? "" : source[prevIndex];
-  if (!prev || "([{=,:;!&|?+-*~^<>".includes(prev)) return true;
+  if (!prev || EXPRESSION_PREFIX_CHARS.includes(prev)) return true;
   if (prev === "}" && hasLineTerminatorSincePreviousSignificantChar(source, index)) {
     return looksLikeStatementBlockClose(source, prevIndex, start);
   }
   if (prev === ")") {
-    return new Set(["if", "while", "for", "with"]).has(controlKeywordBeforeClosingParen(source, prevIndex, start));
+    return EXPRESSION_HEAD_KEYWORDS.has(controlKeywordBeforeClosingParen(source, prevIndex, start));
   }
   const previousIdentifier = previousIdentifierBefore(source, index, start);
   const beforeIdentifier = previousSignificantIndex(source, previousIdentifier.start, start);
   if (beforeIdentifier >= 0 && (source[beforeIdentifier] === "." || source[beforeIdentifier] === "#")) {
     return false;
   }
-  return new Set(["return", "throw", "case", "yield", "await", "else", "typeof", "void", "delete", "in", "instanceof"]).has(previousIdentifier.token);
+  return EXPRESSION_CONTEXT_KEYWORDS.has(previousIdentifier.token);
 }
 
 /** @param {string} source @param {number} index @param {number} [end] */

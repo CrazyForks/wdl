@@ -133,8 +133,22 @@ pub(crate) async fn move_to_orphaned(
         state.config.queue_sweep_batch_size,
     )
     .await?;
-    let pel_count = move_pel_to_orphaned(state, stream_key, &orphaned_key, pel_entries).await?;
-    let tail_count = move_stream_tail_to_orphaned(state, stream_key, &orphaned_key, tail).await?;
+    let pel_count = move_entries_to_orphaned(
+        state,
+        MOVE_PEL_TO_ORPHANED_SCRIPT,
+        stream_key,
+        &orphaned_key,
+        pel_entries,
+    )
+    .await?;
+    let tail_count = move_entries_to_orphaned(
+        state,
+        MOVE_STREAM_TAIL_TO_ORPHANED_SCRIPT,
+        stream_key,
+        &orphaned_key,
+        tail,
+    )
+    .await?;
     log(
         state,
         LogLevel::Info,
@@ -186,13 +200,14 @@ async fn cleanup_empty_orphaned_stream(
     Ok(cleaned == 1)
 }
 
-async fn move_pel_to_orphaned(
+async fn move_entries_to_orphaned(
     state: &AppState,
+    script: &str,
     stream_key: &str,
     orphaned_key: &str,
-    pel_entries: Vec<StreamEntry>,
+    entries: Vec<StreamEntry>,
 ) -> SchedulerResult<usize> {
-    if pel_entries.is_empty() {
+    if entries.is_empty() {
         return Ok(0);
     }
     let moved: Vec<i64> = state
@@ -200,38 +215,10 @@ async fn move_pel_to_orphaned(
         .with_conn(async |mut conn| {
             let mut pipe = redis::pipe();
             let trim_arg = state.config.max_orphaned_len.to_string();
-            for entry in pel_entries {
+            for entry in entries {
                 append_eval_cmd(
                     &mut pipe,
-                    MOVE_PEL_TO_ORPHANED_SCRIPT,
-                    &[stream_key, orphaned_key],
-                    &[entry.id.as_str(), trim_arg.as_str(), CONSUMER_GROUP],
-                );
-            }
-            pipe.query_async(&mut conn).await
-        })
-        .await?;
-    Ok(moved.into_iter().filter(|count| *count == 1).count())
-}
-
-async fn move_stream_tail_to_orphaned(
-    state: &AppState,
-    stream_key: &str,
-    orphaned_key: &str,
-    tail: Vec<StreamEntry>,
-) -> SchedulerResult<usize> {
-    if tail.is_empty() {
-        return Ok(0);
-    }
-    let moved: Vec<i64> = state
-        .data_redis
-        .with_conn(async |mut conn| {
-            let mut pipe = redis::pipe();
-            let trim_arg = state.config.max_orphaned_len.to_string();
-            for entry in tail {
-                append_eval_cmd(
-                    &mut pipe,
-                    MOVE_STREAM_TAIL_TO_ORPHANED_SCRIPT,
+                    script,
                     &[stream_key, orphaned_key],
                     &[entry.id.as_str(), trim_arg.as_str(), CONSUMER_GROUP],
                 );

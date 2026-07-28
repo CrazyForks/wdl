@@ -86,7 +86,7 @@ Crate root 和目录级 `mod` glue 可以保留既有的显式本地 prelude，�
 
 ## 共享代码
 
-`wdl-rust-common`（`rust/common/`）是本批次唯一的 shared Rust helper crate。它只拥有必须跨 crate 保持一致的小 primitive，例如环境变量数字解析、日志等级解析、HTTP health probe、shutdown/in-flight tracking、通用 JSON log-line emission、wall-clock millisecond helper、短 non-cryptographic random hex suffix、稳定 non-cryptographic hash、queue Redis key builders、worker version / bundle-key parsing、Prometheus metric storage/formatting、Prometheus text response、结构化错误字段合并、internal-auth token/header matching、Redis command construction helper、中立的 Redis connection execution wrapper，以及 UTF-8 安全的字符串截断。它不能变成 service 行为的杂物箱。Axum-facing helper 必须 feature-gate，因此 D1/DO supervisor binaries 这类非 HTTP consumer 不需要付 HTTP stack 成本。
+`wdl-rust-common`（`rust/common/`）是仓库唯一的 shared Rust helper crate。它只拥有必须跨 crate 保持一致的小 primitive，例如环境变量数字解析、日志等级解析、HTTP health probe、shutdown/in-flight tracking、通用 JSON log-line emission、wall-clock millisecond helper、短 non-cryptographic random hex suffix、稳定 non-cryptographic hash、queue Redis key builders、worker version / bundle-key parsing、Prometheus metric storage/formatting、Prometheus text response、结构化错误字段合并、internal-auth token/header matching、Redis command construction helper、中立的 Redis connection execution wrapper，以及 UTF-8 安全的字符串截断。它不能变成 service 行为的杂物箱。Axum-facing 与 Redis-facing helper 分别放在 `axum` 与 `redis` feature 之后，因此 D1/DO supervisor binaries 这类 consumer 不会在不需要这些 helper 时通过 shared crate 拉入 Axum 或异步 Redis client。
 
 `test-support` feature 暴露 Rust service tests 共用的唯一 process-environment override helper。它在同一 test process 的 module 之间串行化 override，并在 unwind 时恢复全部值；production dependency build 不启用该 feature。
 
@@ -106,7 +106,7 @@ Crate root 和目录级 `mod` glue 可以保留既有的显式本地 prelude，�
 - Shared helper 应保持语义中性。例如 64-bit random hex suffix helper 如果也用于 pending-create token，就不应命名成 scheduler 或 workflows 专属 instance id helper。
 - 不要把 service-specific lifecycle、retry、Redis transaction 或 protocol-response 行为放进 `wdl-rust-common`；这些逻辑应留在拥有该 state machine 的 service crate 中。
 - `wdl-rust-common` 中的 Redis helper 只能从显式 keys/args 构造命令，或针对显式 `ConnectionManager` 运行调用方传入的 closure。script body、选择哪条 connection、retry/timeout 行为、error mapping 和 state ownership 仍由 service crate 拥有。
-- `wdl-rust-common` 中的 HTTP framework helper 必须放在 crate 的 `axum` feature 后面。只使用非 HTTP primitive 的 sidecar 应关闭 default features。
+- `wdl-rust-common` 中的 HTTP framework helper 必须放在 crate 的 `axum` feature 后面，Redis connection/EVAL helper 必须放在 `redis` feature 后面。只使用基础 primitive 的 sidecar 应关闭 default features。
 
 ## Redis、错误和 Schema Contract
 

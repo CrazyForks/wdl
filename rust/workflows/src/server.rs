@@ -1,4 +1,3 @@
-use std::env;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -24,6 +23,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Semaphore;
+use wdl_rust_common::env::optional_env;
 use wdl_rust_common::health::healthcheck_http_200;
 use wdl_rust_common::internal_auth::{
     INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE, internal_auth_failure_response,
@@ -455,12 +455,8 @@ pub(crate) fn random_instance_id() -> String {
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config_from_env());
-    let redis_configured = env::var("WORKFLOWS_REDIS_URL")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-        || env::var("REDIS_URL")
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
+    let redis_configured =
+        optional_env("WORKFLOWS_REDIS_URL").is_some() || optional_env("REDIS_URL").is_some();
     let redis_client = redis::Client::open(config.redis_url.as_str())?;
     let redis_conn = redis_client.get_connection_manager().await?;
     let control_redis_client = redis::Client::open(config.control_redis_url.as_str())?;

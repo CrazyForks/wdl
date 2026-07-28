@@ -5,7 +5,7 @@ import {
   listR2Buckets,
   listR2Objects,
 } from "control-r2";
-import { errMessage, getControlR2, jsonError, jsonResponse, requireControlLog } from "control-shared";
+import { errorMessage, getControlR2, jsonError, jsonResponse, requireControlLog } from "control-shared";
 
 /**
  * @param {string} value
@@ -53,7 +53,7 @@ export async function handle({ method, url, ns, subPath, requestId }) {
   try {
     return await handleInner({ method, url, ns, subPath, requestId });
   } catch (err) {
-    const message = errMessage(err);
+    const message = errorMessage(err);
     if (err instanceof TypeError ||
         /^invalid percent-encoding /.test(message) ||
         /r2 bucket_name must match/.test(message)) {

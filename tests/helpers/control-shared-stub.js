@@ -26,7 +26,7 @@ import { createPostWorkflowsInternal } from ${JSON.stringify(CONTROL_WORKFLOWS_C
 import { ControlAbort, controlAbortLogDetails, codedErrorLogFields, codedErrorResponse, controlAbortResponse, secretEnvelopeErrorResponse } from ${JSON.stringify(CONTROL_ERRORS_URL)};
 import { runOptimistic, withOptimisticRetries } from ${JSON.stringify(CONTROL_OPTIMISTIC_URL)};
 import { readJsonBody } from ${JSON.stringify(CONTROL_JSON_BODY_URL)};
-import { errorMessage as errMessage } from ${JSON.stringify(SHARED_ERRORS_URL)};
+import { errorMessage } from ${JSON.stringify(SHARED_ERRORS_URL)};
 import { withInternalAuth } from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};
 import { randomHex } from ${JSON.stringify(SHARED_RANDOM_ID_URL)};
 import { formatError } from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};
@@ -37,7 +37,7 @@ export {
   codedErrorResponse,
   controlAbortResponse,
   secretEnvelopeErrorResponse,
-  errMessage,
+  errorMessage,
   formatError,
   jsonError,
   jsonResponse,
@@ -103,7 +103,7 @@ export async function recordCleanupIntentOrWarn({
       log("warn", logEvent, {
         ...logFields,
         task_id: cleanupTaskId,
-        error_message: errMessage(err),
+        error_message: errorMessage(err),
       });
     }
   }

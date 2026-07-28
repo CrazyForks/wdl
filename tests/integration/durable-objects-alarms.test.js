@@ -141,6 +141,23 @@ async function waitForDoAlarmDue(jobId, timeoutMs = 5000) {
   );
 }
 
+/** @param {string} description */
+function waitForDoAlarmAdmission(description) {
+  return waitForJson(
+    description,
+    async () => {
+      const startedAt = performance.now();
+      const response = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
+      const elapsedMs = performance.now() - startedAt;
+      assert.equal(response.status, 200, response.body);
+      assert.equal(elapsedMs < 3000, true, `tick waited ${elapsedMs}ms for DO alarm delivery`);
+      return responseJson(response);
+    },
+    (body) => body.doAlarmAdmitted >= 1,
+    5000
+  );
+}
+
 /**
  * @param {string} ns
  * @param {string} name
@@ -761,12 +778,7 @@ test("later ticks admit DO alarms while an earlier delivery remains active", asy
     // The fixture schedules 200ms ahead; index presence does not mean wall-clock due yet.
     await delay(300);
 
-    const startedAt = performance.now();
-    const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
-    const elapsedMs = performance.now() - startedAt;
-    assert.equal(tick.status, 200, tick.body);
-    assert.equal(responseJson(tick).doAlarmAdmitted >= 1, true);
-    assert.equal(elapsedMs < 3000, true, `tick waited ${elapsedMs}ms for DO alarm delivery`);
+    await waitForDoAlarmAdmission("slow DO alarm admission");
     await waitForJson(
       "slow DO alarm starts in the background",
       () => readAlarmStatus("slow"),
@@ -783,9 +795,7 @@ test("later ticks admit DO alarms while an earlier delivery remains active", asy
     const slowBeforeNextTick = await readAlarmStatus("slow");
     assert.equal(slowBeforeNextTick.started, 1);
     assert.equal(slowBeforeNextTick.alarms, 0);
-    const nextTick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
-    assert.equal(nextTick.status, 200, nextTick.body);
-    assert.equal(responseJson(nextTick).doAlarmAdmitted >= 1, true);
+    await waitForDoAlarmAdmission("fast DO alarm admission while slow delivery remains active");
 
     await waitForJson(
       "later tick completes fast DO alarm before the slow delivery",

@@ -1,7 +1,7 @@
 import {
   jsonError,
   readJsonBody,
-  errMessage,
+  errorMessage,
   stringEnv,
 } from "control-shared";
 import { validateSecretKey } from "control-lib";
@@ -18,7 +18,7 @@ export function invalidSecretMutationKeyResponse(key) {
     validateSecretKey(key);
     return null;
   } catch (err) {
-    return jsonError(400, "invalid_request", errMessage(err));
+    return jsonError(400, "invalid_request", errorMessage(err));
   }
 }
 

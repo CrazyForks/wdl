@@ -1,4 +1,4 @@
-import { errMessage, jsonError, prefixedId, requireControlRedis, runOptimistic } from "control-shared";
+import { errorMessage, jsonError, prefixedId, requireControlRedis, runOptimistic } from "control-shared";
 import {
   d1DatabaseKey,
   d1DatabaseNameKey,
@@ -105,7 +105,7 @@ export async function resolveDatabaseRef(ns, databaseRef) {
   try {
     validateDatabaseRef(databaseRef);
   } catch (err) {
-    return { response: jsonError(400, "invalid_request", errMessage(err)) };
+    return { response: jsonError(400, "invalid_request", errorMessage(err)) };
   }
 
   const redis = requireControlRedis();
@@ -152,12 +152,12 @@ export async function commitDatabaseMetadata(ns, databaseName, databaseId, now) 
   try {
     validateDatabaseName(databaseName);
   } catch (err) {
-    return { ok: false, error: errMessage(err) };
+    return { ok: false, error: errorMessage(err) };
   }
   try {
     validateDatabaseId(databaseId);
   } catch (err) {
-    return { ok: false, error: errMessage(err) };
+    return { ok: false, error: errorMessage(err) };
   }
   let lastReason = "contention";
   return await runOptimistic(redis, {

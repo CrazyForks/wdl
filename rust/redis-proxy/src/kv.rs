@@ -24,7 +24,7 @@ const VALUE_FIELD_PREFIX: &str = "v:";
 const META_FIELD_PREFIX: &str = "m:";
 const KV_KEY_MAX_BYTES: usize = 512;
 const KV_BATCH_KEYS_MAX: usize = 100;
-const KV_EXPIRATION_MAX: u64 = 9_007_199_254_740_991;
+const KV_EXPIRATION_MAX: u64 = wdl_rust_common::JS_MAX_SAFE_INTEGER;
 pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = 25 * 1024 * 1024;
 const KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT: &str = r#"
 if ARGV[3] == "EX" then

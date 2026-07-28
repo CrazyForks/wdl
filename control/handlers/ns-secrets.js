@@ -1,7 +1,7 @@
 import {
   jsonResponse,
   jsonError,
-  errMessage,
+  errorMessage,
   requireControlLog,
   requireControlRedis,
   stringEnv,
@@ -55,7 +55,7 @@ function namespaceSecretMutationErrorResponse(err, { log, requestId, nsName, sec
       namespace: nsName,
       key: secretKey,
       method,
-      ...codedErrorLogFields(err, err.code, { errorDetail: errMessage(err.cause) }),
+      ...codedErrorLogFields(err, err.code, { errorDetail: errorMessage(err.cause) }),
     });
     return codedErrorResponse(err, err.code);
   }

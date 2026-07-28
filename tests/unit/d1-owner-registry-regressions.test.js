@@ -733,8 +733,52 @@ test("D1 owner registry: drain releases idle databases even when one actor times
   assert.equal(result.alreadyLost, 0);
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].dbKey, "tenant-a:slow");
+  assert.match(result.errors[0].error, /D1 drain timed out waiting for tenant-a:slow to become idle/);
   assert.equal(D1_TEST_STATE.registryStore.has(ownerKeyOf("tenant-a:idle")), false);
   assert.equal(D1_TEST_STATE.registryStore.has(ownerKeyOf("tenant-a:slow")), true);
+});
+
+test("D1 owner registry: drain preserves non-abort transport errors that mention timeout", async () => {
+  const owner = {
+    namespace: "tenant-a",
+    databaseId: "db1",
+    dbKey: "tenant-a:db1",
+    slot: 7,
+    taskId: "task-a",
+    endpoint: "d1-runtime-a:8787",
+    generation: 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const ownerKey = ownerKeyOf(owner.dbKey);
+  D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify(owner));
+  D1_TEST_STATE.ownedDbs.set(owner.dbKey, owner);
+
+  const result = await drainOwnedDbs({
+    REDIS_ADDR: "redis:6379",
+    D1_DRAIN_TIMEOUT_MS: "1000",
+    D1_DATABASES: {
+      /** @param {string} dbKey */
+      idFromName(dbKey) {
+        return dbKey;
+      },
+      get() {
+        return {
+          fetch() {
+            return Promise.reject(new Error("backend timeout while connecting"));
+          },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.released, 0);
+  assert.equal(result.alreadyLost, 0);
+  assert.deepEqual(result.errors, [{
+    dbKey: owner.dbKey,
+    error: "backend timeout while connecting",
+  }]);
+  assert.equal(D1_TEST_STATE.registryStore.has(ownerKey), true);
+  assert.equal(D1_TEST_STATE.ownedDbs.has(owner.dbKey), true);
 });
 
 test("D1 owner registry: takeover retries WatchError before surfacing an ownership race", async () => {

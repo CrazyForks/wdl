@@ -1,6 +1,7 @@
 import {
   D1ProtocolError,
   normalizeQueryRequest,
+  sqliteBindParams,
 } from "d1-runtime-protocol";
 import { redisClient } from "d1-runtime-owner-registry";
 
@@ -13,11 +14,6 @@ const TEST_HOOK_CONTROLS = new Set(["hold-transaction"]);
  * @typedef {{ __control: string, __holdMs?: unknown, owner: D1TestHookOwner, statements: D1TestHookStatement[] }} D1TestHookRequest
  * @typedef {{ env: D1TestHookEnv, sql: { exec(sql: string, ...params: unknown[]): unknown }, state: { storage: { transactionSync(callback: () => unknown): unknown } } }} D1TestHookActor
  */
-
-/** @param {unknown[]} params */
-function sqlParams(params) {
-  return params.map((param) => Array.isArray(param) ? new Uint8Array(param) : param);
-}
 
 /** @param {D1TestHookEnv} env */
 function testHooksEnabled(env) {
@@ -94,7 +90,7 @@ async function holdTransactionForTest(actor, owner, statements, holdMs) {
   );
   actor.state.storage.transactionSync(() => {
     for (const statement of statements) {
-      actor.sql.exec(statement.sql, ...sqlParams(statement.params));
+      actor.sql.exec(statement.sql, ...sqliteBindParams(statement.params));
     }
     const deadline = Date.now() + ms;
     while (Date.now() < deadline) {

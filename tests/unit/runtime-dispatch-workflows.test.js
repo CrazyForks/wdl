@@ -975,14 +975,8 @@ test("handleWorkflowRunDispatch allows concurrent step.do calls", async () => {
 
 test("handleWorkflowRunDispatch rejects starting a step while another step callback is in flight", async () => {
   const scope = makeScope();
-  let releaseSlow = () => {};
-  let markCallbackStarted = () => {};
-  const slow = new Promise((resolve) => {
-    releaseSlow = () => resolve(undefined);
-  });
-  const callbackStarted = new Promise((resolve) => {
-    markCallbackStarted = () => resolve(undefined);
-  });
+  const slow = Promise.withResolvers();
+  const callbackStarted = Promise.withResolvers();
   const backend = makeWorkflowBackend(async (url) => {
     if (url.endsWith("/claim-step")) return Response.json({ state: "run" });
     if (url.endsWith("/commit-step-success")) return Response.json({ state: "complete" });
@@ -1009,15 +1003,15 @@ test("handleWorkflowRunDispatch rejects starting a step while another step callb
         OrderWorkflow: {
           async run(/** @type {any} */ _event, /** @type {any} */ step) {
             const a = step.do("a", async () => {
-              markCallbackStarted();
-              await slow;
+              callbackStarted.resolve(undefined);
+              await slow.promise;
               return "a";
             });
-            await callbackStarted;
+            await callbackStarted.promise;
             try {
               await step.do("b", async () => "b");
             } finally {
-              releaseSlow();
+              slow.resolve(undefined);
               await a.catch(() => {});
             }
           },
@@ -1144,14 +1138,11 @@ test("handleWorkflowRunDispatch allows fan-out after an awaited root step", asyn
 
 test("handleWorkflowRunDispatch rejects new step.do after awaiting part of an unfinished fan-out", async () => {
   const scope = makeScope();
-  let releaseSlowCommit = () => {};
-  const slowCommit = new Promise((resolve) => {
-    releaseSlowCommit = () => resolve(undefined);
-  });
+  const slowCommit = Promise.withResolvers();
   const backend = makeWorkflowBackend(async (url, body) => {
     if (url.endsWith("/claim-step")) return Response.json({ state: "run" });
     if (url.endsWith("/commit-step-success")) {
-      if (body.stepName === "slow") await slowCommit;
+      if (body.stepName === "slow") await slowCommit.promise;
       return Response.json({ state: "complete" });
     }
     if (url.endsWith("/commit-step-error")) return Response.json({ state: "failed" });
@@ -1181,7 +1172,7 @@ test("handleWorkflowRunDispatch rejects new step.do after awaiting part of an un
             try {
               await step.do("after-fast", async () => fast);
             } finally {
-              releaseSlowCommit();
+              slowCommit.resolve(undefined);
               await slow.catch(() => {});
             }
           },
@@ -1672,10 +1663,7 @@ test("handleWorkflowRunDispatch does not count replay hits against the started-s
 
 test("handleWorkflowRunDispatch closes in-flight step.do when the run throws", async () => {
   const scope = makeScope();
-  let releaseSlow = () => {};
-  const slow = new Promise((resolve) => {
-    releaseSlow = () => resolve(undefined);
-  });
+  const slow = Promise.withResolvers();
   const backend = makeWorkflowBackend(async (url) => {
     if (url.endsWith("/claim-step")) return Response.json({ state: "run" });
     if (url.endsWith("/commit-step-success")) return Response.json({ state: "complete" });
@@ -1702,7 +1690,7 @@ test("handleWorkflowRunDispatch closes in-flight step.do when the run throws", a
         OrderWorkflow: {
           async run(/** @type {any} */ _event, /** @type {any} */ step) {
             step.do("late", async () => {
-              await slow;
+              await slow.promise;
               return "late";
             });
             await delay(0);
@@ -1716,7 +1704,7 @@ test("handleWorkflowRunDispatch closes in-flight step.do when the run throws", a
   const body = await readJsonResponse(res, 200);
   assert.equal(body.outcome, "failed");
   assert.equal(body.error.message, "run failed");
-  releaseSlow();
+  slow.resolve(undefined);
   await delay(0);
   assert.equal(backend.calls.some((call) => call.url.endsWith("/commit-step-success")), false);
   assert.equal(backend.calls.some((call) => call.url.endsWith("/commit-step-error")), false);
@@ -1764,13 +1752,10 @@ test("handleWorkflowRunDispatch closes unawaited sleep before backend registrati
 
 test("handleWorkflowRunDispatch fails when an unawaited sleep registers before run return", async () => {
   const scope = makeScope();
-  let markSleepRegistered = () => {};
-  const sleepRegistered = new Promise((resolve) => {
-    markSleepRegistered = () => resolve(undefined);
-  });
+  const sleepRegistered = Promise.withResolvers();
   const backend = makeWorkflowBackend(async (url) => {
     if (url.endsWith("/register-sleep")) {
-      markSleepRegistered();
+      sleepRegistered.resolve(undefined);
       return Response.json({ state: "waiting" });
     }
     return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
@@ -1795,7 +1780,7 @@ test("handleWorkflowRunDispatch fails when an unawaited sleep registers before r
         OrderWorkflow: {
           async run(/** @type {any} */ _event, /** @type {any} */ step) {
             step.sleep("later", 60_000);
-            await sleepRegistered;
+            await sleepRegistered.promise;
             return "done";
           },
         },

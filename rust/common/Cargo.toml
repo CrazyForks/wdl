@@ -12,15 +12,16 @@ name = "wdl_rust_common"
 path = "src/lib.rs"
 
 [features]
-default = ["axum"]
+default = ["axum", "redis"]
 axum = ["dep:axum"]
+redis = ["dep:redis"]
 test-support = []
 
 [dependencies]
 axum = { workspace = true, features = ["http1"], optional = true }
 chrono = { workspace = true, features = ["clock"] }
 getrandom.workspace = true
-redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager"], optional = true }
 serde_json.workspace = true
 subtle.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }

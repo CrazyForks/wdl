@@ -1,7 +1,7 @@
 import {
   jsonResponse, jsonError, readJsonBody, formatError,
   requireControlLog, requireControlRedis,
-  errMessage, prefixedId, stringEnv,
+  errorMessage, prefixedId, stringEnv,
   getControlS3,
   runOptimistic,
   stageBundleCommit, buildS3CleanupTaskId, recordS3CleanupIntent,
@@ -257,14 +257,14 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
   try {
     assetsToUpload = normalizeAssets(body.assets);
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
 
   let routes;
   try {
     routes = parseRoutes(body.routes, platformDomain);
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
 
   if (body.workersDev !== undefined && typeof body.workersDev !== "boolean") {
@@ -291,14 +291,14 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
   try {
     exportsList = parseExports(body.exports, { ns });
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
 
   let platformBindingsList;
   try {
     platformBindingsList = parsePlatformBindings(body.platformBindings);
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
   if (body.allowedCallers !== undefined) {
     throw invalidDeployRequest(
@@ -310,14 +310,14 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
   try {
     crons = parseCronList(body.crons);
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
 
   let queueConsumers;
   try {
     queueConsumers = parseQueueConsumers(body.queueConsumers);
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
 
   // Scheduler and queue dispatch enter runtime through x-worker-id, which uses
@@ -334,7 +334,7 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
   try {
     validateBindings(body.bindings);
   } catch (err) {
-    throw invalidDeployRequest(errMessage(err));
+    throw invalidDeployRequest(errorMessage(err));
   }
   const declaredBindings = /** @type {BindingMap} */ (normalizeBindings(body.bindings) || {});
   const mergedBindings = { ...declaredBindings };

@@ -37,17 +37,6 @@ pub(crate) fn bundle_key(ns: &str, worker: &str, version: &str) -> AppResult<Str
 
 pub(crate) type HashEntries = Vec<(String, Vec<u8>)>;
 
-#[cfg(test)]
-pub(crate) fn hash_to_text_object(items: HashEntries) -> AppResult<HashMap<String, String>> {
-    let mut out = HashMap::with_capacity(items.len());
-    for (key, value) in items {
-        let value = String::from_utf8(value)
-            .map_err(|_| AppError::internal_error("secret value is not valid utf-8"))?;
-        out.insert(key, value);
-    }
-    Ok(out)
-}
-
 fn push_u32(out: &mut Vec<u8>, value: usize) -> AppResult<()> {
     let value = u32::try_from(value)
         .map_err(|_| AppError::internal_error("runtime load payload field exceeds u32"))?;
@@ -171,20 +160,6 @@ mod tests {
             let err = bundle_key(ns, worker, version).unwrap_err();
             assert_eq!(err.status, StatusCode::BAD_REQUEST);
         }
-    }
-
-    #[test]
-    fn hash_to_text_object_decodes_utf8_values() {
-        let out = hash_to_text_object(vec![("TOKEN".to_string(), b"secret".to_vec())]).unwrap();
-        assert_eq!(out.get("TOKEN").unwrap(), "secret");
-    }
-
-    #[test]
-    fn hash_to_text_object_rejects_invalid_utf8() {
-        let err = hash_to_text_object(vec![("TOKEN".to_string(), vec![0xff])]).unwrap_err();
-        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(err.code, "internal_error");
-        assert_eq!(err.message, "secret value is not valid utf-8");
     }
 
     #[test]

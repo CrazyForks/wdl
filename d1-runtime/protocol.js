@@ -118,6 +118,11 @@ export function slotOf(namespace, databaseId, slotCount = SLOT_COUNT) {
 
 export { normalizeD1Param };
 
+/** @param {unknown[]} params */
+export function sqliteBindParams(params) {
+  return params.map((param) => Array.isArray(param) ? new Uint8Array(param) : param);
+}
+
 /**
  * @param {unknown} statement
  * @returns {NormalizedStatement}

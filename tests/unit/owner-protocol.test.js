@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { repositoryModuleDataUrl, sharedModuleDataUrl } from "../helpers/load-shared-module.js";
+import { sharedOwnerProtocolUrl } from "../helpers/load-owner-harness.js";
 
-const SHARED_OWNER_LEASE_URL = sharedModuleDataUrl("shared/owner-lease.js");
 const {
   ownerFenceMatches,
   ownerProtocolKeys,
@@ -14,9 +13,7 @@ const {
   stageOwnerClaim,
   stageOwnerRelease,
   stageOwnerRenew,
-} = await import(repositoryModuleDataUrl("shared/owner-protocol.js", [
-  [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
-]));
+} = await import(sharedOwnerProtocolUrl());
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();

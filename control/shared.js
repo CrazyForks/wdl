@@ -95,7 +95,7 @@ const bindLogLevel = createLogLevelBinder();
 let s3Initialized = false;
 let r2Initialized = false;
 
-export { formatError, internalErrorResponse, jsonError, jsonResponse };
+export { errorMessage, formatError, internalErrorResponse, jsonError, jsonResponse };
 export {
   ControlAbort,
   controlAbortLogDetails,
@@ -121,11 +121,6 @@ export function stringEnv(env) {
     else if (value === undefined) out[key] = undefined;
   }
   return out;
-}
-
-/** @param {unknown} err */
-export function errMessage(err) {
-  return errorMessage(err);
 }
 
 export { randomHex };
@@ -316,7 +311,7 @@ export async function publishOne(channel, payload, scope, requestId) {
     return {
       ok: false,
       channel,
-      error: errMessage(err),
+      error: errorMessage(err),
       duration_ms: durationMs,
     };
   }
@@ -459,7 +454,7 @@ async function repairDeclaredHostsForReload(requestId) {
     });
     return {
       ok: false,
-      error: errMessage(err),
+      error: errorMessage(err),
       duration_ms: durationMs,
     };
   }
@@ -606,7 +601,7 @@ export async function recordCleanupIntentOrWarn({
       log("warn", logEvent, {
         ...logFields,
         task_id: cleanupTaskId,
-        error_message: errMessage(err),
+        error_message: errorMessage(err),
       });
     }
   }

@@ -97,11 +97,6 @@ function invalidateRouterReadCache(dbKey, reason) {
   if (cache) cache.invalidate(reason);
 }
 
-/** @param {unknown} value */
-export function parseHopCount(value) {
-  return parseForwardHopCount(value);
-}
-
 /** @param {D1Owner} owner */
 function ownerHeaders(owner) {
   return {
@@ -212,7 +207,7 @@ export async function handleQuery(request, env, requestId = null, options = {}) 
   // Forwarding is not an authorization signal. It only suppresses duplicate
   // edge metrics; the receiver still resolves owner and the actor still fences.
   const forwarded = request.headers.get("x-wdl-d1-forwarded") === "1";
-  const hopCount = parseHopCount(request.headers.get("x-wdl-d1-hop-count"));
+  const hopCount = parseForwardHopCount(request.headers.get("x-wdl-d1-hop-count"));
   /** @type {D1Query | null} */
   let query = null;
   let status;

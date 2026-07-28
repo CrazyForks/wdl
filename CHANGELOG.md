@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.6.1`.
+- Updated compatible Rust dependencies.
+
 ## wdl.20260727.1 - 2026-07-27
 
 - Hardened custom route and host declarations by normalizing them to canonical ASCII DNS hostnames and rejecting URL-authority delimiters or non-canonical IPv4 shorthand before routing metadata is written.

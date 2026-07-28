@@ -13,15 +13,36 @@ import { sharedInternalAuthUrl } from "./runtime-proxy-stub.js";
  *   fetches: any[],
  *   logs: any[],
  *   metrics: any[],
- * }} OwnerClientHarnessState
+ * }} OwnerHarnessState
  */
+
+/** @returns {string} */
+export function sharedOwnerLeaseUrl() {
+  return sharedModuleDataUrl("shared/owner-lease.js");
+}
+
+/** @returns {string} */
+export function sharedOwnerProtocolUrl() {
+  return repositoryModuleDataUrl("shared/owner-protocol.js", [
+    [/from "shared-owner-lease";/, `from ${JSON.stringify(sharedOwnerLeaseUrl())};`],
+  ]);
+}
+
+/** @returns {string} */
+export function sharedOwnerForwarderUrl() {
+  return repositoryModuleDataUrl("shared/owner-forwarder.js", [
+    [/from "shared-internal-auth";/, `from ${JSON.stringify(sharedInternalAuthUrl())};`],
+    [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
+    [/from "shared-owner-endpoint";/, `from ${JSON.stringify(repositoryFileUrl("shared/owner-endpoint.js"))};`],
+  ]);
+}
 
 /**
  * @param {string} globalName
  * @param {string} service
  */
 export function createOwnerClientHarness(globalName, service) {
-  /** @type {OwnerClientHarnessState} */
+  /** @type {OwnerHarnessState} */
   const state = { fetches: [], logs: [], metrics: [] };
   Object.defineProperty(globalThis, globalName, {
     value: state,
@@ -43,12 +64,8 @@ export function log(level, event, fields) {
   const internalAuthUrl = sharedInternalAuthUrl();
   const errorsUrl = repositoryFileUrl("shared/errors.js");
   const ownerEndpointUrl = repositoryFileUrl("shared/owner-endpoint.js");
-  const ownerLeaseUrl = sharedModuleDataUrl("shared/owner-lease.js");
-  const ownerForwarderUrl = repositoryModuleDataUrl("shared/owner-forwarder.js", [
-    [/from "shared-internal-auth";/, `from ${JSON.stringify(internalAuthUrl)};`],
-    [/from "shared-errors";/, `from ${JSON.stringify(errorsUrl)};`],
-    [/from "shared-owner-endpoint";/, `from ${JSON.stringify(ownerEndpointUrl)};`],
-  ]);
+  const ownerLeaseUrl = sharedOwnerLeaseUrl();
+  const ownerForwarderUrl = sharedOwnerForwarderUrl();
 
   return {
     state,

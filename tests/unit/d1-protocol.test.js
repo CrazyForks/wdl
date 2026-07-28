@@ -23,6 +23,7 @@ const {
   readD1ActorControlRequest,
   readD1ActorQueryRequest,
   readD1QueryRequest,
+  sqliteBindParams,
   slotOf,
 } = await loadD1Protocol();
 
@@ -78,6 +79,12 @@ test("D1 protocol: normalizes D1 bind parameter types", () => {
   assert.equal(normalizeD1Param(null), null);
   assert.deepEqual(normalizeD1Param(new Uint8Array([1, 2])), [1, 2]);
   assert.deepEqual(normalizeD1Param(new Uint8Array([3, 4]).buffer), [3, 4]);
+});
+
+test("D1 protocol: restores wire byte arrays for SQLite binding", () => {
+  const params = sqliteBindParams(["x", 7, null, [0, 127, 255]]);
+  assert.deepEqual(params.slice(0, 3), ["x", 7, null]);
+  assert.deepEqual(params[3], new Uint8Array([0, 127, 255]));
 });
 
 test("D1 protocol: rejects unsupported bind parameter types", () => {

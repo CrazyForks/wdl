@@ -6,7 +6,7 @@
 import {
   jsonResponse, jsonError,
   requireControlLog, requireControlRedis,
-  errMessage,
+  errorMessage,
   acquireDeleteLock, releaseDeleteLock, renewDeleteLock, deleteLockExpiredDetails,
   assertWorkflowDeleteAllowed, cleanupDoAlarmsForWorker,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
@@ -256,16 +256,10 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
     );
     await assertWorkflowDeleteAllowed({ ns, worker: name, requestId });
   } catch (err) {
-    if (err instanceof WholeDeleteError) {
-      log(err.status >= 500 ? "error" : "warn", "worker_dry_run_rejected", {
-        request_id: requestId, namespace: ns, worker: name,
-        ...codedErrorLogFields(err),
-      });
-      return controlAbortResponse(err, { dryRun: true });
-    }
-    if (err instanceof ControlAbort && err.code === "workflow_instances_active") {
+    if (!(err instanceof ControlAbort)) throw err;
+    if (err.code === "workflow_instances_active") {
       workflowBlocker = err;
-    } else if (err instanceof ControlAbort) {
+    } else {
       log(err.status >= 500 ? "error" : "warn", "worker_dry_run_rejected", {
         request_id: requestId,
         namespace: ns,
@@ -273,8 +267,6 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
         ...codedErrorLogFields(err),
       });
       return controlAbortResponse(err, { dryRun: true });
-    } else {
-      throw err;
     }
   }
   if (!collected) throw new WholeDeleteError(500, "delete_inputs_unavailable", { namespace: ns, name });
@@ -561,7 +553,7 @@ async function cleanupDoAlarmsOrWarn({ ns, worker, doStorageId, requestId, log }
       request_id: requestId,
       namespace: ns,
       worker,
-      error_message: errMessage(err),
+      error_message: errorMessage(err),
     });
   }
 }

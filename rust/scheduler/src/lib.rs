@@ -14,7 +14,6 @@ mod state;
 mod tasks;
 #[cfg(test)]
 mod test_fixtures;
-mod time;
 mod workflows;
 
 pub(crate) use config::*;
@@ -26,5 +25,5 @@ pub(crate) use runtime_client::*;
 pub use server::{healthcheck, run};
 pub(crate) use state::*;
 pub(crate) use tasks::*;
-pub(crate) use time::*;
+pub(crate) use wdl_rust_common::time::{now_ms, random_hex_64};
 pub(crate) use workflows::*;

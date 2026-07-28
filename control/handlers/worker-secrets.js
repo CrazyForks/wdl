@@ -3,7 +3,7 @@ import {
   jsonError,
   ControlAbort,
   controlAbortResponse,
-  errMessage,
+  errorMessage,
   requireControlLog,
   requireControlRedis,
   runOptimistic,
@@ -249,7 +249,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           worker: name,
           key,
           method,
-          ...codedErrorLogFields(err, err.code, { errorDetail: errMessage(err.cause) }),
+          ...codedErrorLogFields(err, err.code, { errorDetail: errorMessage(err.cause) }),
         });
         return codedErrorResponse(err, err.code);
       }

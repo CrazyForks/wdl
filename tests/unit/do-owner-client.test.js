@@ -70,14 +70,6 @@ function doErrorMatches(err, { status, code, message = undefined }) {
   );
 }
 
-test("DO owner client parseHopCount rejects NaN and negative hop headers", () => {
-  assert.equal(mod.parseHopCount("abc"), 0);
-  assert.equal(mod.parseHopCount("-1"), 0);
-  assert.equal(mod.parseHopCount("5"), 5);
-  assert.equal(mod.parseHopCount("1.9"), 1);
-  assert.equal(mod.parseHopCount(null), 0);
-});
-
 test("DO owner client forwards invoke requests with owner fence and hop headers", async () => {
   const response = await mod.forwardToOwner(invoke(), env(), owner(), "req-1", 1, "/internal/do/storage/delete");
 

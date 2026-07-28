@@ -2,7 +2,7 @@ import {
   jsonResponse,
   jsonError,
   readJsonBody,
-  errMessage,
+  errorMessage,
   formatError,
   requireControlLog,
   requireControlRedis,
@@ -233,7 +233,7 @@ export async function migrationStatusEndpoint({ request, env, ns, databaseId, re
     const body = /** @type {{ migrations?: unknown[] }} */ (parsed.body);
     localMigrations = (body.migrations || []).map(normalizeMigrationRef);
   } catch (err) {
-    return jsonError(400, "invalid_request", errMessage(err));
+    return jsonError(400, "invalid_request", errorMessage(err));
   }
   const applied = await readAppliedMigrationsIfTableExists(env, ns, database.databaseId, requestId);
   if (applied.ok === false) {
@@ -268,7 +268,7 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
     const body = /** @type {{ migrations?: unknown[] }} */ (parsed.body);
     migrations = /** @type {MigrationApply[]} */ ((body.migrations || []).map(normalizeMigrationApply));
   } catch (err) {
-    return jsonError(400, "invalid_request", errMessage(err));
+    return jsonError(400, "invalid_request", errorMessage(err));
   }
   if (migrations.length === 0) {
     return jsonError(400, "invalid_request", "migrations must be a non-empty array");

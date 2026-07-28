@@ -8,7 +8,7 @@ import { envValueOr } from "shared-env";
 import { PLATFORM_TIER_RESERVED_NS } from "shared-auth-roles";
 import { isReservedNs, isValidWorkerName, WORKER_NAME_RE } from "shared-ns-pattern";
 import { compareStreamIds, isValidResumeId } from "control-lib";
-import { controlTailRedis, errMessage, jsonError, requireControlLog } from "control-shared";
+import { controlTailRedis, errorMessage, jsonError, requireControlLog } from "control-shared";
 
 const TAIL_ACTIVATION_CHANNEL = "logs:tail:active";
 const TAIL_ACTIVATION_TTL_SECONDS = 30;
@@ -365,7 +365,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
       } catch (err) {
         log("warn", "tail_session_close_failed", {
           request_id: requestId, namespace: ns,
-          error_message: errMessage(err),
+          error_message: errorMessage(err),
         });
       }
     })();
@@ -507,7 +507,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
         } catch (err) {
           log("warn", "tail_heartbeat_activate_failed", {
             request_id: requestId, namespace: ns, worker_count: workers.length,
-            error_message: errMessage(err),
+            error_message: errorMessage(err),
           });
         }
         if (!openNoticeSent) {
@@ -561,7 +561,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
         }
         log("error", "tail_pull_failed", {
           request_id: requestId, namespace: ns,
-          error_message: errMessage(err),
+          error_message: errorMessage(err),
         });
         cancelled = true;
         resolveCancel();

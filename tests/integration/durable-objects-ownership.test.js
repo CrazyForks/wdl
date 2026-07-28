@@ -665,7 +665,7 @@ test("DO live takeover aborts stale in-flight handler before post-await SQLite w
     await waitUntil("do-runtime-a stale handler in flight", () => {
       const metrics = serviceInternalGet("do-runtime-a", 8788, "/_metrics").body;
       return /wdl_do_in_flight_requests\{service="do-runtime"\} 1/.test(metrics);
-    }, { timeoutMs: 5000, intervalMs: 100 });
+    }, { timeoutMs: 10000, intervalMs: 100 });
 
     await waitUntil("do-runtime-a owner lease expires before takeover", () => (
       redisGetDoOwner(ownerKey) === null

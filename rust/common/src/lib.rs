@@ -9,6 +9,9 @@
 //! UTF-8-safe text helpers. It should not own service protocols, Redis schemas,
 //! dispatch policy, or lifecycle behavior.
 
+/// Largest integer that round-trips exactly through a JavaScript `Number`.
+pub const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
 pub mod env;
 pub mod hash;
 pub mod health;
@@ -18,7 +21,9 @@ pub mod log;
 pub mod log_fields;
 pub mod metrics;
 pub mod queue_keys;
+#[cfg(feature = "redis")]
 pub mod redis_conn;
+#[cfg(feature = "redis")]
 pub mod redis_eval;
 pub mod request_id;
 pub mod shutdown;

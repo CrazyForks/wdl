@@ -24,7 +24,7 @@ redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
-wdl-rust-common = { workspace = true, features = ["axum"] }
+wdl-rust-common = { workspace = true, features = ["axum", "redis"] }
 zeroize = "1.8"
 
 [dev-dependencies]

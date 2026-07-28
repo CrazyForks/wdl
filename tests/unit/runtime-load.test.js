@@ -17,7 +17,7 @@ import { withMockedProperty } from "../helpers/mock-global.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
-import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
+import { runtimeProxyBindingStubUrl, sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 import {
   STUB_RUNTIME_INJECTION_SOURCES,
   stubRuntimeInjectionSourcesUrl,
@@ -72,6 +72,7 @@ const src = readRepositoryModuleSource("runtime/load.js", [
     "shared-worker-id": SHARED_WORKER_ID_URL,
     "shared-internal-auth": SHARED_INTERNAL_AUTH_URL,
     "shared-respond": SHARED_RESPOND_URL,
+    "runtime-bindings-proxy": runtimeProxyBindingStubUrl(),
   }),
   [
     /import \{ evictSiblings, recordLoadedWorker \} from "runtime-state";/,

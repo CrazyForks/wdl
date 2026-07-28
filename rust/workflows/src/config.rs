@@ -1,7 +1,9 @@
 use std::env;
 
 use serde_json::json;
-use wdl_rust_common::env::{env_u16, env_u64, env_usize, positive_or};
+use wdl_rust_common::env::{
+    DEFAULT_REDIS_URL, env_u16, env_u64, env_usize, optional_env, positive_or,
+};
 use wdl_rust_common::internal_auth::{InternalAuthTokens, internal_auth_tokens_from_env};
 use wdl_rust_common::log::{LogLevel, emit_log_line, log_level_from_env};
 
@@ -36,12 +38,10 @@ pub(crate) struct Config {
 }
 
 fn workflows_redis_url() -> String {
-    if let Ok(url) = env::var("WORKFLOWS_REDIS_URL")
-        && !url.trim().is_empty()
-    {
+    if let Some(url) = optional_env("WORKFLOWS_REDIS_URL") {
         return url;
     }
-    let base = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let base = env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string());
     let db = env::var("WORKFLOWS_REDIS_DB")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -76,12 +76,10 @@ fn redis_url_with_db(base: &str, db: u16) -> String {
 }
 
 fn control_redis_url() -> String {
-    if let Ok(url) = env::var("CONTROL_REDIS_URL")
-        && !url.trim().is_empty()
-    {
+    if let Some(url) = optional_env("CONTROL_REDIS_URL") {
         return url;
     }
-    env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string())
+    env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string())
 }
 
 pub(crate) fn config_from_env() -> Config {

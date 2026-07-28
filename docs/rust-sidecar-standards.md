@@ -144,7 +144,7 @@ tests solely to increase count.
 
 ## Shared Code
 
-`wdl-rust-common` (`rust/common/`) is the only shared Rust helper crate in this batch.
+`wdl-rust-common` (`rust/common/`) is the repository's only shared Rust helper crate.
 It owns small cross-crate primitives whose behavior must stay identical, such as
 environment number parsing, log-level parsing, HTTP health probes, shutdown/in-flight
 tracking, common JSON log-line emission, wall-clock millisecond helpers, short
@@ -153,8 +153,9 @@ builders, worker version / bundle-key parsing, Prometheus metric storage/formatt
 Prometheus text responses, structured error field merging, internal-auth token/header
 matching, Redis command construction helpers, a neutral Redis connection execution
 wrapper, and UTF-8-safe string truncation. It must not become a dumping ground for
-service behavior. Axum-facing helpers are feature-gated so non-HTTP users such as
-the D1/DO supervisor binaries do not pay for the HTTP stack.
+service behavior. Axum-facing and Redis-facing helpers sit behind the `axum` and
+`redis` features so consumers such as the D1/DO supervisor binaries do not pull Axum
+or async Redis through the shared crate unless they need those helpers.
 
 The `test-support` feature exposes the single process-environment override helper used
 by Rust service tests. It serializes overrides across modules in one test process and
@@ -187,8 +188,8 @@ Rules for shared primitives:
   crates still own script bodies, which connection is selected, retry/timeout behavior,
   error mapping, and state ownership.
 - HTTP framework helpers in `wdl-rust-common` must stay behind the crate's `axum`
-  feature. Sidecars that only need non-HTTP primitives should opt out of default
-  features.
+  feature, and Redis connection/EVAL helpers behind its `redis` feature. Sidecars that
+  only need the plain primitives should opt out of default features.
 
 ## Redis, Errors, And Schema Contracts
 

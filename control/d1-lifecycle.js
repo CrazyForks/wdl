@@ -2,7 +2,7 @@ import {
   jsonResponse,
   jsonError,
   readJsonBody,
-  errMessage,
+  errorMessage,
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
@@ -191,7 +191,7 @@ export async function createDatabase({ request, env, ns, requestId }) {
   try {
     validateDatabaseName(databaseName);
   } catch (err) {
-    return jsonError(400, "invalid_request", errMessage(err));
+    return jsonError(400, "invalid_request", errorMessage(err));
   }
   const now = new Date().toISOString();
   const existingId = await getDatabaseIdByName(ns, databaseName);
@@ -393,7 +393,7 @@ export async function deleteDatabase({ env, ns, databaseId, requestId }) {
       namespace: ns,
       database_id: database.databaseId,
       owner_release_status: ownerRelease.status,
-      error_message: errMessage(err),
+      error_message: errorMessage(err),
     });
   }
 

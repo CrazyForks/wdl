@@ -66,10 +66,10 @@ function loadLogsTailHandler(options = {}) {
        const isValidResumeId = () => true;`,
     ],
     [
-      /import \{ controlTailRedis, errMessage, jsonError, requireControlLog \} from "control-shared";/,
-      `const jsonError = (status, error, message) =>
+      /import \{ controlTailRedis, errorMessage, jsonError, requireControlLog \} from "control-shared";/,
+      `import { errorMessage } from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};
+       const jsonError = (status, error, message) =>
          Response.json({ error, message }, { status });
-       const errMessage = (err) => err instanceof Error ? err.message : String(err);
        const state = /** @type {any} */ (globalThis).__tailState;
        const requireControlLog = () => state.log;
        const controlTailRedis = () => state.dataRedis || state.redis;`,
@@ -304,10 +304,8 @@ test("logs tail idle-pull watchdog closes before the first client read", async (
 test("logs tail closes session if watchdog fires while Redis open is pending", async () => {
   resetTailState();
   const state = /** @type {any} */ (globalThis).__tailState;
-  let releaseOpen = () => {};
-  state.openBlocker = new Promise((resolve) => {
-    releaseOpen = () => resolve(undefined);
-  });
+  const openBlocker = Promise.withResolvers();
+  state.openBlocker = openBlocker.promise;
 
   const { handle } = await loadLogsTailHandler();
   /** @type {Promise<unknown>[]} */
@@ -328,7 +326,7 @@ test("logs tail closes session if watchdog fires while Redis open is pending", a
     timeoutMs: 500, intervalMs: 5,
   });
   await delay(50);
-  releaseOpen();
+  openBlocker.resolve(undefined);
   await session.openPromise;
   await Promise.all(waitUntilPromises);
   await waitUntil("tail Redis session to close", () => session.closed === true, {
@@ -344,10 +342,8 @@ test("logs tail closes session if watchdog fires while Redis open is pending", a
 test("logs tail max-session watchdog closes a socket while Redis open is pending", async () => {
   resetTailState();
   const state = /** @type {any} */ (globalThis).__tailState;
-  let releaseOpen = () => {};
-  state.openBlocker = new Promise((resolve) => {
-    releaseOpen = () => resolve(undefined);
-  });
+  const openBlocker = Promise.withResolvers();
+  state.openBlocker = openBlocker.promise;
 
   const { handle } = await loadLogsTailHandler();
   /** @type {Promise<unknown>[]} */
@@ -370,7 +366,7 @@ test("logs tail max-session watchdog closes a socket while Redis open is pending
   await Promise.all(waitUntilPromises);
 
   assert.equal(session.closed, true);
-  releaseOpen();
+  openBlocker.resolve(undefined);
   await session.openPromise;
   assert.match((await pendingRead).text, /session_expired/);
   await reader.cancel().catch(() => {});

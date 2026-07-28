@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { applyModuleReplacements, moduleDataUrl, readRepositoryFile } from "../helpers/load-shared-module.js";
+import { sharedOwnerForwarderUrl } from "../helpers/load-owner-harness.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
@@ -69,12 +70,6 @@ export async function probeOwner(...args) {
     { outcome: "owner-alive" };
 }
 `);
-const ownerForwarderUrl = moduleDataUrl(`
-export function parseForwardHopCount(value) {
-  const parsed = Number(value ?? "0");
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
-}
-`);
 const protocolUrl = moduleDataUrl(`
 export class D1ProtocolError extends Error {
   constructor(status, code, message) {
@@ -116,20 +111,12 @@ const src = applyModuleReplacements(readRepositoryFile("d1-runtime/router.js"), 
   [/from "d1-runtime-test-hooks";/, `from ${JSON.stringify(testHooksUrl)};`],
   [/from "d1-runtime-owner-registry";/, `from ${JSON.stringify(ownerRegistryUrl)};`],
   [/from "d1-runtime-owner-client";/, `from ${JSON.stringify(ownerClientUrl)};`],
-  [/from "shared-owner-forwarder";/, `from ${JSON.stringify(ownerForwarderUrl)};`],
+  [/from "shared-owner-forwarder";/, `from ${JSON.stringify(sharedOwnerForwarderUrl())};`],
   [/from "d1-runtime-state";/, `from ${JSON.stringify(stateUrl)};`],
   [/from "d1-runtime-http";/, `from ${JSON.stringify(httpUrl)};`],
 ]);
 
-const { handleQuery, parseHopCount, routeQueryToOwner } = await import(moduleDataUrl(src));
-
-test("D1 router parseHopCount rejects NaN and negative hop headers", () => {
-  assert.equal(parseHopCount("abc"), 0);
-  assert.equal(parseHopCount("-1"), 0);
-  assert.equal(parseHopCount("5"), 5);
-  assert.equal(parseHopCount("1.9"), 1);
-  assert.equal(parseHopCount(null), 0);
-});
+const { handleQuery, routeQueryToOwner } = await import(moduleDataUrl(src));
 
 test("D1 router uses takeover owner even after refresh is disabled", async () => {
   const query = {

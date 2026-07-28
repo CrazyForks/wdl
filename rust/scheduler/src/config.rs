@@ -1,6 +1,6 @@
 use std::env;
 
-use wdl_rust_common::env::{env_u16, env_u64, env_usize, optional_env};
+use wdl_rust_common::env::{DEFAULT_REDIS_URL, env_u16, env_u64, env_usize, optional_env};
 use wdl_rust_common::internal_auth::internal_auth_token_from_env;
 use wdl_rust_common::log::{LogLevel, log_level_from_env};
 
@@ -41,7 +41,7 @@ pub(crate) struct Config {
 pub(crate) fn config_from_env() -> Config {
     let runtime_host = env::var("RUNTIME_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let runtime_port = env_u16("RUNTIME_PORT", 8088);
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string());
     let max_concurrency = env_usize("SCHEDULER_MAX_CONCURRENCY", 128);
     let fire_timeout_ms = env_u64("SCHEDULER_FIRE_TIMEOUT_MS", 60_000);
     let queue_pel_idle_ms =

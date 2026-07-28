@@ -195,12 +195,7 @@ async fn process_ref(
                     entry,
                     active_version,
                 } => (entry, active_version),
-                verdict @ (RefVerdict::Stale(_) | RefVerdict::Corrupt) => {
-                    let logged_reason = match verdict {
-                        RefVerdict::Stale(reason) => reason,
-                        RefVerdict::Corrupt => "corrupt",
-                        RefVerdict::Fire { .. } => unreachable!(),
-                    };
+                RefVerdict::Stale(logged_reason) => {
                     state.metrics.increment(
                         "cron_stale_refs_cleaned",
                         &[("service", SERVICE)],

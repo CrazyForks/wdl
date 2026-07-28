@@ -17,7 +17,7 @@ pub(crate) const MAX_QUEUE_MESSAGE_BYTES: usize = 128_000;
 pub(crate) const MAX_QUEUE_BATCH_MESSAGES: usize = 100;
 pub(crate) const MAX_QUEUE_BATCH_BYTES: usize = 256_000;
 const QUEUE_DELAYED_WAKE_MAX_LEN: usize = 1000;
-const MAX_SAFE_VISIBLE_AT: f64 = 9_007_199_254_740_991.0;
+const MAX_SAFE_VISIBLE_AT: f64 = wdl_rust_common::JS_MAX_SAFE_INTEGER as f64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

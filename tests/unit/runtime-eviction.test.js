@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
+import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
 import {
   applyModuleReplacements,
   moduleDataUrl,
@@ -25,6 +26,7 @@ const src = applyModuleReplacements(readRepositoryFile("runtime/runtime.js"), [
   [/from "shared-errors";/, `from ${JSON.stringify(errorsUrl)};`],
   [/from "shared-request-scope";/, `from ${JSON.stringify(requestScopeStubUrl)};`],
   [/from "shared-worker-id";/, `from ${JSON.stringify(workerIdUrl)};`],
+  [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(runtimeProxyBindingStubUrl())};`],
   [/from "runtime-metrics";/, `from ${JSON.stringify(RUNTIME_METRICS_NOOP_URL)};`],
 ]);
 

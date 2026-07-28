@@ -473,27 +473,24 @@ export class MetricsRegistry {
   _trackSeries(name) {
     const current = this._seriesByName.get(name) || 0;
     if (current >= CARDINALITY_WARN_LIMIT) {
-      if (!this._cardinalityWarned.has(name)) {
-        this._cardinalityWarned.add(name);
-        emitStructuredLogLine("observability", "warn", "metric_cardinality_warning", {
-          metric: name,
-          series: current,
-          limit: CARDINALITY_WARN_LIMIT,
-        });
-      }
+      this._warnCardinalityOnce(name, current);
       return false;
     }
     const next = current + 1;
     this._seriesByName.set(name, next);
-    if (next >= CARDINALITY_WARN_LIMIT && !this._cardinalityWarned.has(name)) {
-      this._cardinalityWarned.add(name);
-      emitStructuredLogLine("observability", "warn", "metric_cardinality_warning", {
-        metric: name,
-        series: next,
-        limit: CARDINALITY_WARN_LIMIT,
-      });
-    }
+    if (next >= CARDINALITY_WARN_LIMIT) this._warnCardinalityOnce(name, next);
     return true;
+  }
+
+  /** @param {string} name @param {number} series */
+  _warnCardinalityOnce(name, series) {
+    if (this._cardinalityWarned.has(name)) return;
+    this._cardinalityWarned.add(name);
+    emitStructuredLogLine("observability", "warn", "metric_cardinality_warning", {
+      metric: name,
+      series,
+      limit: CARDINALITY_WARN_LIMIT,
+    });
   }
 
   /**

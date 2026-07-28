@@ -33,7 +33,6 @@ pub(crate) enum RefVerdict {
         active_version: String,
     },
     Stale(&'static str),
-    Corrupt,
 }
 
 pub(crate) fn cron_worker_key(ns: &str, worker: &str) -> String {
@@ -53,21 +52,23 @@ pub(crate) fn ref_for(ns: &str, worker: &str, cron_id: &str, r#gen: i64) -> Stri
 }
 
 pub(crate) fn parse_ref(reference: &str) -> Option<RefParts> {
-    let parts = reference.split(':').collect::<Vec<_>>();
-    if parts.len() != 4 {
+    let mut parts = reference.split(':');
+    let ns = parts.next()?;
+    let worker = parts.next()?;
+    let cron_id = parts.next()?;
+    let gen_raw = parts.next()?;
+    if parts.next().is_some()
+        || cron_id.is_empty()
+        || !is_valid_route_ns(ns)
+        || !is_valid_worker_name(worker)
+    {
         return None;
     }
-    if parts.iter().any(|part| part.is_empty()) {
-        return None;
-    }
-    if !is_valid_route_ns(parts[0]) || !is_valid_worker_name(parts[1]) {
-        return None;
-    }
-    let r#gen = parts[3].parse::<i64>().ok()?;
+    let r#gen = gen_raw.parse::<i64>().ok()?;
     Some(RefParts {
-        ns: parts[0].to_string(),
-        worker: parts[1].to_string(),
-        cron_id: parts[2].to_string(),
+        ns: ns.to_string(),
+        worker: worker.to_string(),
+        cron_id: cron_id.to_string(),
         r#gen,
     })
 }
@@ -90,16 +91,16 @@ pub(crate) fn classify_ref(
         return RefVerdict::Stale("missing_meta");
     };
     let Ok(meta) = serde_json::from_str::<CronMeta>(&meta_str) else {
-        return RefVerdict::Corrupt;
+        return RefVerdict::Stale("corrupt_meta");
     };
     let Some(entry_str) = entry_str else {
         return RefVerdict::Stale("missing_entry");
     };
     let Ok(entry) = serde_json::from_str::<CronEntry>(&entry_str) else {
-        return RefVerdict::Corrupt;
+        return RefVerdict::Stale("corrupt_entry");
     };
     let Some(active_version) = validated_cron_meta_version(meta) else {
-        return RefVerdict::Corrupt;
+        return RefVerdict::Stale("invalid_version");
     };
     if entry.r#gen != parts.r#gen {
         return RefVerdict::Stale("gen_mismatch");
@@ -276,7 +277,7 @@ mod tests {
                 Some("{not json".to_string()),
                 Some(json!({ "cron": "*/5 * * * *", "timezone": "UTC", "gen": 3 }).to_string())
             ),
-            RefVerdict::Corrupt
+            RefVerdict::Stale("corrupt_meta")
         ));
         assert!(matches!(
             classify_ref(
@@ -284,7 +285,7 @@ mod tests {
                 Some(json!({ "version": "v5" }).to_string()),
                 Some("[broken".to_string())
             ),
-            RefVerdict::Corrupt
+            RefVerdict::Stale("corrupt_entry")
         ));
     }
 }

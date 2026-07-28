@@ -13,6 +13,7 @@ import {
   createHttpRequestScope,
 } from "shared-request-scope";
 import { parseWorkerId } from "shared-worker-id";
+import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { metrics } from "runtime-metrics";
 
 /** @type {((level: string, event: string, fields?: Record<string, unknown>) => void) | null} */
@@ -36,7 +37,7 @@ export function runtimeServiceAllowsNamespace(service, namespace) {
 /** @param {Record<string, unknown>} env */
 export function bindRuntime(env) {
   if (!log) {
-    serviceName = typeof env.SERVICE_NAME === "string" && env.SERVICE_NAME ? env.SERVICE_NAME : "runtime";
+    serviceName = serviceNameFromEnv(env);
     log = createLogger(serviceName);
   }
   bindLogLevel(env);

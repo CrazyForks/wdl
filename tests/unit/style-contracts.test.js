@@ -280,6 +280,21 @@ test("runtime workflow instance id grammar matches shared control grammar", () =
   );
 });
 
+// The embedded runtime module must stay standalone, so pin its copied grammar.
+test("runtime R2 bucket grammar matches shared control grammar", () => {
+  assert.equal(
+    extractRegex("runtime/r2-utils.js", "R2_BUCKET_NAME_RE"),
+    extractRegex("shared/ns-pattern.js", "R2_BUCKET_NAME_RE")
+  );
+});
+
+test("runtime workflow clients use the same backend base URL", () => {
+  assert.equal(
+    extractStringConst(readRepoFile("runtime/workflows-client.js"), "WORKFLOWS_BASE_URL"),
+    extractStringConst(readRepoFile("runtime/dispatch/workflow-step.js"), "WORKFLOWS_BASE_URL")
+  );
+});
+
 test("D1 object field setters stay shared across wire and transport codecs", () => {
   assert.match(readRepoFile("shared/d1-data-field.js"), /export function setDataField\(/);
   for (const file of ["shared/d1-query-wire.js", "shared/d1-transport.js"]) {
@@ -1325,7 +1340,7 @@ test("production metric labels use the bounded label vocabulary", () => {
     const source = withoutLineComments(readRepoFile(file));
     for (const call of source.match(/metrics\.(?:increment|observe|setGauge)\([^;]+;/gs) || []) {
       if (
-        /\berrMessage\(/.test(call) ||
+        /\berrorMessage\(/.test(call) ||
         /\b(?:reason|code|error|message)\s*:\s*(?:err|error)\b/.test(call) ||
         /\b(?:reason|code|error|message)\s*:[^,}]*\.message\b/.test(call)
       ) {
@@ -2429,7 +2444,7 @@ test("owner endpoint validation lives in a shared contract owner", () => {
   assert.match(d1Binding, /from "shared-owner-endpoint"/);
   assert.match(controlD1RuntimeClient, /from "shared-owner-endpoint"/);
   assert.match(controlD1RuntimeClient, /validOwnerEndpointForService\(owner\.endpoint, 8787, "d1-runtime"\)/);
-  assert.match(tsconfig, /"shared-\*": \["shared\/\*\.js"\]/);
+  assert.match(tsconfig, /"shared-\*": \["\.\/shared\/\*\.js"\]/);
   assert.doesNotMatch(taskIdentity, /_TASK_PORT/);
   assert.doesNotMatch(d1Config, /D1_TASK_PORT/);
   assert.doesNotMatch(doConfig, /DO_TASK_PORT/);

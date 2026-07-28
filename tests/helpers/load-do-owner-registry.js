@@ -1,10 +1,10 @@
 import { doProtocolDataUrl } from "./load-do-protocol.js";
+import { sharedOwnerLeaseUrl, sharedOwnerProtocolUrl } from "./load-owner-harness.js";
 import {
   applyModuleReplacements,
   moduleDataUrl,
   readRepositoryFile,
   repositoryFileUrl,
-  repositoryModuleDataUrl,
   sharedModuleDataUrl,
 } from "./load-shared-module.js";
 import {
@@ -16,11 +16,9 @@ import {
 const PROTOCOL_URL = doProtocolDataUrl();
 const FAKE_REDIS_URL = repositoryFileUrl("tests/helpers/mocks/fake-redis.js");
 const SHARED_ENV_URL = repositoryFileUrl("shared/env.js");
-const SHARED_OWNER_LEASE_URL = sharedModuleDataUrl("shared/owner-lease.js");
+const SHARED_OWNER_LEASE_URL = sharedOwnerLeaseUrl();
 const WORKER_CONTRACT_URL = sharedModuleDataUrl("shared/worker-contract.js");
-const SHARED_OWNER_PROTOCOL_URL = repositoryModuleDataUrl("shared/owner-protocol.js", [
-  [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
-]);
+const SHARED_OWNER_PROTOCOL_URL = sharedOwnerProtocolUrl();
 
 const redisState = createFakeRedisState();
 

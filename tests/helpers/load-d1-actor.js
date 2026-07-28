@@ -1,4 +1,5 @@
 import { applyModuleReplacements, readRepositoryFile, moduleDataUrl, sharedModuleDataUrl } from "./load-shared-module.js";
+import { d1ProtocolDataUrl } from "./load-d1-protocol.js";
 
 const protocolUrl = moduleDataUrl(`
 export function classifyD1Error(err) {
@@ -33,6 +34,7 @@ export async function readD1ActorControlRequest(request) {
   return await request.json();
 }
 `);
+const d1ProtocolUrl = d1ProtocolDataUrl();
 
 const ownerRegistryUrl = moduleDataUrl(`
 export async function assertCurrentOwnerWithLeaseBudget(_env, owner) {
@@ -96,8 +98,9 @@ const source = applyModuleReplacements(readRepositoryFile("d1-runtime/actor.js")
     "class DurableObject {}"
   ],
   [
-    /import \{\n {2}classifyD1Error,\n {2}D1ProtocolError,\n {2}d1ErrorResponse,\n {2}readD1ActorControlRequest,\n {2}readD1ActorQueryRequest,\n\} from "d1-runtime-protocol";/,
-    `import { classifyD1Error, D1ProtocolError, d1ErrorResponse, readD1ActorControlRequest, readD1ActorQueryRequest } from ${JSON.stringify(protocolUrl)};`
+    /import \{\n {2}classifyD1Error,\n {2}D1ProtocolError,\n {2}d1ErrorResponse,\n {2}readD1ActorControlRequest,\n {2}readD1ActorQueryRequest,\n {2}sqliteBindParams,\n\} from "d1-runtime-protocol";/,
+    `import { classifyD1Error, D1ProtocolError, d1ErrorResponse, readD1ActorControlRequest, readD1ActorQueryRequest } from ${JSON.stringify(protocolUrl)};
+     import { sqliteBindParams } from ${JSON.stringify(d1ProtocolUrl)};`
   ],
   [
     /import \{ assertCurrentOwnerWithLeaseBudget \} from "d1-runtime-owner-registry";/,

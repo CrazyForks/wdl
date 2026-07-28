@@ -9,20 +9,12 @@ import {
   metrics,
   SERVICE,
 } from "do-runtime-state";
-import {
-  forwardOwnerRequest,
-  parseForwardHopCount,
-} from "shared-owner-forwarder";
+import { forwardOwnerRequest } from "shared-owner-forwarder";
 
 /**
  * @typedef {{ ownerKey: string, taskId: string, endpoint?: string | null, generation: number }} DoOwner
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  */
-
-/** @param {unknown} value */
-export function parseHopCount(value) {
-  return parseForwardHopCount(value);
-}
 
 const DO_OWNER_PORT = 8788;
 

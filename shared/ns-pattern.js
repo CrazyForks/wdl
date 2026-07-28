@@ -89,10 +89,8 @@ export const ROUTES_ALLOWED_RESERVED_NS = new Set(["__system__"]);
 // whose target worker lives in the exporting platform namespace.
 export const PLATFORM_TIER_RESERVED_NS = new Set(["__platform__"]);
 
-export const RUNTIME_LOAD_ALLOWED_RESERVED_NS = new Set([
-  ...ROUTES_ALLOWED_RESERVED_NS,
-  ...PLATFORM_TIER_RESERVED_NS,
-]);
+export const RUNTIME_LOAD_ALLOWED_RESERVED_NS =
+  ROUTES_ALLOWED_RESERVED_NS.union(PLATFORM_TIER_RESERVED_NS);
 
 // Tenant ns names that NS_RE accepts but the platform reserves for
 // brand, product, or infrastructure use. Admin-host routing must be

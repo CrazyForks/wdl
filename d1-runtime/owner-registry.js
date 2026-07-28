@@ -409,7 +409,7 @@ async function waitForOwnedActorToDrain(env, owner, deadline) {
     }
     return { waitedMs: Date.now() - started };
   } catch (err) {
-    if (/AbortError|timeout|timed out/i.test(errorMessage(err))) {
+    if (controller.signal.aborted) {
       throw new D1ProtocolError(
         503,
         "drain-timeout",

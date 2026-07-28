@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::{Value, json};
-use wdl_rust_common::env::env_u16;
+use wdl_rust_common::env::{DEFAULT_REDIS_URL, env_u16, optional_env};
 use wdl_rust_common::health::healthcheck_http_200;
 use wdl_rust_common::internal_auth::{
     INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE, InternalAuthTokens,
@@ -350,13 +350,9 @@ use runtime::runtime_load;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let port = env_u16("REDIS_PROXY_PORT", 7070);
-    let redis_configured = env::var("REDIS_URL")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let data_redis_configured = env::var("DATA_REDIS_URL")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_configured = optional_env("REDIS_URL").is_some();
+    let data_redis_configured = optional_env("DATA_REDIS_URL").is_some();
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string());
     let data_redis_url = env::var("DATA_REDIS_URL").unwrap_or_else(|_| redis_url.clone());
     let control_client = redis::Client::open(redis_url.as_str())?;
     let data_client = redis::Client::open(data_redis_url.as_str())?;

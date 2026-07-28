@@ -264,14 +264,7 @@ pub(super) fn validate_step_request(req: &WorkflowStepRequest) -> WorkflowResult
                 "workflow step dependencies must reference prior ordinals",
             ));
         }
-        if previous == Some(*dependency) {
-            return Err(WorkflowError::invalid_request(
-                "workflow step dependencies must be unique and sorted",
-            ));
-        }
-        if let Some(previous) = previous
-            && *dependency < previous
-        {
+        if previous.is_some_and(|previous| *dependency <= previous) {
             return Err(WorkflowError::invalid_request(
                 "workflow step dependencies must be unique and sorted",
             ));

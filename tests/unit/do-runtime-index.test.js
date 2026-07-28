@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 
 import { doProtocolDataUrl } from "../helpers/load-do-protocol.js";
+import { sharedOwnerForwarderUrl } from "../helpers/load-owner-harness.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import {
@@ -104,7 +105,6 @@ export async function resolveDoOwner(_env, invoke) {
 export { DoRuntimeError };
 `);
 const ownerClientUrl = stub(`
-export function parseHopCount() { return 0; }
 export async function forwardToOwner() { throw new Error("unexpected forward"); }
 export async function forwardConnectToOwner() { throw new Error("unexpected connect forward"); }
 `);
@@ -140,6 +140,7 @@ const IMPORT_STUBS = {
   "do-runtime-task-identity": taskIdentityUrl,
   "do-runtime-owner-registry": ownerRegistryUrl,
   "do-runtime-owner-client": ownerClientUrl,
+  "shared-owner-forwarder": sharedOwnerForwarderUrl(),
   "runtime-do-transport": doTransportUrl,
   "runtime-bindings-kv": emptyBindingUrl,
   "runtime-bindings-assets": emptyBindingUrl,

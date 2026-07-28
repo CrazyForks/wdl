@@ -3,7 +3,7 @@ import {
   ControlAbort,
   codedErrorLogFields,
   controlAbortResponse,
-  errMessage,
+  errorMessage,
   jsonError,
   jsonResponse,
   postWorkflowsInternal,
@@ -464,7 +464,7 @@ async function readWorkflowListRaws({ redis }, ns, routeEntries) {
     requireControlLog()("error", "workflow_metadata_unavailable", {
       namespace: ns,
       worker_count: routeEntries.length,
-      error_message: errMessage(err),
+      error_message: errorMessage(err),
     });
     throw new ControlAbort(500, "workflow_metadata_unavailable", {
       message: "Workflow metadata is unavailable",
@@ -491,7 +491,7 @@ async function readBundleMeta({ redis }, ns, worker, version) {
       namespace: ns,
       worker,
       version,
-      error_message: errMessage(err),
+      error_message: errorMessage(err),
     });
     throw new ControlAbort(500, "workflow_metadata_unavailable", {
       message: "Workflow metadata is unavailable",

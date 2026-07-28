@@ -149,18 +149,11 @@ test("D1 actor: fetch maps aggregate result byte-cap overflow to limit-exceeded 
 });
 
 test("D1 actor: wait-until-idle waits for an in-flight query request", async () => {
-  /** @type {() => void} */
-  let releaseQueryRead = () => {};
-  /** @type {() => void} */
-  let markQueryReadStarted = () => {};
-  const queryReadStarted = new Promise((resolve) => {
-    markQueryReadStarted = () => resolve(undefined);
-  });
+  const queryReadStarted = Promise.withResolvers();
+  const queryReadRelease = Promise.withResolvers();
   const queryReadGate = {
-    started: markQueryReadStarted,
-    promise: new Promise((resolve) => {
-      releaseQueryRead = () => resolve(undefined);
-    }),
+    started: () => queryReadStarted.resolve(undefined),
+    promise: queryReadRelease.promise,
   };
 
   await withMockedProperty(
@@ -194,7 +187,7 @@ test("D1 actor: wait-until-idle waits for an in-flight query request", async () 
           statements: [{ sql: "select 1", params: [] }],
         }),
       }));
-      await queryReadStarted;
+      await queryReadStarted.promise;
 
       const idleResponsePromise = actor.fetch(new Request("http://d1-actor/query", {
         method: "POST",
@@ -209,7 +202,7 @@ test("D1 actor: wait-until-idle waits for an in-flight query request", async () 
         ]);
         assert.equal(earlyResult, "pending");
       } finally {
-        releaseQueryRead();
+        queryReadRelease.resolve(undefined);
       }
 
       assert.equal((await queryResponsePromise).status, 200);
@@ -219,18 +212,11 @@ test("D1 actor: wait-until-idle waits for an in-flight query request", async () 
 });
 
 test("D1 actor: wait-until-idle uses actor-specific timeout env", async () => {
-  /** @type {() => void} */
-  let releaseQueryRead = () => {};
-  /** @type {() => void} */
-  let markQueryReadStarted = () => {};
-  const queryReadStarted = new Promise((resolve) => {
-    markQueryReadStarted = () => resolve(undefined);
-  });
+  const queryReadStarted = Promise.withResolvers();
+  const queryReadRelease = Promise.withResolvers();
   const queryReadGate = {
-    started: markQueryReadStarted,
-    promise: new Promise((resolve) => {
-      releaseQueryRead = () => resolve(undefined);
-    }),
+    started: () => queryReadStarted.resolve(undefined),
+    promise: queryReadRelease.promise,
   };
 
   await withMockedProperty(
@@ -267,7 +253,7 @@ test("D1 actor: wait-until-idle uses actor-specific timeout env", async () => {
           statements: [{ sql: "select 1", params: [] }],
         }),
       }));
-      await queryReadStarted;
+      await queryReadStarted.promise;
 
       try {
         const idleResponse = await actor.fetch(new Request("http://d1-actor/query", {
@@ -282,7 +268,7 @@ test("D1 actor: wait-until-idle uses actor-specific timeout env", async () => {
           message: "D1 actor timed out waiting for 1 in-flight query(s)",
         });
       } finally {
-        releaseQueryRead();
+        queryReadRelease.resolve(undefined);
       }
       assert.equal((await queryResponsePromise).status, 200);
     }

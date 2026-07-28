@@ -2,7 +2,7 @@ import { doProtocolDataUrl, loadDoProtocol } from "./load-do-protocol.js";
 import {
   createOwnerClientHarness,
   importOwnerClientModule,
-} from "./load-owner-client-harness.js";
+} from "./load-owner-harness.js";
 
 export const protocolUrl = doProtocolDataUrl();
 const { DO_INVOKE_CONTENT_TYPE: invokeContentType } = await loadDoProtocol();
@@ -18,7 +18,7 @@ const doOwnerClientModule = await importOwnerClientModule("do-runtime/owner-clie
   "do-runtime-state": ownerHarness.stateUrl,
 });
 
-/** @returns {import("./load-owner-client-harness.js").OwnerClientHarnessState} */
+/** @returns {import("./load-owner-harness.js").OwnerHarnessState} */
 export function doOwnerClientHarnessState() {
   return ownerHarness.state;
 }

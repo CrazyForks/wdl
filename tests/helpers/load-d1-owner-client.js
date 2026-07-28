@@ -3,7 +3,7 @@ import { moduleDataUrl } from "./load-shared-module.js";
 import {
   createOwnerClientHarness,
   importOwnerClientModule,
-} from "./load-owner-client-harness.js";
+} from "./load-owner-harness.js";
 
 const wire = await loadD1QueryWire();
 export const {
@@ -47,7 +47,7 @@ const d1OwnerClientModule = await importOwnerClientModule("d1-runtime/owner-clie
   "d1-runtime-state": ownerHarness.stateUrl,
 });
 
-/** @returns {import("./load-owner-client-harness.js").OwnerClientHarnessState} */
+/** @returns {import("./load-owner-harness.js").OwnerHarnessState} */
 export function d1OwnerClientHarnessState() {
   return ownerHarness.state;
 }

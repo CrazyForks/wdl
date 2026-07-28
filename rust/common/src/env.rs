@@ -29,6 +29,9 @@ pub fn env_usize(name: &str, fallback: usize) -> usize {
     env_positive(name, fallback)
 }
 
+/// Default endpoint used by sidecars when no Redis URL is configured.
+pub const DEFAULT_REDIS_URL: &str = "redis://localhost:6379";
+
 pub fn optional_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
 }

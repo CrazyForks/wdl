@@ -43,7 +43,8 @@ import {
   renewOwnedScopes,
   resolveDoOwner,
 } from "do-runtime-owner-registry";
-import { forwardConnectToOwner, forwardToOwner, parseHopCount } from "do-runtime-owner-client";
+import { forwardConnectToOwner, forwardToOwner } from "do-runtime-owner-client";
+import { parseForwardHopCount } from "shared-owner-forwarder";
 import {
   DO_ACCEPT_OWNER_HINT_HEADER,
   DO_OWNER_HINT_CONTROL_HEADER,
@@ -244,7 +245,7 @@ async function handleInvoke(request, env, requestId) {
     env,
     invoke,
     requestId,
-    parseHopCount(request.headers.get("x-wdl-do-hop-count")),
+    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count")),
     acceptsOwnerHint(request)
   );
 }
@@ -290,7 +291,7 @@ async function handleConnect(request, env, requestId) {
     invoke,
     request,
     requestId,
-    parseHopCount(request.headers.get("x-wdl-do-hop-count")),
+    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count")),
     acceptsOwnerHint(request)
   );
 }
@@ -361,7 +362,7 @@ async function handleStorageDelete(request, env, requestId) {
     env,
     invoke,
     requestId,
-    parseHopCount(request.headers.get("x-wdl-do-hop-count"))
+    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count"))
   );
 }
 

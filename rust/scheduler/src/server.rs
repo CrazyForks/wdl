@@ -1,4 +1,3 @@
-use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -6,13 +5,14 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value as JsonValue, json};
+use wdl_rust_common::env::optional_env;
 use wdl_rust_common::health::healthcheck_http_200;
 use wdl_rust_common::metrics::prometheus_response;
 use wdl_rust_common::shutdown::shutdown_signal;
 
 use crate::{
     AppState, DispatchSemaphores, LogLevel, Metrics, QueueState, Redis, SERVICE, ShutdownState,
-    config_from_env, error_fields, log, random_instance_id, run_startup_reconciliation,
+    config_from_env, error_fields, log, random_hex_64, run_startup_reconciliation,
     spawn_background_tasks,
 };
 
@@ -36,12 +36,8 @@ pub fn healthcheck() -> i32 {
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config_from_env());
-    let redis_configured = env::var("REDIS_URL")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let data_redis_configured = env::var("DATA_REDIS_URL")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
+    let redis_configured = optional_env("REDIS_URL").is_some();
+    let data_redis_configured = optional_env("DATA_REDIS_URL").is_some();
     let redis_client = redis::Client::open(config.redis_url.as_str())?;
     let data_redis_client = redis::Client::open(config.data_redis_url.as_str())?;
     let conn = redis_client.get_connection_manager().await?;
@@ -59,7 +55,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             config.queue_max_concurrency,
         )),
         config: config.clone(),
-        instance_id: random_instance_id(),
+        instance_id: random_hex_64(),
     };
 
     log(

@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-const MAX_SAFE_VERSION: u64 = 9_007_199_254_740_991;
+const MAX_SAFE_VERSION: u64 = crate::JS_MAX_SAFE_INTEGER;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidVersionTag;

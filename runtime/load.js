@@ -4,6 +4,11 @@
 import { bundleToWorkerCode } from "runtime-lib";
 import { formatError } from "shared-observability";
 import { withInternalAuth } from "shared-internal-auth";
+import {
+  proxyEndpoint,
+  requireRedisProxyBaseUrl,
+  serviceNameFromEnv,
+} from "runtime-bindings-proxy";
 import { discardResponseBody } from "shared-respond";
 import { formatWorkerId, parseRuntimeLoadWorkerId } from "shared-worker-id";
 import { evictSiblings, recordLoadedWorker } from "runtime-state";
@@ -162,14 +167,6 @@ export function decodeRuntimeLoadPayload(buffer) {
   };
 }
 
-/** @param {Record<string, unknown>} env */
-function redisProxyUrl(env) {
-  if (!env.REDIS_PROXY_URL) {
-    throw new Error("Runtime requires REDIS_PROXY_URL");
-  }
-  return String(env.REDIS_PROXY_URL).replace(/\/+$/, "");
-}
-
 /** @param {WorkerCodeShape} workerCode @param {RuntimeBundleMeta} meta @param {RuntimeMetaPlan} [plan] */
 export function wrapWorkerCodeForHostBindings(workerCode, meta, plan = analyzeRuntimeMeta(meta)) {
   return injectRuntimeModulesForHostBindings(workerCode, meta, RUNTIME_INJECTION_SOURCES, plan);
@@ -177,10 +174,11 @@ export function wrapWorkerCodeForHostBindings(workerCode, meta, plan = analyzeRu
 
 /** @param {Record<string, unknown>} env @param {string} ns @param {string} worker @param {string} version */
 async function loadViaProxy(env, ns, worker, version) {
-  const url = new URL(`${redisProxyUrl(env)}/runtime/load`);
-  url.searchParams.set("ns", ns);
-  url.searchParams.set("worker", worker);
-  url.searchParams.set("version", version);
+  const url = proxyEndpoint(
+    requireRedisProxyBaseUrl(env, "Runtime"),
+    "/runtime/load",
+    { ns, worker, version }
+  );
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
@@ -234,9 +232,7 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
   const maybeMetric = (fn) => { if (metrics) fn(metrics); };
   /** @param {string} level @param {string} event @param {Record<string, unknown>} fields */
   const maybeLog = (level, event, fields) => { if (log) log(level, event, fields); };
-  const serviceName = typeof env.SERVICE_NAME === "string" && env.SERVICE_NAME
-    ? env.SERVICE_NAME
-    : "runtime";
+  const serviceName = serviceNameFromEnv(env);
 
   return async () => {
     const parsedIdentity = parseRuntimeLoadWorkerId(workerId);
