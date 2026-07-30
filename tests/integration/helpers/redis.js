@@ -132,10 +132,10 @@ export function redisHGetJson(key, field, options = {}) {
   return parseJsonText(val, options.label || `${key} ${field}`);
 }
 
-/** @param {string} key @param {Record<string, string>} fields @param {{ db?: number }} [options] */
+/** @param {string} key @param {Record<string, string>} fields @param {{ db?: number }} [options] @returns {number} */
 export function redisHSet(key, fields, options = {}) {
   const args = Object.entries(fields).map(([k, v]) => `${shellQuote(k)} ${shellQuote(v)}`).join(" ");
-  redisCommand(`HSET ${shellQuote(key)} ${args}`, options);
+  return Number(redisCommand(`HSET ${shellQuote(key)} ${args}`, options));
 }
 
 /** @param {string} key @param {string[]} fields @param {{ db?: number }} [options] @returns {number} */
@@ -154,14 +154,24 @@ export function redisSMembers(key, options = {}) {
   return out ? out.split("\n") : [];
 }
 
-/** @param {string} key @param {string} member @param {{ db?: number }} [options] */
-export function redisSAdd(key, member, options = {}) {
-  redisCommand(`SADD ${shellQuote(key)} ${shellQuote(member)}`, options);
+/** @param {string} key @param {string|string[]} members @param {{ db?: number }} [options] @returns {number} */
+export function redisSAdd(key, members, options = {}) {
+  const values = Array.isArray(members) ? members : [members];
+  if (values.length === 0) return 0;
+  return Number(redisCommand(
+    `SADD ${shellQuote(key)} ${values.map(shellQuote).join(" ")}`,
+    options
+  ));
 }
 
-/** @param {string} key @param {string} member @param {{ db?: number }} [options] */
-export function redisSRem(key, member, options = {}) {
-  redisCommand(`SREM ${shellQuote(key)} ${shellQuote(member)}`, options);
+/** @param {string} key @param {string|string[]} members @param {{ db?: number }} [options] @returns {number} */
+export function redisSRem(key, members, options = {}) {
+  const values = Array.isArray(members) ? members : [members];
+  if (values.length === 0) return 0;
+  return Number(redisCommand(
+    `SREM ${shellQuote(key)} ${values.map(shellQuote).join(" ")}`,
+    options
+  ));
 }
 
 /** @param {string} key @param {{ db?: number }} [options] @returns {number} */
@@ -244,6 +254,11 @@ export function redisXGroupCreate(key, group, options = {}) {
     `XGROUP CREATE ${shellQuote(key)} ${shellQuote(group)} 0 MKSTREAM`,
     options
   );
+}
+
+/** @param {string} key @param {string} group @param {{ db?: number }} [options] */
+export function redisXGroupDestroy(key, group, options = {}) {
+  redisCommand(`XGROUP DESTROY ${shellQuote(key)} ${shellQuote(group)}`, options);
 }
 
 /** @param {string} key @param {string} group @param {string} consumer @param {{ db?: number, count?: number, id?: string }} [options] */

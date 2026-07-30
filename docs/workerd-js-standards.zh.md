@@ -39,6 +39,8 @@ implementation 的 no-`any` 标准覆盖 `auth/`、`control/`、`gateway/`、`ru
 
 重复的二进制/字符串路径应使用模块级 `TextEncoder` / `TextDecoder` 单例。一次性测试里内联创建可以接受；生产 decode path、Redis payload 解析和 binding adapter 应复用模块单例，除非确实需要有状态 decoder 选项。
 
+只需要精确 UTF-8 byte count 的路径应使用 `shared/utf8.js#utf8ByteLength`，不要自行实现 encoder。该 helper 对短字符串使用不分配内存的 arithmetic path，对长字符串交给可能分配临时结果的 native encoder。需要 intrinsic hardening 的 injected module 若引入 shared module 会削弱 capture boundary，可以保留本地捕获的 `encodeInto()` scratch path。已经依赖 `Buffer` 的 Node-compatible host module 也可以使用 `Buffer.byteLength(value, "utf8")`；它同样精确且不会分配编码结果。
+
 ## 所有权
 
 Entrypoint 应保持薄：负责 dispatch、auth/routing、observability wiring，并调用具名 helper。纯 route parsing、key construction、normalization 和 policy decision 应放在不依赖 workerd 的可单测文件中。
@@ -98,7 +100,11 @@ WATCH/MULTI 行为应由一个 owner 负责。不要把 preflight read 和 commi
 
 Workerd I/O object 与创建它的 `IoContext` 绑定。共享 `RedisClient` 应保持 socket-per-call；相关命令应在一个 typed operation 内批处理，不要跨 invocation 保留 socket 或 request 创建的 Promise。只有当单个 invocation 或单个 long-lived owning task 明确需要在 WATCH/transaction 或 subscription lifecycle 内持有连接时，才使用 `RedisSession`。
 
+与 transport 无关的命令构造和 reply 解码属于共享 typed command surface。`RedisClient` 与 `RedisSession` 各自拥有不同的 connection lifecycle，仅在该 lifecycle 确有需要时暴露额外操作。
+
 不要向 application code 暴露 generic pipeline escape hatch。应在 Redis owner 处增加满足需求的最小 typed、bounded helper，并在那里校验 reply count、reply order 和领域解码。
+
+共享 RESP pipeline 与 transaction 应通过公共的 bounded command writer 写入。该 writer 保持完整 command framing 与 reply order，并把普通命令组成有界 buffer；单个超过目标大小的命令独占一个 write group。
 
 ## 测试
 

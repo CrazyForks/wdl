@@ -11,9 +11,8 @@ import {
   encodeS3Query,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
-  r2PhysicalKey,
   r2PhysicalPrefix,
-  stripR2PhysicalPrefix,
+  stripR2PhysicalPrefixWith,
 } from "runtime-r2-utils";
 import {
   applyCustomMetadata,
@@ -170,9 +169,10 @@ function s3ForBucket(bucket) {
  * @param {R2BucketBinding} bucket
  * @param {S3Binding} s3
  * @param {unknown} userKey
+ * @param {string} [physicalPrefix]
  */
-function objectUrl(bucket, s3, userKey) {
-  const key = r2PhysicalKey(bucket.ctx.props, userKey);
+function objectUrl(bucket, s3, userKey, physicalPrefix = r2PhysicalPrefix(bucket.ctx.props)) {
+  const key = `${physicalPrefix}${normalizeR2ObjectKey(userKey)}`;
   return `${s3.endpoint}/${s3.bucket}/${encodeS3KeyPath(key)}`;
 }
 
@@ -181,9 +181,10 @@ function objectUrl(bucket, s3, userKey) {
  * @param {S3Binding} s3
  * @param {string} key
  * @param {R2RequestMeta} [requestMeta]
+ * @param {string} [physicalPrefix]
  */
-async function headRaw(bucket, s3, key, requestMeta = {}) {
-  const res = await s3.client.fetch(objectUrl(bucket, s3, key), {
+async function headRaw(bucket, s3, key, requestMeta = {}, physicalPrefix) {
+  const res = await s3.client.fetch(objectUrl(bucket, s3, key, physicalPrefix), {
     method: "HEAD",
     headers: headersWithRequestId(requestMeta),
   });
@@ -230,7 +231,7 @@ async function deleteBatch(bucket, s3, keys, requestMeta = {}) {
       const rawKey = xmlUnescape((/<Key>([^<]*)<\/Key>/.exec(blk) || [])[1] || "?");
       let k = "?";
       try {
-        k = stripR2PhysicalPrefix(bucket.ctx.props, rawKey);
+        k = stripR2PhysicalPrefixWith(prefix, rawKey);
       } catch {}
       return k;
     }).join("; ");
@@ -376,14 +377,14 @@ export class R2Bucket extends WorkerEntrypoint {
         throw new Error(`R2 LIST failed with ${res.status}`);
       }
       const xml = await res.text();
-      const listed = parseListObjects(xml, bucket.ctx.props);
+      const listed = parseListObjects(xml, prefix);
       const include = new Set(Array.isArray(options.include) ? options.include : []);
       if (include.has("httpMetadata") || include.has("customMetadata")) {
         listed.objects = await mapWithConcurrency(
           listed.objects,
           LIST_INCLUDE_HEAD_CONCURRENCY,
           async (meta) => {
-            const head = await headRaw(bucket, s3, meta.key, requestMeta);
+            const head = await headRaw(bucket, s3, meta.key, requestMeta, prefix);
             if (!head) return meta;
             return {
               ...meta,

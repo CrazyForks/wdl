@@ -3,6 +3,7 @@ import { fnv1a32CodeUnits } from "shared-fnv1a32";
 import { BodyTooLargeError, readBoundedBytes as readRequestBoundedBytes } from "shared-bounded-body";
 import { errorMessage as sharedErrorMessage } from "shared-errors";
 import { D1_DATABASE_ID_RE, isValidRuntimeLoadNs } from "shared-ns-pattern";
+import { utf8ByteLength } from "shared-utf8";
 import {
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
@@ -51,7 +52,7 @@ const utf8Decoder = new TextDecoder();
 
 /** @param {string} value */
 function textBytes(value) {
-  return utf8Encoder.encode(value).byteLength;
+  return utf8ByteLength(value);
 }
 
 /**
@@ -250,7 +251,7 @@ export async function readD1QueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVE
 }
 
 /** @param {Response} response */
-export async function readD1QueryResponse(response) {
+export async function readD1QueryResponseWithBytes(response) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_QUERY_RESPONSE_CONTENT_TYPE) {
     throw new D1ProtocolError(
@@ -260,7 +261,8 @@ export async function readD1QueryResponse(response) {
     );
   }
   try {
-    return decodeD1QueryResponse(new Uint8Array(await response.arrayBuffer()));
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { bytes, payload: decodeD1QueryResponse(bytes) };
   } catch (err) {
     const message = sharedErrorMessage(err);
     throw new D1ProtocolError(502, "invalid-response", `D1 query response is invalid: ${message}`);

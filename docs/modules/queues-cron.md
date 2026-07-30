@@ -129,10 +129,13 @@ Queue dispatch is stream-driven rather than wall-clock driven:
 2. Scheduler repairs `queue:index:*` discovery sets from authoritative hashes, streams,
    and delayed ZSETs at startup and every `SCHEDULER_SWEEP_MS` (five minutes by
    default). The 1.5-second reconcile loop reads those indexes, removes stale members,
-   creates the fixed `wdl-scheduler` consumer group for live streams, and keeps an
-   in-memory set of known delayed queues. Writers remain responsible for updating the
-   indexes on normal writes; periodic repair bounds recovery from an interrupted
-   data-plus-index write without putting a keyspace scan on the reconcile hot path.
+   creates the fixed `wdl-scheduler` consumer group for newly registered streams, and
+   keeps an in-memory set of known delayed queues. Existing registered streams retain
+   their group without repeating `XGROUP CREATE`; an observed `NOGROUP` forces a
+   synchronous group repair before the consume loop retries. Writers remain responsible
+   for updating the indexes on normal writes; periodic repair bounds recovery from an
+   interrupted data-plus-index write without putting a keyspace scan on the reconcile
+   hot path.
    Missing optional consumer fields default to
    `max_batch_size=10`, `max_batch_timeout_ms=5000`, `max_retries=3`,
    `retry_delay_secs=0`, and no `dead_letter_queue`. Present malformed/out-of-range
@@ -142,15 +145,24 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    any aggregate reconcile failure after that healthy work is retained.
 3. The consume loop uses `XREADGROUP` to read main streams and dispatches batches up to
    `max_batch_size`, which must be in `[1, 100]`; out-of-range projections are rejected.
-   Each read caps `COUNT` to the current consumer batch-size snapshot for the active
-   stream set so one poll does not place more entries into the PEL than a current
-   consumer can dispatch in one batch.
-   PEL reap uses the same per-consumer cap when the consumer still exists; missing-
-   consumer orphan movement may still page up to the hard cap. Consume and PEL reap can
-   dispatch streams in parallel under the queue semaphore. Before each dispatch path
-   sends messages to runtime, scheduler re-reads the authoritative `queue-consumer`
-   hash for that stream and updates the in-memory registry, so a promoted consumer
-   version does not wait for the next reconcile tick once messages are selected.
+   The shared readiness read caps `COUNT` to the smallest current consumer batch-size
+   snapshot in the active stream set. A stream that fills this shared probe may perform
+   one non-blocking, single-stream read to fill its own larger cap. These optional
+   top-ups share a 100-entry in-flight budget per Scheduler replica; unavailable budget
+   never delays entries already returned by the readiness probe. Redis applies `COUNT`
+   per stream, so the base readiness reply still scales with the number of simultaneously
+   non-empty streams; the top-up budget does not bound that reply. The consume loop keeps
+   at most one batch in flight per stream on each Scheduler replica, but continues
+   polling and dispatching other streams under the shared queue semaphore instead of
+   waiting for a slow runtime handler. While any stream is in flight, reads over the
+   remaining stream set are non-blocking; an empty read waits for dispatch completion
+   or a bounded 100 ms poll before rebuilding the set. PEL reap uses the same
+   per-consumer cap when the consumer still exists; missing-consumer orphan movement
+   may still page up to the hard cap. Consume and PEL reap can dispatch streams in
+   parallel under the queue semaphore. Before each dispatch path sends messages to
+   runtime, scheduler re-reads the authoritative `queue-consumer` hash for that stream
+   and updates the in-memory registry, so a promoted consumer version does not wait for
+   the next reconcile tick once messages are selected.
    `max_batch_timeout_ms` is not a batching wait window in the current model.
 4. Runtime returns a queue outcome envelope. Explicit `ack`, explicit `retry`, batch
    retry, and implicit ack are resolved in scheduler. Retry and DLQ transitions execute
@@ -162,13 +174,25 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    dispatch bodies, go directly to DLQ without consuming the retry budget. Aggregate
    request-body-too-large responses are split and retried with smaller batches first.
 5. The delayed loop wakes from `queue-delayed-wake` and from wall-clock sleeps until the
-   next due delayed member. Each due member first takes a `queue-delayed-claim:*` lease
-   sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the winner moves it back to the main
-   stream, or to the orphan stream if the consumer vanished.
+   next due delayed member. Each pass reads authoritative consumer projections and
+   lightweight delayed head scores in bounded pipelines. Eligible queues in each
+   128-key chunk share one pipelined member read and an allocation derived from
+   `QUEUE_SWEEP_BATCH_SIZE`, with at least one slot per eligible queue and unused
+   allocation redistributed from shallow queues. The default therefore materializes at
+   most 128 members per chunk. That chunk enters claim/mutation before the next chunk is
+   loaded, so full message bodies remain bounded and active member reads do not add one
+   round trip per queue. A queue whose batched consumer projection is missing is a
+   destructive orphan candidate; immediately before claim, Scheduler re-reads that
+   queue's authoritative projection and keeps its members delayed if a consumer has
+   appeared. Each due member takes a
+   `queue-delayed-claim:*` lease sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the
+   winner moves it back to the main stream, or to the orphan stream if the consumer
+   vanished.
 6. Orphan/Pending-Entry cleanup is diagnostic and protective. It prevents consumer
    deletion or scheduler crash paths from silently losing messages, but the main queue
    stream remains the durable backlog and is intentionally not trimmed. Delayed ZSET and
-   orphan stream-tail migrations are paged by `QUEUE_SWEEP_BATCH_SIZE` (default `100`).
+   orphan stream-tail mutations are individually paged by `QUEUE_SWEEP_BATCH_SIZE`
+   (default `100`); this is separate from the cross-queue member-read allocation above.
 
 ## Redis / Storage Contracts
 

@@ -88,7 +88,7 @@ Crate root 和目录级 `mod` glue 可以保留既有的显式本地 prelude，�
 
 `wdl-rust-common`（`rust/common/`）是仓库唯一的 shared Rust helper crate。它只拥有必须跨 crate 保持一致的小 primitive，例如环境变量数字解析、日志等级解析、HTTP health probe、shutdown/in-flight tracking、通用 JSON log-line emission、wall-clock millisecond helper、短 non-cryptographic random hex suffix、稳定 non-cryptographic hash、queue Redis key builders、worker version / bundle-key parsing、Prometheus metric storage/formatting、Prometheus text response、结构化错误字段合并、internal-auth token/header matching、Redis command construction helper、中立的 Redis connection execution wrapper，以及 UTF-8 安全的字符串截断。它不能变成 service 行为的杂物箱。Axum-facing 与 Redis-facing helper 分别放在 `axum` 与 `redis` feature 之后，因此 D1/DO supervisor binaries 这类 consumer 不会在不需要这些 helper 时通过 shared crate 拉入 Axum 或异步 Redis client。
 
-`test-support` feature 暴露 Rust service tests 共用的唯一 process-environment override helper。它在同一 test process 的 module 之间串行化 override，并在 unwind 时恢复全部值；production dependency build 不启用该 feature。
+`test-support` feature 暴露 Rust service tests 共用的 process-environment override helper 和 RESP packed-command parser。Environment override 会在同一 test process 的 module 之间串行化，并在 unwind 时恢复全部值；production dependency build 不启用该 feature。
 
 当 sidecar/service 在这些方面行为不同，本地显式代码仍然更好：
 
@@ -114,7 +114,7 @@ Redis-facing 代码应显式表达 key ownership、error classification 和 sche
 
 - 分类 Redis server error 时，应使用稳定 error code（`err.code()`），不要在格式化后的错误字符串上做 substring matching。测试可以搜索 Lua source string 来保护脚本内容，但 runtime 逻辑不应这么做。
 - 直接执行 Lua 时应使用 `wdl_rust_common::redis_eval::StaticRedisScript`，使稳态调用走 EVALSHA，并通过 SCRIPT LOAD/NOSCRIPT handling 从 script-cache loss 恢复。Script body 和 replay policy 仍由 owning service 负责。
-- Pipeline 中的 Lua 应继续使用携带源码的 EVAL，除非 owner 已经有可证明安全的 partial-pipeline recovery protocol。不能在 NOSCRIPT 后重试整个 mixed pipeline，因为失败命令之前的操作可能已经提交。
+- Pipeline 中的 Lua 也应使用同一 owner。单次调用使用携带源码的 EVAL；同一脚本重复调用时，在同一 pipeline 中先追加一条忽略返回值的 `SCRIPT LOAD`，后续调用使用 EVALSHA。命令顺序保证脚本先加载，且不需要重放 pipeline。不能在 NOSCRIPT 后重试整个 mixed pipeline，因为失败命令之前的操作可能已经提交。
 - Service error type 应拥有 machine code、human message 和 HTTP status。不要在独立 server 层再从 string code 反向推导 HTTP status。
 - Redis schema marker 不符合 service contract 时应 fail closed。维护窗口 migration 已完成后，不要继续保留假的兼容、markerless adoption 或 destructive reset command。未来如果需要 migration，应作为新的显式 migration path 设计。
 - 如果某个 service 写 runtime claim、token、lease 或 generation fence，这些 fence fields 应由该 service 的 state machine 拥有，并由本地测试保护。避免在多个 module 中复制同一套 fence key derivation。

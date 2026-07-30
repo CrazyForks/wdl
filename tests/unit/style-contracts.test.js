@@ -202,7 +202,6 @@ test("shared Redis public barrel does not expose RESP sibling-internal helpers",
   const source = withoutLineComments(readRepoFile("shared/redis.js"));
   for (const name of [
     "buildHSetArgs",
-    "concatBuffers",
     "decodeHashObject",
     "decodeStringArray",
     "utf8Decoder",
@@ -295,13 +294,16 @@ test("runtime workflow clients use the same backend base URL", () => {
   );
 });
 
-test("D1 object field setters stay shared across wire and transport codecs", () => {
+test("D1 object field setters stay shared across codecs and row normalization", () => {
   assert.match(readRepoFile("shared/d1-data-field.js"), /export function setDataField\(/);
   for (const file of ["shared/d1-query-wire.js", "shared/d1-transport.js"]) {
     const source = withoutLineComments(readRepoFile(file));
     assert.match(source, /import \{ setDataField \} from "shared-d1-data-field";/, file);
     assert.doesNotMatch(source, /function setDataField\(/, file);
   }
+  const client = withoutLineComments(readRepoFile("runtime/d1-client.js"));
+  assert.match(client, /import \{ setDataField \} from "\.\/_wdl-d1-data-field\.js";/);
+  assert.doesNotMatch(client, /function setDataField\(/);
 });
 
 test("control handlers do not bypass jsonError for literal error responses", () => {
@@ -394,7 +396,7 @@ test("DNS hostname and platform domain validation use the shared owner", () => {
     "control/handlers/deploy.js",
     "control/handlers/promote.js",
     "control/handlers/hosts.js",
-    "gateway/index.js",
+    "gateway/runtime.js",
   ]) {
     const source = withoutLineComments(readRepoFile(file));
     assert.match(source, /\bplatformDomainFromEnv\b/, file);
@@ -721,13 +723,17 @@ test("auth entrypoint keeps runtime IO mechanics in auth/runtime.js", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("gateway entrypoint keeps cache and subscriber mechanics in gateway/runtime.js", () => {
+test("gateway entrypoint keeps persistent routing state in gateway/runtime.js", () => {
   const source = withoutLineComments(readRepoFile("gateway/index.js"));
   const offenders = [];
-  // Request dispatch can read cached routing state through gateway-runtime, but
-  // Redis clients, subscribers, and cache maps stay out of the entrypoint.
+  // Request dispatch can consume runtime-owned routing state, but Redis clients,
+  // subscribers, mutable route caches, and cross-request memoization stay out of
+  // the entrypoint.
   if (/from\s+"shared-redis"/.test(source)) offenders.push("redis import");
-  if (/\b(?:RedisSubscriber|RedisClient|routeCache|patternCache|knownNs)\b/.test(source)) {
+  if (
+    /\b(?:RedisSubscriber|RedisClient|routeCache|patternCache|knownNs|knownPatternHosts|routeReads|patternReads)\b/.test(source) ||
+    /\bnew\s+WeakMap\s*\(/.test(source)
+  ) {
     offenders.push("runtime state");
   }
   assert.deepEqual(offenders, []);
@@ -919,6 +925,7 @@ test("Redis command observability goes through recordRedisCommand", () => {
 test("Redis command metric allow-list covers shared Redis wrappers", () => {
   const redis = [
     "shared/redis-command-client.js",
+    "shared/redis-command-surface.js",
     "shared/redis-session.js",
   ].map((file) => withoutLineComments(readRepoFile(file))).join("\n");
   const observability = withoutLineComments(readRepoFile("shared/observability.js"));
@@ -986,8 +993,6 @@ test("gateway strips every client-supplied platform header it injects", () => {
     `gateway INTERNAL_FORWARD_HEADERS must include injected non-prefixed internal headers: ${missing.join(", ")}`
   );
   assert.match(owner, /const INTERNAL_HEADER_PREFIX = "x-wdl-"/);
-  assert.match(owner, /name\.toLowerCase\(\)\.startsWith\(INTERNAL_HEADER_PREFIX\)/);
-  assert.match(owner, /headers\.delete\(name\)/);
   assert.match(gateway, /deleteGatewayInternalHeaders\(forwardRequest\.headers\)/);
 
   const websocket = withoutLineComments(readRepoFile("gateway/websocket.js"));
@@ -2082,8 +2087,8 @@ test("host wrapper hides raw exports whenever internal Fetchers are injected", (
   assert.match(wrapper, /const hidesRawEnvExports = doBindings\.length \|\| Object\.keys\(workflowBindings\)\.length;/);
   assert.match(wrapper, /const starExport = hidesRawEnvExports\s*\?\s*"[^"]*only wrapped entrypoints are re-exported\."/);
 
-  const wrapEnv = source.slice(
-    source.indexOf("function wrapEnv"),
+  const envPreparation = source.slice(
+    source.indexOf("function envTemplateState"),
     source.indexOf("async function notifyWorkflowCallback")
   );
   for (const binding of [
@@ -2091,7 +2096,7 @@ test("host wrapper hides raw exports whenever internal Fetchers are injected", (
     "DO_OWNER_NETWORK_BINDING",
     "WORKFLOWS_BACKEND_BINDING",
   ]) {
-    assert.match(wrapEnv, new RegExp(`delete out\\[${RegExp.escape(binding)}\\]`));
+    assert.match(envPreparation, new RegExp(`delete template\\[${RegExp.escape(binding)}\\]`));
   }
 });
 

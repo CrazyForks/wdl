@@ -144,6 +144,7 @@ const {
 } = mod;
 const {
   estimateFinalWorkerLoaderCodeBytes,
+  estimateWorkerLoaderUserCodeBytes,
   injectRuntimeModulesForHostBindings,
 } = codeBudgetMod;
 
@@ -1087,10 +1088,11 @@ test("decodeRuntimeLoadPayload: reads length-prefixed bundle bytes and secrets",
     worker_secrets: { A: "worker", B: "local" },
   });
 
-  const decoded = decodeRuntimeLoadPayload(bufferToArrayBuffer(payload));
+  const payloadBuffer = bufferToArrayBuffer(payload);
+  const decoded = decodeRuntimeLoadPayload(payloadBuffer);
   assert.equal(new TextDecoder().decode(decoded.bundle["worker.js"]), "export default {};");
   assert.deepEqual([...decoded.bundle["data.bin"]], [0, 1, 255]);
-  assert.equal(decoded.bundle["data.bin"].buffer.byteLength, 3);
+  assert.equal(decoded.bundle["data.bin"].buffer, payloadBuffer);
   assert.deepEqual(decoded.ns_secrets, { A: "ns" });
   assert.deepEqual(decoded.worker_secrets, { A: "worker", B: "local" });
 });
@@ -1109,6 +1111,7 @@ test("decodeRuntimeLoadPayload: preserves magic bundle keys as data entries", ()
   });
 
   const decoded = decodeRuntimeLoadPayload(bufferToArrayBuffer(payload));
+  assert.equal(Object.getPrototypeOf(decoded.bundle), null);
   assert.equal(Object.hasOwn(decoded.bundle, "__proto__"), true);
   assert.equal(new TextDecoder().decode(decoded.bundle.__proto__), "magic-entry");
 });
@@ -1647,6 +1650,73 @@ test("workerLoader code estimator matches runtime wrapper injection exactly", ()
   assert.match(/** @type {string} */ (workerCode.modules["_wdl-wrapper.js"]), new RegExp(entrypoint));
 });
 
+test("workerLoader code estimator reuses an exact user-module byte subtotal", () => {
+  const source = 'export default { fetch() { return new Response("cafe\u0301"); } };';
+  const data = new Uint8Array([0, 1, 2, 255]);
+  const meta = {
+    mainModule: "src/worker.js",
+    modules: {
+      "src/worker.js": { type: "module" },
+      "asset.bin": { type: "data" },
+    },
+    bindings: { CACHE: { type: "kv", id: "cache" } },
+  };
+  const normalized = [
+    ["src/worker.js", Buffer.from(source)],
+    ["asset.bin", data],
+  ];
+  const userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta });
+
+  assert.equal(userCodeBytes, Buffer.byteLength(source, "utf8") + data.byteLength);
+  assert.equal(
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized,
+      meta,
+      runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+      userCodeBytes,
+    }),
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized,
+      meta,
+      runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+    })
+  );
+});
+
+test("workerLoader code estimator excludes decoded ESM, CommonJS, and text module BOMs", () => {
+  const moduleSource = Buffer.from("\ufeffexport default {};", "utf8");
+  const commonJsSource = Buffer.from("\ufeffmodule.exports = {};", "utf8");
+  const textSource = Buffer.from("\ufeffplain text", "utf8");
+  const data = new Uint8Array([0xef, 0xbb, 0xbf, 1]);
+  const meta = {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": { type: "module" },
+      "legacy.cjs": { type: "cjs" },
+      "note.txt": { type: "text" },
+      "asset.bin": { type: "data" },
+    },
+  };
+
+  assert.equal(
+    estimateWorkerLoaderUserCodeBytes({
+      normalized: [
+        ["worker.js", moduleSource],
+        ["legacy.cjs", commonJsSource],
+        ["note.txt", textSource],
+        ["asset.bin", data],
+      ],
+      meta,
+    }),
+    Buffer.byteLength("export default {};", "utf8") +
+      Buffer.byteLength("module.exports = {};", "utf8") +
+      Buffer.byteLength("plain text", "utf8") +
+      data.byteLength
+  );
+});
+
 test("workerLoader code estimator does not rewrite CommonJS workflow strings", () => {
   const source = 'module.exports = { label: "cloudflare:workflows" };';
   const meta = {
@@ -1719,7 +1789,9 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
   assert.equal(/** @type {any} */ (workerCode.modules)["src/worker.js"], "import x from './lib.js'; export default { fetch() { return x; } };");
   assert.equal(/** @type {any} */ (workerCode.modules)["src/lib.js"], "export default 1;");
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-data-field.js"], /setDataField/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-utf8.js"], /utf8ByteLength/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-params.js"], /normalizeD1Param/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-params.js"], /from "\.\/_wdl-utf8\.js";/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-sql-splitter.js"], /splitSqlStatements/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /decodeD1Transport/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /from "\.\/_wdl-d1-data-field\.js";/);

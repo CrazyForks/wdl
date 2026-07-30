@@ -28,7 +28,7 @@ Rust 服务（`scheduler`、`redis-proxy`、`workflows`、`supervisor`）使用�
 Live tail 是 activation-gated pipe，不是持久日志系统：
 
 - workerd tails 把 console、exception、fetch、scheduled 和 queue event 交给 runtime tail worker。Runtime 始终保留结构化 stdout 作为持久平台日志路径。
-- `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache，避免 inactive worker 每个 event 都付出 Redis write。
+- `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache；fresh miss 会在 event 到达 redis-proxy 前跳过 envelope payload 构造和后台 append work。
 - Control 为每个 SSE tail session 做授权，在 `logs:tail:active` 写入/刷新 worker gate，读取 `logs:<ns>:<worker>:s`，并输出 SSE frame。Gate 续期与 admission 共用一个原子操作，因此并发 session 不会突破 10,000-field active-gate 上限。Reconnect 会重新走正常 auth。
 - redis-proxy 写入有界 stream entry，使用 `MAXLEN ~ 500` 并刷新 TTL。这个 stream 用来衔接 live consumer，不用于保存历史。
 - 单 worker `wdl tail` 可以用 `Last-Event-ID` 在 stream 窗口内 resume。多 worker tail 是 fan-in session；reconnect 从新会话开始，因为单个 SSE cursor 无法表达每个 worker 一个 cursor。
@@ -63,7 +63,7 @@ Tail streams 使用有界 `MAXLEN ~ 500`，并在写入时刷新 TTL。它们是
 ## Ownership / 并发 / 失败语义
 
 - 结构化 stdout 是持久平台日志的事实来源。
-- 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过 per-event stream append work。
+- 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过 tail-envelope payload 和 stream-append work。
 - Active tail session 是有时限的授权租约，必须通过正常 auth reconnect。`LOG_TAIL_MAX_SESSION_MS` 设置 control-side 最大时长；非法值或空值会回退到 15 分钟。
 - 当前 stock workerd 的行为（上游 issue [#6832](https://github.com/cloudflare/workerd/issues/6832) 跟踪）不会可靠地在 client disconnect 时触发 async response-body `ReadableStream.cancel()`。WDL 把它当作永久兼容边界处理：Control 的独立 watchdog 不是等待上游修复的临时 workaround。max-session watchdog 负责 reauthorization 上界，idle-pull watchdog 在 SSE body 连续三个 keepalive 周期没有被 pull 时关闭 session。活跃客户端会因为每次 heartbeat 腾出 queue 空间而自然按 keepalive 粒度继续 pull；遗弃客户端会停止 pull，因此不需要等完整 session lifetime 才清理。TCP 连接还在但应用层长时间不读的客户端可能被关闭，应自行 reconnect。
 - 与 activation race 的 tail event 可以丢失。
@@ -94,7 +94,7 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 - `x-request-id` 尽可能跨 gateway、control/runtime、loaded worker、D1 和 Workflows 传播。缺失的 inbound id 会在入口生成；header adapter 只考虑第一个逗号分隔 token，包含 visible ASCII 以外字节、引号、反斜杠或超过 128 字节的 id 会被当成缺失。使用 `shared/request-scope.js` 的 JS entrypoint 会在 response 中 echo sanitize 后的 id，并在 `request_complete` 日志中记录 `request_id`；Rust sidecar 会 sanitize inbound id，并在 request middleware 拥有 completion 时记录。Control 的 Redis `PUBLISH` 路径只在本地日志记录该 id，不把它放进 pub/sub payload。
 - 普通 loaded-worker handler 的 host facade 会直接获得 request id。持久化 class entrypoint 在 wrapped result settle 前使用一个小型可变诊断 context；wrapper 会检查 callable `then` 并可能返回 normalized Promise 以安排 cleanup，因此 concurrent 或 re-entrant class call 可能观察到另一次 invocation 的 id。do-runtime 的私有 fetch、alarm 和 RPC dispatch 会在 `x-request-id` 中携带可用 id。这只是 best-effort 的诊断关联，不是授权或完整性边界。
 - 日志字段使用 snake_case。只有 `level=error` 写入 stderr；debug/info/warn JSON log line 都写入 stdout，这样 JS、Rust 和 embedded workerd shim 的日志路由保持一致。
-- 内部运维日志，包括 system-worker cleanup 日志和防御性的 Redis callback warning，也使用同一套单行 JSON envelope：`ts`、`service`、`level`、`event`，再加 snake_case 字段。JS 服务使用 `shared/observability.js`；Rust 服务使用 `wdl-rust-common::log::emit_log_line`。错误文本写入 `error_message`；无法转成文本的 throwable 降级为 `Unknown error`，不能反向覆盖原始失败。不得输出 secret 值、raw credential、token material、raw Redis key 或无界 payload。
+- 内部运维日志，包括 system-worker cleanup 日志和防御性的 Redis callback warning，也使用同一套单行 JSON envelope：`ts`、`service`、`level`、`event`，再加 snake_case 字段。JS 服务使用 `shared/observability.js`；Rust 服务使用 `wdl-rust-common::log::emit_log_line`。错误文本写入 `error_message`；无法转成文本的 throwable 降级为 `Unknown error`，不能反向覆盖原始失败。普通值使用原生 JSON 语义，包括重复但不构成循环的对象引用；fallback 会把 BigInt 转成字符串，并把 ancestor cycle 标记为 `[Circular]`。Callable root `toJSON` 字段会被忽略，caller 字段不能借此替换日志 envelope。如果读取字段、nested getter 或 nested `toJSON()` hook 导致无法序列化，则只输出核心 `ts` / `service` / `level` / `event` envelope 和序列化 `error_message`。不得输出 secret 值、raw credential、token material、raw Redis key 或无界 payload。
 - 产品 API response body 默认使用 camelCase，除非 endpoint 明确记录不同 wire contract。
 - Metrics 只使用有界枚举 label。
 - 暴露 request metrics 的 Rust HTTP sidecar 使用同一组 `requests`、`request_duration_ms` 和 `request_errors` metric family，以及有界的 `service`/`route`/`status` labels；per-route error context 只进入 `request_complete` 日志中的 `error_code` / `error_message`。

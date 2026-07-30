@@ -376,6 +376,18 @@ test("R2 host single-object errors do not expose backend response bodies", async
 test("R2 host list include hydrates metadata with per-object HEAD", async () => {
   /** @type {Array<{ url: string, init: any }>} */
   const calls = [];
+  let namespaceReads = 0;
+  let bucketNameReads = 0;
+  const props = {
+    get ns() {
+      namespaceReads += 1;
+      return "demo";
+    },
+    get bucketName() {
+      bucketNameReads += 1;
+      return "uploads";
+    },
+  };
   const restore = installRecordingR2FetchMock(calls, {
     response: async (url) => {
       if (String(url).includes("list-type=2")) {
@@ -406,7 +418,7 @@ test("R2 host list include hydrates metadata with per-object HEAD", async () => 
     },
   });
   try {
-    const listed = await makeR2Bucket().list({
+    const listed = await makeR2Bucket({}, props).list({
       include: ["httpMetadata", "customMetadata"],
     });
 
@@ -416,6 +428,8 @@ test("R2 host list include hydrates metadata with per-object HEAD", async () => 
     assert.equal(listed.objects[0].key, "a&b.txt");
     assert.deepEqual(listed.objects[0].httpMetadata, { contentType: "text/plain" });
     assert.deepEqual(listed.objects[0].customMetadata, { color: "blue" });
+    assert.equal(namespaceReads, 1);
+    assert.equal(bucketNameReads, 1);
   } finally {
     restore();
   }
@@ -456,6 +470,41 @@ test("R2 host list parses escaped keys, prefixes, truncation cursor, and timesta
     assert.equal(listed.objects[0].etag, "etag&1");
     assert.equal(listed.objects[0].httpEtag, "\"etag&1\"");
     assert.equal(listed.objects[0].uploaded, Date.parse("2026-04-26T00:00:00.000Z"));
+  } finally {
+    restore();
+  }
+});
+
+test("R2 list resolves the binding prefix once per operation", async () => {
+  let namespaceReads = 0;
+  let bucketNameReads = 0;
+  const props = {
+    get ns() {
+      namespaceReads += 1;
+      return "demo";
+    },
+    get bucketName() {
+      bucketNameReads += 1;
+      return "uploads";
+    },
+  };
+  const restore = installR2FetchMock(async () => new Response([
+    "<ListBucketResult>",
+    "<Contents><Key>r2/demo/uploads/a.txt</Key></Contents>",
+    "<Contents><Key>r2/demo/uploads/b.txt</Key></Contents>",
+    "<CommonPrefixes><Prefix>r2/demo/uploads/folder/</Prefix></CommonPrefixes>",
+    "</ListBucketResult>",
+  ].join("")));
+
+  try {
+    const listed = await makeR2Bucket({}, props).list({ delimiter: "/" });
+    assert.deepEqual(
+      listed.objects.map((/** @type {{ key: string }} */ object) => object.key),
+      ["a.txt", "b.txt"]
+    );
+    assert.deepEqual(listed.delimitedPrefixes, ["folder/"]);
+    assert.equal(namespaceReads, 1);
+    assert.equal(bucketNameReads, 1);
   } finally {
     restore();
   }

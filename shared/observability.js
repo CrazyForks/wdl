@@ -51,9 +51,15 @@ function stableLabelEntries(labels) {
  * @returns {string}
  */
 function metricKey(name, labels) {
-  return `${name}|${stableLabelEntries(labels)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(",")}`;
+  const keys = Object.keys(labels);
+  keys.sort((a, b) => a.localeCompare(b));
+  let out = `${name}|`;
+  for (let i = 0; i < keys.length; i += 1) {
+    if (i > 0) out += ",";
+    const key = keys[i];
+    out += `${key}=${labels[key]}`;
+  }
+  return out;
 }
 
 /**
@@ -82,17 +88,45 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/** @param {unknown} value */
-function safeJsonStringify(value) {
-  const seen = new WeakSet();
-  return JSON.stringify(value, (_key, fieldValue) => {
-    if (typeof fieldValue === "bigint") return fieldValue.toString();
-    if (fieldValue && typeof fieldValue === "object") {
-      if (seen.has(fieldValue)) return "[Circular]";
-      seen.add(fieldValue);
-    }
-    return fieldValue;
+/** @param {string} ts @param {string} service @param {string} level @param {string} event */
+function serializationFallback(ts, service, level, event) {
+  return JSON.stringify({
+    ts,
+    service,
+    level,
+    event,
+    error_message: "Structured log fields could not be serialized",
   });
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} ts
+ * @param {string} service
+ * @param {string} level
+ * @param {string} event
+ */
+function safeJsonStringify(value, ts, service, level, event) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    /** @type {object[]} */
+    const ancestors = [];
+    try {
+      return JSON.stringify(value, function replaceUnsupported(_key, fieldValue) {
+        if (typeof fieldValue === "bigint") return fieldValue.toString();
+        if (!fieldValue || typeof fieldValue !== "object") return fieldValue;
+        while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+          ancestors.pop();
+        }
+        if (ancestors.includes(fieldValue)) return "[Circular]";
+        ancestors.push(fieldValue);
+        return fieldValue;
+      });
+    } catch {
+      return serializationFallback(ts, service, level, event);
+    }
+  }
 }
 
 /**
@@ -103,14 +137,23 @@ function safeJsonStringify(value) {
  * @returns {void}
  */
 function emitStructuredLogLine(service, level, event, fields = {}) {
-  const payload = {
-    ts: nowIso(),
-    service,
-    level,
-    event,
-    ...fields,
-  };
-  const line = safeJsonStringify(payload);
+  const ts = nowIso();
+  let line;
+  try {
+    const payload = /** @type {Record<string, unknown>} */ ({
+      ts,
+      service,
+      level,
+      event,
+      ...fields,
+    });
+    if (typeof payload.toJSON === "function") {
+      Object.defineProperty(payload, "toJSON", { value: undefined });
+    }
+    line = safeJsonStringify(payload, ts, service, level, event);
+  } catch {
+    line = serializationFallback(ts, service, level, event);
+  }
   if (level === "error") console.error(line);
   else console.log(line);
 }
@@ -339,6 +382,7 @@ const REDIS_COMMAND_LABELS = new Set([
   "EXEC",
   "EXISTS",
   "EXISTS_PIPELINE",
+  "EXISTS_HSTRLEN_PIPELINE",
   "EXISTS_XRANGE_PIPELINE",
   "EXPIREAT",
   "GET",
@@ -352,10 +396,14 @@ const REDIS_COMMAND_LABELS = new Set([
   "HGETALL",
   "HGETALL_GET_PIPELINE",
   "HGETALL_GET_SMEMBERS_PIPELINE",
+  "HGETALL_HKEYS_PIPELINE",
   "HGETALL_PIPELINE",
   "HGETALL_SMEMBERS_PIPELINE",
   "HGETEX",
+  "HGET_HGETALL_PIPELINE",
+  "HGET_SMEMBERS_PIPELINE",
   "HGET_PIPELINE",
+  "HGET_ZRANGE_PIPELINE",
   "HKEYS",
   "HLEN",
   "HMGET",
@@ -388,7 +436,8 @@ const REDIS_COMMAND_LABELS = new Set([
   "ZADD",
   "ZCARD",
   "ZRANGE",
-  "ZRANGE_PIPELINE",
+  "ZRANGE_EXISTS_PIPELINE",
+  "ZRANGE_HGETALL_PIPELINE",
   "ZRANGEBYSCORE",
   "ZREM",
 ]);

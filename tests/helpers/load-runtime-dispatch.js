@@ -16,6 +16,7 @@ const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_UTF8_URL = repositoryFileUrl("shared/utf8.js");
 const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
 const METRICS_MOCK_URL = moduleDataUrl(`
 export const metrics = {
@@ -31,9 +32,12 @@ let dispatchPromise = null;
 export async function loadRuntimeDispatch() {
   if (dispatchPromise) return dispatchPromise;
   dispatchPromise = (async () => {
-    const workflowJsonUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-json.js");
+    const workflowJsonUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-json.js", [
+      [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
+    ]);
     const workflowReplayCacheUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-replay-cache.js", [
       [/from "runtime-metrics";/, `from ${JSON.stringify(METRICS_MOCK_URL)};`],
+      [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
     const workflowStepUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-step.js", [
       [/from "runtime-dispatch-workflow-json";/g, `from ${JSON.stringify(workflowJsonUrl)};`],
@@ -43,9 +47,11 @@ export async function loadRuntimeDispatch() {
       [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
       [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
       [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
+      [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
 
-    const [runtimeDispatchWorkflowStep, runtimeDispatch] = await Promise.all([
+    const [runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep, runtimeDispatch] = await Promise.all([
+      import(workflowReplayCacheUrl),
       import(workflowStepUrl),
       importRepositoryModule("runtime/dispatch.js", [
         [/from "shared-respond";/, `from ${JSON.stringify(RESPOND_URL)};`],
@@ -60,7 +66,7 @@ export async function loadRuntimeDispatch() {
         [/from "runtime-tail-forwarder";/, `from ${JSON.stringify(tailForwarderUrl)};`],
       ]),
     ]);
-    return { runtimeDispatch, runtimeDispatchWorkflowStep };
+    return { runtimeDispatch, runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep };
   })();
   return dispatchPromise;
 }

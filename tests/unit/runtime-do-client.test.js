@@ -42,6 +42,29 @@ function headerValue(headers, name) {
 }
 
 /**
+ * @param {Record<string, string>} props
+ * @param {string} objectName
+ * @param {string} method
+ * @param {unknown[]} args
+ */
+function referenceRpcInvokeBody(props, objectName, method, args) {
+  const metadataBytes = new TextEncoder().encode(JSON.stringify({
+    ns: props.ns,
+    worker: props.worker,
+    version: props.version,
+    doStorageId: props.doStorageId,
+    className: props.className,
+    objectName,
+    kind: "rpc",
+    rpc: { method, args },
+  }));
+  const envelope = new Uint8Array(4 + metadataBytes.byteLength);
+  new DataView(envelope.buffer).setUint32(0, metadataBytes.byteLength, false);
+  envelope.set(metadataBytes, 4);
+  return envelope;
+}
+
+/**
  * @template T
  * @param {Promise<T>} promise
  * @param {string} message
@@ -302,6 +325,22 @@ test("DurableObjectNamespace fetch rejects oversized aggregate headers before tr
   );
 });
 
+test("DO requestSpec header budget counts exact UTF-8 bytes", async () => {
+  const exactValue = `${"\u00e9".repeat((MAX_DO_REQUEST_HEADER_BYTES - 2) / 2)}a`;
+  const exact = new Request("https://demo.workers.example/send", {
+    headers: { x: exactValue },
+  });
+  await assert.doesNotReject(() => requestSpec(exact, null));
+
+  const oversized = new Request("https://demo.workers.example/send", {
+    headers: { x: `${exactValue}\u00e9` },
+  });
+  await assert.rejects(
+    () => requestSpec(oversized, null),
+    /fetch headers exceed 65536 bytes/
+  );
+});
+
 test("DurableObjectNamespace fetch rejects oversized invoke envelopes before transport", async () => {
   const backend = {
     async fetch() {
@@ -528,6 +567,34 @@ test("DO RPC snapshots tenant arguments once before sizing and encoding", () => 
   const { metadata } = decodeDoEnvelope(envelope);
   assert.equal(reads, 1);
   assert.equal(/** @type {any} */ (metadata).rpc.args[0].payload, "stable");
+});
+
+test("DO RPC envelope preserves canonical metadata bytes", () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+  for (const { objectName, method, args } of [
+    { objectName: "room-a", method: "ping", args: [] },
+    {
+      objectName: "房间-1",
+      method: "save",
+      args: [{ text: "line\n雪", nested: [true, null, 1.25] }],
+    },
+    {
+      objectName: "room-large",
+      method: "append",
+      args: ["abc雪".repeat(4096)],
+    },
+  ]) {
+    assert.deepEqual(
+      rpcInvokeBody(props, objectName, method, args),
+      referenceRpcInvokeBody(props, objectName, method, args),
+    );
+  }
 });
 
 test("DurableObjectNamespace RPC rejects oversized args before transport", async () => {
@@ -909,32 +976,47 @@ test("DurableObjectNamespace strips owner metadata with patched Headers methods"
   assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
 });
 
-test("DO requestSpec header budget uses captured TextEncoder.encode", async () => {
-  const textEncode = TextEncoder.prototype.encode;
-  let hostileEncodeCalls = 0;
+test("DO requestSpec header budget uses captured UTF-8 intrinsics", async () => {
+  const textEncodeInto = TextEncoder.prototype.encodeInto;
+  const stringCharCodeAt = String.prototype.charCodeAt;
+  let hostileEncodeIntoCalls = 0;
+  let hostileCharCodeAtCalls = 0;
   const request = new Request("https://demo.workers.example/send", {
-    headers: { "x-oversized": "a".repeat(MAX_DO_REQUEST_HEADER_BYTES + 1) },
+    headers: { "x-oversized": "\u00e9".repeat((MAX_DO_REQUEST_HEADER_BYTES / 2) + 1) },
   });
 
   await withMockedProperty(
     TextEncoder.prototype,
-    "encode",
+    "encodeInto",
     /** @this {TextEncoder} */
-    function targetedEncode(value = "") {
-      if (value.length > MAX_DO_REQUEST_HEADER_BYTES) {
-        hostileEncodeCalls += 1;
-        return new Uint8Array();
+    function targetedEncodeInto(value = "", destination) {
+      if (value.length > MAX_DO_REQUEST_HEADER_BYTES / 2) {
+        hostileEncodeIntoCalls += 1;
+        return { read: value.length, written: 0 };
       }
-      return Reflect.apply(textEncode, this, [value]);
+      return Reflect.apply(textEncodeInto, this, [value, destination]);
     },
-    async () => {
-      await assert.rejects(
-        () => requestSpec(request, null),
-        /fetch headers exceed 65536 bytes/
-      );
-    }
+    () => withMockedProperty(
+      String.prototype,
+      "charCodeAt",
+      /** @this {string} */
+      function targetedCharCodeAt(index) {
+        if (this.length > MAX_DO_REQUEST_HEADER_BYTES / 2) {
+          hostileCharCodeAtCalls += 1;
+          return 0;
+        }
+        return Reflect.apply(stringCharCodeAt, this, [index]);
+      },
+      async () => {
+        await assert.rejects(
+          () => requestSpec(request, null),
+          /fetch headers exceed 65536 bytes/
+        );
+      }
+    )
   );
-  assert.equal(hostileEncodeCalls, 0);
+  assert.equal(hostileEncodeIntoCalls, 0);
+  assert.equal(hostileCharCodeAtCalls, 0);
 });
 
 test("DO request method and upgrade decisions use captured string normalization", async () => {

@@ -47,45 +47,6 @@ pub(crate) struct AppError {
 
 pub(crate) type AppResult<T> = Result<T, AppError>;
 
-#[cfg(test)]
-pub(crate) mod test_support {
-    fn read_resp_usize(packed: &[u8], offset: &mut usize) -> usize {
-        let start = *offset;
-        while &packed[*offset..*offset + 2] != b"\r\n" {
-            *offset += 1;
-        }
-        let value = std::str::from_utf8(&packed[start..*offset])
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        *offset += 2;
-        value
-    }
-
-    pub(crate) fn parse_packed_commands(packed: &[u8]) -> Vec<Vec<String>> {
-        let mut offset = 0_usize;
-        let mut commands = Vec::new();
-        while offset < packed.len() {
-            assert_eq!(packed[offset], b'*');
-            offset += 1;
-            let count = read_resp_usize(packed, &mut offset);
-            let mut command = Vec::new();
-            for _ in 0..count {
-                assert_eq!(packed[offset], b'$');
-                offset += 1;
-                let len = read_resp_usize(packed, &mut offset);
-                let end = offset + len;
-                command.push(String::from_utf8(packed[offset..end].to_vec()).unwrap());
-                offset = end;
-                assert_eq!(&packed[offset..offset + 2], b"\r\n");
-                offset += 2;
-            }
-            commands.push(command);
-        }
-        commands
-    }
-}
-
 impl From<redis::RedisError> for AppError {
     fn from(err: redis::RedisError) -> Self {
         Self {
@@ -238,13 +199,13 @@ fn record_request_complete(
     let elapsed = started_at.elapsed();
     let duration_ms = elapsed.as_secs_f64() * 1000.0;
     let log_duration_ms = duration_ms_for_log(elapsed);
-    let status_label = status.as_u16().to_string();
+    let status_label = status.as_str();
     state.metrics.increment(
         "requests",
         &[
             ("service", SERVICE),
             ("route", route),
-            ("status", &status_label),
+            ("status", status_label),
         ],
         1.0,
     );
@@ -259,7 +220,7 @@ fn record_request_complete(
             &[
                 ("service", SERVICE),
                 ("route", route),
-                ("status", &status_label),
+                ("status", status_label),
             ],
             1.0,
         );

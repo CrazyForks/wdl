@@ -1,9 +1,11 @@
+import { utf8ByteLength } from "shared-utf8";
+
 export const WORKFLOW_RESULT_BYTES_MAX = 1024 * 1024;
 export const WORKFLOW_BACKEND_REQUEST_BYTES_MAX = 2 * 1024 * 1024;
 export const WORKFLOW_PAYLOAD_TOO_LARGE_CODE = "workflow_payload_too_large";
+export const WORKFLOW_JSON_CONTAINER_DEPTH_MAX = 127;
 const WORKFLOW_JSON_ENCODE_CHARS = 8192;
 const WORKFLOW_JSON_FLUSH_CHARS = 8192;
-const utf8Encoder = new TextEncoder();
 
 /**
  * @param {string} code
@@ -26,13 +28,27 @@ function workflowPayloadTooLarge(kind, maxBytes = WORKFLOW_RESULT_BYTES_MAX) {
   );
 }
 
+/** @param {string} kind @param {string} message */
+function invalidWorkflowJson(kind, message) {
+  return new TypeError(`Workflow ${kind} ${message}`);
+}
+
 /**
  * @param {unknown} value
  * @param {string} kind
  * @param {number} [maxBytes]
  * @param {Record<string, { kind: string, maxBytes: number }>} [fieldCaps]
+ * @param {Map<string, string>} [capturedFields]
+ * @param {number} [outerDepth]
  */
-export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BYTES_MAX, fieldCaps = {}) {
+export function stringifyWorkflowJson(
+  value,
+  kind,
+  maxBytes = WORKFLOW_RESULT_BYTES_MAX,
+  fieldCaps = {},
+  capturedFields = undefined,
+  outerDepth = 0
+) {
   /** @type {string[]} */
   const parts = [];
   /** @type {Set<object>} */
@@ -46,7 +62,7 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
       const last = part.charCodeAt(end - 1);
       if (end < part.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
       const chunk = part.slice(offset, end);
-      bytes += utf8Encoder.encode(chunk).byteLength;
+      bytes += utf8ByteLength(chunk);
       if (bytes > maxBytes) throw workflowPayloadTooLarge(kind, maxBytes);
       parts.push(chunk);
       offset = end;
@@ -110,14 +126,10 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
           i += 1;
           flushPlainIfNeeded(i + 1);
         } else {
-          flush(i);
-          push(`\\u${code.toString(16).padStart(4, "0")}`);
-          start = i + 1;
+          throw invalidWorkflowJson(kind, "contains an unpaired UTF-16 surrogate");
         }
       } else if (code >= 0xdc00 && code <= 0xdfff) {
-        flush(i);
-        push(`\\u${code.toString(16).padStart(4, "0")}`);
-        start = i + 1;
+        throw invalidWorkflowJson(kind, "contains an unpaired UTF-16 surrogate");
       } else {
         flushPlainIfNeeded(i + 1);
       }
@@ -180,71 +192,115 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
     return Number(value);
   };
   /**
+   * @param {Record<string, unknown> | unknown[]} entry
+   * @param {boolean} array
+   * @param {boolean} topLevel
+   * @param {number} depth
+   */
+  const writeContainer = (entry, array, topLevel, depth) => {
+    if (depth > WORKFLOW_JSON_CONTAINER_DEPTH_MAX) {
+      throw invalidWorkflowJson(
+        kind,
+        `exceeds the ${WORKFLOW_JSON_CONTAINER_DEPTH_MAX}-level JSON nesting limit`
+      );
+    }
+    if (seen.has(entry)) throw new TypeError("Converting circular structure to JSON");
+    seen.add(entry);
+    if (array) {
+      const values = /** @type {unknown[]} */ (entry);
+      push("[");
+      for (let i = 0; i < values.length; i += 1) {
+        if (i > 0) push(",");
+        if (!writeValue(values[i], String(i), false, false, depth)) push("null");
+      }
+      push("]");
+    } else {
+      const objectValue = /** @type {Record<string, unknown>} */ (entry);
+      push("{");
+      let first = true;
+      for (const prop of Object.keys(objectValue)) {
+        const child = normalize(objectValue[prop], prop);
+        if (!writable(child)) continue;
+        if (!first) push(",");
+        first = false;
+        writeString(prop);
+        push(":");
+        const beforeValue = bytes;
+        const beforeParts = parts.length;
+        writeValue(child, prop, true, false, depth);
+        if (topLevel && fieldCaps[prop] && bytes - beforeValue > fieldCaps[prop].maxBytes) {
+          throw workflowPayloadTooLarge(fieldCaps[prop].kind, fieldCaps[prop].maxBytes);
+        }
+        if (topLevel && capturedFields?.has(prop)) {
+          capturedFields.set(prop, parts.slice(beforeParts).join(""));
+        }
+      }
+      push("}");
+    }
+    seen.delete(entry);
+  };
+  /**
    * @param {unknown} entry
    * @param {string} [key]
    * @param {boolean} [alreadyNormalized]
+   * @param {boolean} [topLevel]
+   * @param {number} [depth]
    */
-  const writeValue = (entry, key = "", alreadyNormalized = false) => {
+  const writeValue = (
+    entry,
+    key = "",
+    alreadyNormalized = false,
+    topLevel = false,
+    depth = outerDepth
+  ) => {
     const normalized = alreadyNormalized ? entry : normalize(entry, key);
     if (!writable(normalized)) return false;
     if (normalized === null) {
       push("null");
-    } else if (isBigIntWrapper(normalized)) {
+    } else if (typeof normalized === "string") {
+      writeString(normalized);
+    } else if (typeof normalized === "number") {
+      push(Number.isFinite(normalized) ? String(normalized) : "null");
+    } else if (typeof normalized === "boolean") {
+      push(normalized ? "true" : "false");
+    } else if (typeof normalized === "bigint") {
       throw new TypeError("Do not know how to serialize a BigInt");
-    } else if (boxedValue(normalized, String.prototype.valueOf).ok) {
-      writeString(String(normalized));
-    } else if (boxedValue(normalized, Number.prototype.valueOf).ok) {
-      const value = numberWrapperValue(normalized);
-      push(Number.isFinite(value) ? String(value) : "null");
+    } else if (Array.isArray(normalized)) {
+      writeContainer(normalized, true, topLevel, depth + 1);
     } else {
-      const boxedBoolean = boxedValue(normalized, Boolean.prototype.valueOf);
-      if (boxedBoolean.ok) {
-        push(boxedBoolean.value ? "true" : "false");
-      } else if (typeof normalized === "string") {
-        writeString(normalized);
-      } else if (typeof normalized === "number") {
-        push(Number.isFinite(normalized) ? String(normalized) : "null");
-      } else if (typeof normalized === "boolean") {
-        push(normalized ? "true" : "false");
-      } else if (typeof normalized === "bigint") {
+      const prototype = Object.getPrototypeOf(normalized);
+      if (prototype === Object.prototype || prototype === null) {
+        writeContainer(
+          /** @type {Record<string, unknown>} */ (normalized),
+          false,
+          topLevel,
+          depth + 1
+        );
+      } else if (isBigIntWrapper(normalized)) {
         throw new TypeError("Do not know how to serialize a BigInt");
-      } else if (Array.isArray(normalized)) {
-        if (seen.has(normalized)) throw new TypeError("Converting circular structure to JSON");
-        seen.add(normalized);
-        push("[");
-        for (let i = 0; i < normalized.length; i += 1) {
-          if (i > 0) push(",");
-          if (!writeValue(normalized[i], String(i))) push("null");
-        }
-        push("]");
-        seen.delete(normalized);
+      } else if (boxedValue(normalized, String.prototype.valueOf).ok) {
+        writeString(String(normalized));
+      } else if (boxedValue(normalized, Number.prototype.valueOf).ok) {
+        const value = numberWrapperValue(normalized);
+        push(Number.isFinite(value) ? String(value) : "null");
       } else {
-        const objectValue = /** @type {Record<string, unknown>} */ (normalized);
-        if (seen.has(objectValue)) throw new TypeError("Converting circular structure to JSON");
-        seen.add(objectValue);
-        push("{");
-        let first = true;
-        for (const prop of Object.keys(objectValue)) {
-          const child = normalize(objectValue[prop], prop);
-          if (!writable(child)) continue;
-          if (!first) push(",");
-          first = false;
-          writeString(prop);
-          push(":");
-          const beforeValue = bytes;
-          writeValue(child, prop, true);
-          if (fieldCaps[prop] && bytes - beforeValue > fieldCaps[prop].maxBytes) {
-            throw workflowPayloadTooLarge(fieldCaps[prop].kind, fieldCaps[prop].maxBytes);
-          }
+        const boxedBoolean = boxedValue(normalized, Boolean.prototype.valueOf);
+        if (boxedBoolean.ok) {
+          push(boxedBoolean.value ? "true" : "false");
+        } else {
+          writeContainer(
+            /** @type {Record<string, unknown>} */ (normalized),
+            false,
+            topLevel,
+            depth + 1
+          );
         }
-        push("}");
-        seen.delete(objectValue);
       }
     }
     return true;
   };
 
-  if (!writeValue(value)) return "null";
+  if (!writeValue(value, "", false, true, outerDepth)) return "null";
   return parts.join("");
 }
 
@@ -253,7 +309,14 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
  * @param {string} kind
  */
 export function stringifyWorkflowResult(value, kind) {
-  return stringifyWorkflowJson(value, kind, WORKFLOW_RESULT_BYTES_MAX);
+  return stringifyWorkflowJson(
+    value,
+    kind,
+    WORKFLOW_RESULT_BYTES_MAX,
+    {},
+    undefined,
+    1
+  );
 }
 
 /**
@@ -269,8 +332,12 @@ export function _stringifyWorkflowBackendBodyForTest(path, body) {
   return workflowBackendBody(path, body);
 }
 
-/** @param {string} path @param {unknown} body */
-export function workflowBackendBody(path, body) {
+/**
+ * @param {string} path
+ * @param {unknown} body
+ * @param {Map<string, string>} [capturedFields]
+ */
+function serializeWorkflowBackendBody(path, body, capturedFields = undefined) {
   /** @type {Record<string, { kind: string, maxBytes: number }>} */
   const fieldCaps = {};
   if (path === "commit-step-success") {
@@ -283,8 +350,22 @@ export function workflowBackendBody(path, body) {
     body,
     "backend request body",
     WORKFLOW_BACKEND_REQUEST_BYTES_MAX,
-    fieldCaps
+    fieldCaps,
+    capturedFields
   );
+}
+
+/** @param {string} path @param {unknown} body */
+export function workflowBackendBody(path, body) {
+  return serializeWorkflowBackendBody(path, body);
+}
+
+/** @param {Record<string, unknown> & { output: unknown }} body */
+export function workflowStepSuccessBackendBody(body) {
+  const capturedFields = new Map([["output", "null"]]);
+  const bodyJson = serializeWorkflowBackendBody("commit-step-success", body, capturedFields);
+  const outputJson = capturedFields.get("output") ?? "null";
+  return { bodyJson, outputJson };
 }
 
 /**

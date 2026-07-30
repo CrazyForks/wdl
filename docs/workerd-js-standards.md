@@ -65,6 +65,15 @@ paths. Creating them inline is acceptable in one-off tests, but production decod
 Redis payload parsing, and binding adapters should reuse the module singleton unless
 stateful decoder options are required.
 
+When a path only needs an exact UTF-8 byte count, use `shared/utf8.js#utf8ByteLength`
+instead of open-coding an encoder. The helper keeps short strings on its allocation-free
+arithmetic path and delegates long strings to the native encoder, which may allocate a
+transient result. Intrinsic-hardened injected modules may keep a local captured
+`encodeInto()` scratch path when importing a shared module would weaken their capture
+boundary. Node-compatible host modules that already depend on `Buffer` may use
+`Buffer.byteLength(value, "utf8")`; it is also exact and avoids allocating the encoded
+bytes.
+
 ## Ownership
 
 Entrypoints should stay thin. They should dispatch, authenticate or route, wire
@@ -154,9 +163,17 @@ retaining a socket or request-created promise across invocations. Use `RedisSess
 only when one invocation or one long-lived owning task intentionally holds the
 connection for a WATCH/transaction or subscription lifecycle.
 
+Transport-independent command construction and reply decoding belong to the shared
+typed command surface. `RedisClient` and `RedisSession` own their distinct connection
+lifetimes and expose additional operations only where those lifetimes require them.
+
 Do not add a generic pipeline escape hatch to application code. Add the smallest typed,
 bounded helper that can validate reply count, reply order, and domain decoding at the
 Redis owner.
+
+Shared RESP pipelines and transactions write through the common bounded command writer.
+It preserves complete command framing and reply order while grouping ordinary commands
+into bounded buffers; one command larger than the target occupies its own write group.
 
 ## Tests
 

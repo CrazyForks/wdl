@@ -1,6 +1,7 @@
 // Runtime helpers for gateway ingress. This module owns Redis clients,
-// route/pattern caches, subscriber invalidation, and gateway-local metrics/logs;
-// gateway/index.js owns request dispatch and forwarding decisions.
+// static routing-option memoization, route/pattern caches, subscriber
+// invalidation, and gateway-local metrics/logs; gateway/index.js owns request
+// dispatch and forwarding decisions.
 
 import { RedisClient, RedisSubscriber } from "shared-redis";
 import { decodePatternProjection } from "shared-route-projection";
@@ -10,7 +11,7 @@ import {
   formatError,
   recordRedisCommand,
 } from "shared-observability";
-import { isValidRouteNs } from "shared-ns-pattern";
+import { isValidRouteNs, platformDomainFromEnv } from "shared-ns-pattern";
 import {
   DECLARED_HOSTS_KEY,
   NAMESPACES_KEY,
@@ -21,14 +22,24 @@ import {
   platformDomainDisabledKey,
   routesKey,
 } from "shared-worker-contract";
-import { isPatternInvalidationKey, sortPatterns } from "gateway-lib";
+import {
+  isPatternInvalidationKey,
+  normalizeRequestHost,
+  sortPatterns,
+} from "gateway-lib";
 
 /**
  * @typedef {import("shared-route-projection").PatternProjection & { slot: string }} PatternEntry
  * @typedef {{ known: true, routes: Map<string, string>, cacheHit: boolean } | { known: false, routes: null, cacheHit: false }} NamespaceRouteResolution
  * @typedef {{ known: true, patterns: PatternEntry[], cacheHit: boolean } | { known: false, patterns: null, cacheHit: false }} HostPatternResolution
+ * @typedef {{ epoch: number, readers: number }} InFlightReadState
+ * @typedef {{ state: InFlightReadState, epoch: number }} InFlightRead
+ * @typedef {{ PLATFORM_DOMAIN?: string, ADMIN_HOST?: string, [key: string]: unknown }} GatewayRoutingEnv
+ * @typedef {{ platformDomain: string, normalizedAdminHost: string }} GatewayRoutingOptions
  */
 
+/** @type {WeakMap<GatewayRoutingEnv, GatewayRoutingOptions>} */
+const routingOptionsByEnv = new WeakMap();
 /** @type {Set<string> | null} */
 let knownNs = null;
 /** @type {Set<string> | null} */
@@ -37,8 +48,14 @@ let knownPatternHosts = null;
 const routeCache = new Map();
 /** @type {Map<string, PatternEntry[]>} */
 const patternCache = new Map();
-let routeStateEpoch = 0;
-let patternStateEpoch = 0;
+let routeResetEpoch = 0;
+let routeMembershipEpoch = 0;
+let patternResetEpoch = 0;
+let patternMembershipEpoch = 0;
+/** @type {Map<string, InFlightReadState>} */
+const routeReads = new Map();
+/** @type {Map<string, InFlightReadState>} */
+const patternReads = new Map();
 /** @type {RedisSubscriber | null} */
 let subscriber = null;
 let subscriberConnected = 0;
@@ -53,6 +70,22 @@ const utf8Decoder = new TextDecoder();
 export const metrics = new MetricsRegistry();
 export const log = createLogger("gateway");
 
+/**
+ * @param {GatewayRoutingEnv} env
+ * @returns {GatewayRoutingOptions}
+ */
+export function gatewayRoutingOptionsFromEnv(env) {
+  let options = routingOptionsByEnv.get(env);
+  if (!options) {
+    options = {
+      platformDomain: platformDomainFromEnv(env),
+      normalizedAdminHost: normalizeRequestHost(env.ADMIN_HOST || "").toLowerCase(),
+    };
+    routingOptionsByEnv.set(env, options);
+  }
+  return options;
+}
+
 export class GatewayRoutingUnavailableError extends Error {
   constructor() {
     super("Gateway routing state changed throughout the bounded lookup");
@@ -64,15 +97,48 @@ export class GatewayRoutingUnavailableError extends Error {
 }
 
 function clearRouteState() {
-  routeStateEpoch += 1;
+  routeResetEpoch += 1;
+  routeMembershipEpoch += 1;
   routeCache.clear();
   knownNs = null;
 }
 
 function clearPatternState() {
-  patternStateEpoch += 1;
+  patternResetEpoch += 1;
+  patternMembershipEpoch += 1;
   patternCache.clear();
   knownPatternHosts = null;
+}
+
+/**
+ * @param {Map<string, InFlightReadState>} reads
+ * @param {string} key
+ * @returns {InFlightRead}
+ */
+function beginKeyRead(reads, key) {
+  let state = reads.get(key);
+  if (!state) {
+    state = { epoch: 0, readers: 0 };
+    reads.set(key, state);
+  }
+  state.readers += 1;
+  return { state, epoch: state.epoch };
+}
+
+/**
+ * @param {Map<string, InFlightReadState>} reads
+ * @param {string} key
+ * @param {InFlightReadState} state
+ */
+function endKeyRead(reads, key, state) {
+  state.readers -= 1;
+  if (state.readers === 0) reads.delete(key);
+}
+
+/** @param {Map<string, InFlightReadState>} reads @param {string} key */
+function invalidateKeyRead(reads, key) {
+  const state = reads.get(key);
+  if (state) state.epoch += 1;
 }
 
 /** @param {import("shared-redis").RedisCommandEvent} event */
@@ -88,8 +154,8 @@ export function createGatewayRedis(redisAddr) {
 /**
  * Build the namespace subdomain route map, subtracting workers that opted out
  * of platform-domain routing. Reading both keys in one pipeline is transport
- * batching, not atomicity: an interleaved promote bumps the route epoch, and
- * the caller's post-read epoch recheck discards that view.
+ * batching, not atomicity: an interleaved promote bumps the membership or
+ * namespace generation, and the caller's post-read recheck discards that view.
  *
  * @param {string} ns
  * @param {Record<string, unknown>} entries
@@ -153,14 +219,18 @@ function getCachedEntry(cache, key) {
  */
 export async function resolveNamespaceRoutes(redis, ns) {
   for (let attempt = 0; attempt < MAX_ROUTING_SNAPSHOT_ATTEMPTS; attempt += 1) {
-    const epoch = routeStateEpoch;
+    const resetEpoch = routeResetEpoch;
     if (knownNs === null) {
+      const membershipEpoch = routeMembershipEpoch;
       const snapshot = await redis.sMembersHGetAllAndSMembers(
         NAMESPACES_KEY,
         routesKey(ns),
         platformDomainDisabledKey(ns)
       );
-      if (epoch !== routeStateEpoch) continue;
+      if (
+        resetEpoch !== routeResetEpoch ||
+        membershipEpoch !== routeMembershipEpoch
+      ) continue;
       knownNs = new Set(snapshot.namespaces);
       if (!knownNs.has(ns)) return { known: false, routes: null, cacheHit: false };
       return {
@@ -173,13 +243,24 @@ export async function resolveNamespaceRoutes(redis, ns) {
 
     const cached = getCachedEntry(routeCache, ns);
     if (cached) return { known: true, routes: cached, cacheHit: true };
-    const snapshot = await redis.hGetAllAndSMembers(routesKey(ns), platformDomainDisabledKey(ns));
-    if (epoch !== routeStateEpoch) continue;
-    return {
-      known: true,
-      routes: cacheNsRoutes(ns, snapshot.hash, new Set(snapshot.members)),
-      cacheHit: false,
-    };
+    const read = beginKeyRead(routeReads, ns);
+    try {
+      const snapshot = await redis.hGetAllAndSMembers(
+        routesKey(ns),
+        platformDomainDisabledKey(ns)
+      );
+      if (
+        resetEpoch !== routeResetEpoch ||
+        read.epoch !== read.state.epoch
+      ) continue;
+      return {
+        known: true,
+        routes: cacheNsRoutes(ns, snapshot.hash, new Set(snapshot.members)),
+        cacheHit: false,
+      };
+    } finally {
+      endKeyRead(routeReads, ns, read.state);
+    }
   }
   throw new GatewayRoutingUnavailableError();
 }
@@ -192,10 +273,14 @@ export async function resolveNamespaceRoutes(redis, ns) {
  */
 export async function resolveHostPatterns(redis, host, requestId) {
   for (let attempt = 0; attempt < MAX_ROUTING_SNAPSHOT_ATTEMPTS; attempt += 1) {
-    const epoch = patternStateEpoch;
+    const resetEpoch = patternResetEpoch;
     if (knownPatternHosts === null) {
+      const membershipEpoch = patternMembershipEpoch;
       const snapshot = await redis.sMembersAndHGetAll(DECLARED_HOSTS_KEY, patternsKey(host));
-      if (epoch !== patternStateEpoch) continue;
+      if (
+        resetEpoch !== patternResetEpoch ||
+        membershipEpoch !== patternMembershipEpoch
+      ) continue;
       knownPatternHosts = new Set(snapshot.members);
       if (!knownPatternHosts.has(host)) {
         return { known: false, patterns: null, cacheHit: false };
@@ -212,13 +297,21 @@ export async function resolveHostPatterns(redis, host, requestId) {
 
     const cached = getCachedEntry(patternCache, host);
     if (cached) return { known: true, patterns: cached, cacheHit: true };
-    const entries = await redis.hGetAll(patternsKey(host));
-    if (epoch !== patternStateEpoch) continue;
-    return {
-      known: true,
-      patterns: cacheHostPatterns(host, requestId, entries),
-      cacheHit: false,
-    };
+    const read = beginKeyRead(patternReads, host);
+    try {
+      const entries = await redis.hGetAll(patternsKey(host));
+      if (
+        resetEpoch !== patternResetEpoch ||
+        read.epoch !== read.state.epoch
+      ) continue;
+      return {
+        known: true,
+        patterns: cacheHostPatterns(host, requestId, entries),
+        cacheHit: false,
+      };
+    } finally {
+      endKeyRead(patternReads, host, read.state);
+    }
   }
   throw new GatewayRoutingUnavailableError();
 }
@@ -272,7 +365,8 @@ export function ensureGatewaySubscriber(redisAddr) {
           if (value === "*") {
             clearPatternState();
           } else if (isPatternInvalidationKey(value)) {
-            patternStateEpoch += 1;
+            patternMembershipEpoch += 1;
+            invalidateKeyRead(patternReads, value);
             patternCache.delete(value);
             knownPatternHosts = null;
           } else {
@@ -305,7 +399,8 @@ export function ensureGatewaySubscriber(redisAddr) {
           });
           return;
         }
-        routeStateEpoch += 1;
+        routeMembershipEpoch += 1;
+        invalidateKeyRead(routeReads, value);
         routeCache.delete(value);
         // A brand-new namespace must pass the knownNs gate before the next full
         // resync; promote publishes this ns after making it active.

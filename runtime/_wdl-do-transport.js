@@ -8,6 +8,7 @@ export const MAX_DO_REQUEST_BODY_BYTES = 1024 * 1024;
 export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
+const REQUEST_HEADER_UTF8_SCRATCH_BYTES = 2 * 1024;
 export const DO_ACCEPT_OWNER_HINT_HEADER = "x-wdl-do-accept-owner-hint";
 export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
@@ -94,9 +95,11 @@ const intrinsicReadableStreamReaderCancel = ReadableStreamDefaultReader.prototyp
 const intrinsicReadableStreamReaderRead = ReadableStreamDefaultReader.prototype.read;
 const intrinsicReadableStreamReaderReleaseLock = ReadableStreamDefaultReader.prototype.releaseLock;
 const intrinsicSetHas = Set.prototype.has;
+const intrinsicStringCharCodeAt = String.prototype.charCodeAt;
 const intrinsicStringToLowerCase = String.prototype.toLowerCase;
 const intrinsicStringToUpperCase = String.prototype.toUpperCase;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
+const intrinsicTextEncoderEncodeInto = TextEncoder.prototype.encodeInto;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 const intrinsicUint8ArrayBufferGet = /** @type {(this: Uint8Array) => ArrayBufferLike} */ (
   prototypeGetter(Uint8Array.prototype, "buffer")
@@ -135,6 +138,8 @@ const intrinsicResponseWebSocketGet = /** @type {((this: Response) => WebSocket 
   prototypeGetter(Response.prototype, "webSocket")
 );
 const utf8Encoder = new TextEncoder();
+/** @type {Uint8Array | undefined} */
+let requestHeaderUtf8Scratch;
 
 const DO_CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
@@ -236,6 +241,14 @@ function headerEntries(headers) {
     },
   ]);
   return out;
+}
+
+/** @param {[string, string][]} headers */
+function hardenHeaderEntriesForJson(headers) {
+  for (let i = 0; i < headers.length; i++) {
+    intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [headers[i], null]);
+  }
+  intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [headers, null]);
 }
 
 /** @template T @param {Set<T>} set @param {T} value */
@@ -360,13 +373,20 @@ function stringifyJson(value) {
   return intrinsicReflectApply(intrinsicJsonStringify, IntrinsicJSON, [value]);
 }
 
+/** @returns {Record<string, unknown>} */
+function jsonObject() {
+  return /** @type {Record<string, unknown>} */ (
+    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
+  );
+}
+
 /**
- * @param {Record<string, unknown>} metadata
+ * @param {string} metadataJson
  * @param {Uint8Array | null} [bodyBytes]
  * @returns {Uint8Array}
  */
-function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
-  const metadataBytes = encodeUtf8(stringifyJson(metadata));
+function encodeDoInvokeEnvelopeJson(metadataJson, bodyBytes = null) {
+  const metadataBytes = encodeUtf8(metadataJson);
   const body = bodyBytes == null ? new IntrinsicUint8Array() : bodyBytes;
   const metadataLength = byteArrayLength(metadataBytes);
   const bodyLength = byteArrayLength(body);
@@ -382,9 +402,56 @@ function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
   return envelope;
 }
 
+/**
+ * @param {Record<string, unknown>} metadata
+ * @param {Uint8Array | null} [bodyBytes]
+ * @returns {Uint8Array}
+ */
+function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
+  return encodeDoInvokeEnvelopeJson(stringifyJson(metadata), bodyBytes);
+}
+
 /** @param {string} value */
 function byteLength(value) {
   return byteArrayLength(encodeUtf8(value));
+}
+
+/**
+ * @param {string} value
+ * @param {number} maxBytes
+ */
+function boundedRequestHeaderByteLength(value, maxBytes) {
+  // UTF-8 never uses fewer bytes than UTF-16 code units.
+  if (value.length > maxBytes) return maxBytes + 1;
+
+  requestHeaderUtf8Scratch ??= new IntrinsicUint8Array(REQUEST_HEADER_UTF8_SCRATCH_BYTES);
+  const result = intrinsicReflectApply(intrinsicTextEncoderEncodeInto, utf8Encoder, [
+    value,
+    requestHeaderUtf8Scratch,
+  ]);
+  let bytes = result.written;
+  if (bytes > maxBytes || result.read === value.length) return bytes;
+
+  for (let i = result.read; i < value.length; i += 1) {
+    const code = intrinsicReflectApply(intrinsicStringCharCodeAt, value, [i]);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = intrinsicReflectApply(intrinsicStringCharCodeAt, value, [i + 1]);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > maxBytes) return maxBytes + 1;
+  }
+  return bytes;
 }
 
 /**
@@ -478,9 +545,7 @@ function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
     }
     const symbols = intrinsicReflectApply(intrinsicObjectGetOwnPropertySymbols, IntrinsicObject, [objectValue]);
     if (symbols.length > 0) throw new TypeError(`${field} must not contain symbol keys`);
-    const out = /** @type {Record<string, unknown>} */ (
-      intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-    );
+    const out = jsonObject();
     const entries = /** @type {[string, unknown][]} */ (
       intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [objectValue])
     );
@@ -520,26 +585,20 @@ export function rpcInvokeBody(props, objectName, method, args) {
     throw new TypeError("rpc.args must be an array");
   }
   const stableArgs = /** @type {unknown[]} */ (cloneJsonRpcData(args, "rpc.args"));
-  if (byteLength(stringifyJson(stableArgs)) > MAX_DO_REQUEST_BODY_BYTES) {
+  const argsJson = stringifyJson(stableArgs);
+  if (byteLength(argsJson) > MAX_DO_REQUEST_BODY_BYTES) {
     throw new TypeError(`rpc.args exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
   }
-  const rpc = /** @type {Record<string, unknown>} */ (
-    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-  );
-  rpc.method = method;
-  rpc.args = stableArgs;
-  const metadata = /** @type {Record<string, unknown>} */ (
-    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-  );
-  metadata.ns = props.ns;
-  metadata.worker = props.worker;
-  metadata.version = props.version;
-  metadata.doStorageId = props.doStorageId;
-  metadata.className = props.className;
-  metadata.objectName = objectName;
-  metadata.kind = "rpc";
-  metadata.rpc = rpc;
-  return encodeDoInvokeEnvelope(metadata);
+  const metadataJson =
+    `{"ns":${stringifyJson(props.ns)}` +
+    `,"worker":${stringifyJson(props.worker)}` +
+    `,"version":${stringifyJson(props.version)}` +
+    `,"doStorageId":${stringifyJson(props.doStorageId)}` +
+    `,"className":${stringifyJson(props.className)}` +
+    `,"objectName":${stringifyJson(objectName)}` +
+    `,"kind":"rpc","rpc":{"method":${stringifyJson(method)}` +
+    `,"args":${argsJson}}}`;
+  return encodeDoInvokeEnvelopeJson(metadataJson);
 }
 
 /**
@@ -563,15 +622,15 @@ function binaryInvokeHeaders(requestId) {
  */
 export async function fetchInvokeInit(props, objectName, request, requestId) {
   const { spec, bodyBytes } = await requestSpec(request, requestId);
-  const metadata = /** @type {Record<string, unknown>} */ (cloneJsonRpcData({
-    ns: props.ns,
-    worker: props.worker,
-    version: props.version,
-    doStorageId: props.doStorageId,
-    className: props.className,
-    objectName,
-    request: spec,
-  }, "invoke"));
+  hardenHeaderEntriesForJson(spec.headers);
+  const metadata = jsonObject();
+  metadata.ns = props.ns;
+  metadata.worker = props.worker;
+  metadata.version = props.version;
+  metadata.doStorageId = props.doStorageId;
+  metadata.className = props.className;
+  metadata.objectName = objectName;
+  metadata.request = spec;
   return {
     method: "POST",
     headers: binaryInvokeHeaders(requestId),
@@ -637,17 +696,19 @@ export async function requestSpec(request, requestId) {
   const method = stringToUpperCase(requestMethod(forwarded));
   const headers = headerEntries(forwardedHeaders);
   enforceRequestHeadersBudget(headers);
-  const spec = {
-    method,
-    url: requestUrl(forwarded),
-    headers,
-  };
+  const spec = jsonObject();
+  spec.method = method;
+  spec.url = requestUrl(forwarded);
+  spec.headers = headers;
   let bodyBytes = null;
   if (method !== "GET" && method !== "HEAD") {
     const body = await readRequestBodyBytes(forwarded);
     if (byteArrayLength(body) > 0) bodyBytes = body;
   }
-  return { spec, bodyBytes };
+  return {
+    spec: /** @type {{ method: string, url: string, headers: [string, string][] }} */ (spec),
+    bodyBytes,
+  };
 }
 
 /** @param {[string, string][]} headers */
@@ -660,7 +721,11 @@ function enforceRequestHeadersBudget(headers) {
     const entry = headers[i];
     const name = entry[0];
     const value = entry[1];
-    total += byteLength(name) + byteLength(value);
+    total += boundedRequestHeaderByteLength(name, MAX_DO_REQUEST_HEADER_BYTES - total);
+    if (total > MAX_DO_REQUEST_HEADER_BYTES) {
+      throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_BYTES} bytes`);
+    }
+    total += boundedRequestHeaderByteLength(value, MAX_DO_REQUEST_HEADER_BYTES - total);
     if (total > MAX_DO_REQUEST_HEADER_BYTES) {
       throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_BYTES} bytes`);
     }

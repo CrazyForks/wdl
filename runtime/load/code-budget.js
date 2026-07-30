@@ -21,6 +21,8 @@ import {
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
 const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
+const WORKFLOWS_IMPORT_MARKER = "cloudflare:workflows";
+const WORKFLOWS_IMPORT_MARKER_BYTES = Buffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
 const utf8Decoder = new TextDecoder();
 
 /**
@@ -48,6 +50,7 @@ const utf8Decoder = new TextDecoder();
  *   d1ClientSource: string,
  *   d1DataFieldSource: string,
  *   d1ParamsSource: string,
+ *   utf8Source: string,
  *   sqlSplitterSource: string,
  *   d1TransportSource: string,
  *   r2ClientSource: string,
@@ -67,10 +70,33 @@ function moduleBodyByteLength(body) {
   return typeof body === "string" ? Buffer.byteLength(body, "utf8") : body.byteLength;
 }
 
+/** @param {NormalizedModuleBody} body */
+function decodedTextModuleByteLength(body) {
+  if (typeof body === "string") return Buffer.byteLength(body, "utf8");
+  const hasUtf8Bom = (
+    body.byteLength >= 3 &&
+    body[0] === 0xef &&
+    body[1] === 0xbb &&
+    body[2] === 0xbf
+  );
+  return body.byteLength - (hasUtf8Bom ? 3 : 0);
+}
+
+/** @param {NormalizedModuleBody} body */
+function containsWorkflowsImportMarker(body) {
+  if (typeof body === "string") return body.includes(WORKFLOWS_IMPORT_MARKER);
+  const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  return bytes.indexOf(WORKFLOWS_IMPORT_MARKER_BYTES) !== -1;
+}
+
 /** @param {RuntimeInjectionSources} sources */
 function runtimeModuleInjections(sources) {
   /** @type {RuntimeModuleInjection} */
   const requestIdModuleInjection = ["_wdl-request-id.js", sources.requestIdSource];
+  const d1ParamsInjectedSource = sources.d1ParamsSource.replace(
+    '"./utf8.js"',
+    '"./_wdl-utf8.js"'
+  );
   const d1TransportInjectedSource = sources.d1TransportSource.replace(
     /from "shared-d1-data-field";/,
     `from "./${D1_DATA_FIELD_MODULE_NAME}";`
@@ -79,7 +105,8 @@ function runtimeModuleInjections(sources) {
   const d1ModuleInjections = [
     requestIdModuleInjection,
     [D1_DATA_FIELD_MODULE_NAME, sources.d1DataFieldSource],
-    ["_wdl-d1-params.js", sources.d1ParamsSource],
+    ["_wdl-utf8.js", sources.utf8Source],
+    ["_wdl-d1-params.js", d1ParamsInjectedSource],
     ["_wdl-sql-splitter.js", sources.sqlSplitterSource],
     ["_wdl-d1-transport.js", d1TransportInjectedSource],
     ["_wdl-d1-client.js", sources.d1ClientSource],
@@ -344,31 +371,46 @@ function moduleType(modules, name) {
 
 /**
  * @param {{
+ *   normalized: NormalizedModule[],
+ *   meta: RuntimeBundleMeta,
+ * }} args
+ */
+export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
+  /** @type {Record<string, string>} */
+  const jsModules = Object.create(null);
+  let total = 0;
+  for (const [name, body] of normalized) {
+    const type = moduleType(meta.modules, name);
+    if (type !== "module" || !containsWorkflowsImportMarker(body)) {
+      total += type === "module" || type === "cjs" || type === "text"
+        ? decodedTextModuleByteLength(body)
+        : moduleBodyByteLength(body);
+      continue;
+    }
+    jsModules[name] = typeof body === "string" ? body : utf8Decoder.decode(body);
+  }
+  rewriteCloudflareWorkflowsImports({ modules: jsModules });
+  for (const source of Object.values(jsModules)) total += Buffer.byteLength(source, "utf8");
+  return total;
+}
+
+/**
+ * @param {{
  *   mainModule: string,
  *   normalized: NormalizedModule[],
  *   meta: RuntimeBundleMeta,
  *   runtimeSources: RuntimeInjectionSources,
+ *   userCodeBytes?: number,
  * }} args
  */
-export function estimateFinalWorkerLoaderCodeBytes({ mainModule, normalized, meta, runtimeSources }) {
-  /** @type {Record<string, string>} */
-  const jsModules = Object.create(null);
-  /** @type {Map<string, number>} */
-  const userModuleBytes = new Map();
-  for (const [name, body] of normalized) {
-    const type = moduleType(meta.modules, name);
-    if (type === "module") {
-      jsModules[name] = typeof body === "string" ? body : utf8Decoder.decode(body);
-    } else {
-      userModuleBytes.set(name, moduleBodyByteLength(body));
-    }
-  }
-  rewriteCloudflareWorkflowsImports({ modules: jsModules });
-  for (const [name, source] of Object.entries(jsModules)) {
-    userModuleBytes.set(name, Buffer.byteLength(source, "utf8"));
-  }
-  let total = 0;
-  for (const bytes of userModuleBytes.values()) total += bytes;
+export function estimateFinalWorkerLoaderCodeBytes({
+  mainModule,
+  normalized,
+  meta,
+  runtimeSources,
+  userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta }),
+}) {
+  let total = userCodeBytes;
   for (const [, source] of runtimeInjectedModuleSources(mainModule, meta, runtimeSources)) {
     total += Buffer.byteLength(source, "utf8");
   }

@@ -4,10 +4,11 @@ use axum::extract::{Query, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
+use base64::display::Base64Display;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Value as RedisValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use wdl_rust_common::hash::fnv1a32;
@@ -191,6 +192,28 @@ fn value_field(key: &str) -> String {
 
 fn meta_field(key: &str) -> String {
     format!("{META_FIELD_PREFIX}{key}")
+}
+
+// Valkey treats COUNT as a work hint, so keep one HSCAN outstanding to avoid
+// multiplying an over-return across buckets.
+fn kv_list_scan_command(
+    ns: &str,
+    id: &str,
+    bucket: u32,
+    scan_cursor: &str,
+    pattern: &str,
+    count: usize,
+) -> redis::Cmd {
+    let mut command = redis::cmd("HSCAN");
+    command
+        .arg(hash_key(ns, id, bucket))
+        .arg(scan_cursor)
+        .arg("MATCH")
+        .arg(pattern)
+        .arg("COUNT")
+        .arg(count)
+        .arg("NOVALUES");
+    command
 }
 
 type GroupedHmgetCommand = (String, Vec<usize>, Vec<String>);
@@ -504,11 +527,40 @@ fn decode_metadata(bytes: Option<Vec<u8>>) -> AppResult<Option<Value>> {
         .transpose()
 }
 
+struct Base64Bytes(Vec<u8>);
+
+impl Serialize for Base64Bytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&Base64Display::new(&self.0, &STANDARD))
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct KvValueWithMetadataResponse {
+    metadata: Option<Value>,
+    value_b64: Option<Base64Bytes>,
+}
+
+#[derive(Serialize)]
+struct KvBatchEntry {
+    key: String,
+    metadata: Option<Value>,
+    value_b64: Option<Base64Bytes>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct KvBatchResponse {
+    entries: Vec<KvBatchEntry>,
+}
+
 fn decode_batch_entries(
     keys: Vec<String>,
     include_metadata: bool,
     mut raw: Vec<Option<Vec<u8>>>,
-) -> AppResult<Vec<Value>> {
+) -> AppResult<Vec<KvBatchEntry>> {
     let width = if include_metadata { 2 } else { 1 };
     let expected = keys
         .len()
@@ -526,11 +578,11 @@ fn decode_batch_entries(
         } else {
             None
         };
-        entries.push(json!({
-            "key": key,
-            "value_b64": value.map(|bytes| STANDARD.encode(bytes)),
-            "metadata": metadata,
-        }));
+        entries.push(KvBatchEntry {
+            key,
+            metadata,
+            value_b64: value.map(Base64Bytes),
+        });
     }
     Ok(entries)
 }
@@ -586,7 +638,7 @@ pub(crate) async fn kv_get(
 pub(crate) async fn kv_get_with_metadata(
     State(state): State<AppState>,
     Query(q): Query<KvParams>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<KvValueWithMetadataResponse>> {
     q.validate_scope()?;
     let key = q.key.unwrap_or_default();
     validate_kv_key(&key)?;
@@ -604,10 +656,10 @@ pub(crate) async fn kv_get_with_metadata(
         })
         .await?;
     let Some(bytes) = bytes else {
-        return Ok(Json(json!({
-            "value_b64": null,
-            "metadata": null,
-        })));
+        return Ok(Json(KvValueWithMetadataResponse {
+            metadata: None,
+            value_b64: None,
+        }));
     };
     record_kv_value_bytes(state.metrics(), "get_with_metadata", "value", bytes.len());
     if let Some(metadata) = metadata.as_ref() {
@@ -618,17 +670,17 @@ pub(crate) async fn kv_get_with_metadata(
             metadata.len(),
         );
     }
-    Ok(Json(json!({
-        "value_b64": STANDARD.encode(bytes),
-        "metadata": decode_metadata(metadata)?,
-    })))
+    Ok(Json(KvValueWithMetadataResponse {
+        metadata: decode_metadata(metadata)?,
+        value_b64: Some(Base64Bytes(bytes)),
+    }))
 }
 
 pub(crate) async fn kv_get_batch(
     State(state): State<AppState>,
     Query(q): Query<KvParams>,
     Json(body): Json<KvBatchBody>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<KvBatchResponse>> {
     q.validate_scope()?;
     validate_batch_keys(&body.keys)?;
     let include_metadata = body.metadata.unwrap_or(false);
@@ -655,7 +707,7 @@ pub(crate) async fn kv_get_batch(
         budget.actual_bytes,
     );
     let entries = decode_batch_entries(keys, include_metadata, raw)?;
-    Ok(Json(json!({ "entries": entries })))
+    Ok(Json(KvBatchResponse { entries }))
 }
 
 pub(crate) async fn kv_put(
@@ -749,7 +801,6 @@ pub(crate) async fn kv_list(
     let pattern = format!("{VALUE_FIELD_PREFIX}{}*", escape_glob_literal(&prefix));
     let mut raw_fields = Vec::new();
     while raw_fields.len() < limit && bucket < KV_HASH_BUCKETS {
-        let redis_key = hash_key(&q.ns, &q.id, bucket);
         overflow.retain(|field| cursor_overflow_field_allowed(field, &prefix));
         if !overflow.is_empty() {
             let remaining = limit - raw_fields.len();
@@ -759,7 +810,8 @@ pub(crate) async fn kv_list(
                 Vec::new()
             };
             raw_fields.extend(
-                existing_cursor_overflow_fields(&state, redis_key.clone(), overflow).await?,
+                existing_cursor_overflow_fields(&state, hash_key(&q.ns, &q.id, bucket), overflow)
+                    .await?,
             );
             overflow = pending_overflow;
             if !overflow.is_empty() {
@@ -770,32 +822,22 @@ pub(crate) async fn kv_list(
                 continue;
             }
         }
-        let pattern_arg = pattern.clone();
-        let cursor_arg = scan_cursor.clone();
-        let (next_cursor, batch): (String, Vec<String>) = state
-            .with_redis(async |mut conn| {
-                redis::cmd("HSCAN")
-                    .arg(redis_key)
-                    .arg(cursor_arg)
-                    .arg("MATCH")
-                    .arg(pattern_arg)
-                    .arg("COUNT")
-                    .arg(limit)
-                    .arg("NOVALUES")
-                    .query_async(&mut conn)
-                    .await
-            })
+        let scan_command =
+            kv_list_scan_command(&q.ns, &q.id, bucket, &scan_cursor, &pattern, limit);
+        let (next_cursor, mut fields): (String, Vec<String>) = state
+            .with_redis(async |mut conn| scan_command.query_async(&mut conn).await)
             .await?;
         scan_cursor = next_cursor;
         let remaining = limit - raw_fields.len();
-        if batch.len() <= remaining {
-            raw_fields.extend(batch);
-            if scan_cursor == "0" {
-                bucket += 1;
-            }
+        if fields.len() > remaining {
+            overflow.extend(fields.drain(remaining..));
+            raw_fields.extend(fields);
+            break;
+        }
+        raw_fields.extend(fields);
+        if scan_cursor == "0" {
+            bucket += 1;
         } else {
-            raw_fields.extend(batch[..remaining].iter().cloned());
-            overflow.extend(batch[remaining..].iter().cloned());
             break;
         }
     }
@@ -862,7 +904,7 @@ mod tests {
         KV_LIST_CURSOR_OVERFLOW_MAX, KV_LIST_CURSOR_PREFIX, KV_LIST_LIMIT_DEFAULT,
         KV_LIST_LIMIT_MAX,
     };
-    use crate::test_support::parse_packed_commands;
+    use wdl_rust_common::test_support::parse_packed_commands;
 
     #[test]
     fn escape_glob_literal_escapes_scan_wildcards() {
@@ -992,6 +1034,41 @@ mod tests {
     }
 
     #[test]
+    fn kv_list_scan_command_scans_only_the_current_bucket() {
+        let commands = parse_packed_commands(
+            &kv_list_scan_command("tenant", "store", 7, "0", "v:item-*", 25).get_packed_command(),
+        );
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0],
+            [
+                "HSCAN",
+                "kvh:tenant:store:b:7",
+                "0",
+                "MATCH",
+                "v:item-*",
+                "COUNT",
+                "25",
+                "NOVALUES",
+            ]
+        );
+
+        let resumed_commands = parse_packed_commands(
+            &kv_list_scan_command("tenant", "store", 7, "42", "v:item-*", 25).get_packed_command(),
+        );
+        assert_eq!(resumed_commands.len(), 1);
+        assert_eq!(resumed_commands[0][1], "kvh:tenant:store:b:7");
+        assert_eq!(resumed_commands[0][2], "42");
+
+        let final_commands = parse_packed_commands(
+            &kv_list_scan_command("tenant", "store", 30, "0", "v:*", 10).get_packed_command(),
+        );
+        assert_eq!(final_commands.len(), 1);
+        assert_eq!(final_commands[0][1], "kvh:tenant:store:b:30");
+    }
+
+    #[test]
     fn grouped_value_metadata_plan_reads_each_pair_in_one_hash_snapshot() {
         let keys = vec!["alpha".to_string(), "bravo".to_string()];
         let commands = grouped_value_metadata_commands("tenant", "store", &keys);
@@ -1019,11 +1096,17 @@ mod tests {
     }
 
     #[test]
-    fn batch_decode_preserves_empty_values_and_ignores_orphan_metadata() {
+    fn batch_decode_preserves_binary_and_empty_values_and_ignores_orphan_metadata() {
         let entries = decode_batch_entries(
-            vec!["empty".to_string(), "missing".to_string()],
+            vec![
+                "binary".to_string(),
+                "empty".to_string(),
+                "missing".to_string(),
+            ],
             true,
             vec![
+                Some(vec![0, 0xff, 0x10]),
+                Some(br#"{"kind":"binary"}"#.to_vec()),
                 Some(Vec::new()),
                 Some(br#"{"kind":"empty"}"#.to_vec()),
                 None,
@@ -1033,24 +1116,57 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            entries,
-            vec![
-                json!({
+            serde_json::to_value(entries).unwrap(),
+            json!([
+                {
+                    "key": "binary",
+                    "value_b64": "AP8Q",
+                    "metadata": { "kind": "binary" },
+                },
+                {
                     "key": "empty",
                     "value_b64": "",
                     "metadata": { "kind": "empty" },
-                }),
-                json!({
+                },
+                {
                     "key": "missing",
                     "value_b64": null,
                     "metadata": null,
-                }),
-            ]
+                },
+            ])
         );
 
-        let err = decode_batch_entries(vec!["key".to_string()], true, vec![None])
-            .expect_err("misaligned value/metadata replies must fail closed");
+        let Err(err) = decode_batch_entries(vec!["key".to_string()], true, vec![None]) else {
+            panic!("misaligned value/metadata replies must fail closed");
+        };
         assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
+    fn get_with_metadata_response_serializes_binary_and_missing_values() {
+        let found = KvValueWithMetadataResponse {
+            metadata: Some(json!({ "kind": "binary" })),
+            value_b64: Some(Base64Bytes(vec![0xff, 0])),
+        };
+        assert_eq!(
+            serde_json::to_value(found).unwrap(),
+            json!({
+                "value_b64": "/wA=",
+                "metadata": { "kind": "binary" },
+            })
+        );
+
+        let missing = KvValueWithMetadataResponse {
+            metadata: None,
+            value_b64: None,
+        };
+        assert_eq!(
+            serde_json::to_value(missing).unwrap(),
+            json!({
+                "value_b64": null,
+                "metadata": null,
+            })
+        );
     }
 
     #[test]

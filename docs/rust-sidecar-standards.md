@@ -157,9 +157,10 @@ service behavior. Axum-facing and Redis-facing helpers sit behind the `axum` and
 `redis` features so consumers such as the D1/DO supervisor binaries do not pull Axum
 or async Redis through the shared crate unless they need those helpers.
 
-The `test-support` feature exposes the single process-environment override helper used
-by Rust service tests. It serializes overrides across modules in one test process and
-restores all values during unwinding; production dependency builds leave it disabled.
+The `test-support` feature exposes the process-environment override helper and the RESP
+packed-command parser shared by Rust service tests. Environment overrides are serialized
+across modules in one test process and restored during unwinding; production dependency
+builds leave this feature disabled.
 
 Local explicit code is still preferable when sidecars have different behavior around:
 
@@ -202,9 +203,11 @@ explicit.
 - Use `wdl_rust_common::redis_eval::StaticRedisScript` for direct Lua execution so
   steady-state calls use EVALSHA and script-cache loss is recovered through SCRIPT
   LOAD/NOSCRIPT handling. Keep script bodies and replay policy in the owning service.
-- Keep Lua source-based EVAL in pipelines unless the owner has a proven protocol for
-  recovering a partially executed pipeline. Never retry an entire mixed pipeline on
-  NOSCRIPT: commands before the failure may already have committed.
+- Use the same owner for pipelined Lua. A singleton invocation uses source EVAL; repeated
+  invocations of one script prepend one ignored `SCRIPT LOAD` in the same pipeline and
+  then use EVALSHA. Command ordering makes the script available before those invocations
+  without replaying the pipeline. Never retry an entire mixed pipeline on NOSCRIPT:
+  commands before the failure may already have committed.
 - Service error types own their machine code, human message, and HTTP status. Do not
   reconstruct HTTP status from string codes in a separate server layer.
 - Redis schema markers should fail closed when the persisted shape does not match the

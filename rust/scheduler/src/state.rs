@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_util::FutureExt;
 use redis::aio::ConnectionManagerConfig;
@@ -9,7 +9,7 @@ use tokio::sync::{Notify, RwLock, Semaphore};
 use wdl_rust_common::redis_conn::RedisConnection;
 pub(crate) use wdl_rust_common::shutdown::{InFlightGuard, ShutdownState};
 
-use crate::queue::Consumer;
+use crate::queue::{Consumer, MAX_BATCH_SIZE_CAP};
 use crate::{Config, LogLevel, Metrics, fields_with_error, log, panic_payload_message};
 
 #[derive(Clone)]
@@ -29,6 +29,7 @@ pub(crate) struct AppState {
 pub(crate) struct DispatchSemaphores {
     pub(crate) cron: Arc<Semaphore>,
     pub(crate) queue: Arc<Semaphore>,
+    pub(crate) queue_top_up_entries: Arc<Semaphore>,
 }
 
 pub(crate) type Redis = RedisConnection;
@@ -37,6 +38,8 @@ pub(crate) type Redis = RedisConnection;
 pub(crate) struct QueueState {
     pub(crate) registry: RwLock<HashMap<String, Consumer>>,
     pub(crate) consumer_streams: RwLock<Arc<Vec<String>>>,
+    pub(crate) dispatching_streams: Mutex<HashSet<String>>,
+    pub(crate) stream_dispatch_completed: Notify,
     pub(crate) known_streams: RwLock<HashSet<String>>,
     pub(crate) known_delayed: RwLock<HashSet<String>>,
     pub(crate) delayed_changed: Notify,
@@ -47,6 +50,7 @@ impl DispatchSemaphores {
         Self {
             cron: Arc::new(Semaphore::new(cron_limit)),
             queue: Arc::new(Semaphore::new(queue_limit)),
+            queue_top_up_entries: Arc::new(Semaphore::new(MAX_BATCH_SIZE_CAP)),
         }
     }
 }
@@ -101,18 +105,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_semaphores_keep_cron_and_queue_admission_independent() {
+    fn dispatch_semaphores_keep_admission_budgets_independent() {
         let dispatch = DispatchSemaphores::new(2, 3);
 
         assert_eq!(dispatch.cron.available_permits(), 2);
         assert_eq!(dispatch.queue.available_permits(), 3);
+        assert_eq!(
+            dispatch.queue_top_up_entries.available_permits(),
+            MAX_BATCH_SIZE_CAP
+        );
 
         let _cron_a = dispatch.cron.try_acquire().unwrap();
         let _cron_b = dispatch.cron.try_acquire().unwrap();
 
         assert!(dispatch.cron.try_acquire().is_err());
         assert_eq!(dispatch.queue.available_permits(), 3);
-        assert!(dispatch.queue.try_acquire().is_ok());
+        assert_eq!(
+            dispatch.queue_top_up_entries.available_permits(),
+            MAX_BATCH_SIZE_CAP
+        );
+        let _queue = dispatch.queue.try_acquire().unwrap();
+        assert_eq!(
+            dispatch.queue_top_up_entries.available_permits(),
+            MAX_BATCH_SIZE_CAP
+        );
     }
 
     #[test]

@@ -35,8 +35,9 @@ Live tail is an activation-gated pipe, not a durable logging system:
   runtime tail worker. Runtime always keeps structured stdout as the durable platform
   log path.
 - `runtime/tail-forwarder.js` checks redis-proxy `/logs/tail/active` before append.
-  Positive and negative active-set results are cached briefly so inactive workers do not
-  pay a Redis write per event.
+  Positive and negative active-set results are cached briefly. A fresh negative result
+  suppresses envelope payload construction and background append work before the event
+  reaches redis-proxy.
 - Control authorizes each SSE tail session, writes/refreshes the worker gate in
   `logs:tail:active`, reads `logs:<ns>:<worker>:s`, and emits SSE frames. Reconnects
   re-enter normal auth. Gate renewal and admission share one atomic operation, so
@@ -83,8 +84,8 @@ pipe, not durable log storage.
 ## Ownership / Concurrency / Failure Semantics
 
 - Structured stdout is the source of truth for durable platform logging.
-- No active tailer means runtime still logs stdout but skips per-event stream append
-  work after local active-set miss caching.
+- No active tailer means runtime still logs stdout but skips tail-envelope payload and
+  stream-append work after local active-set miss caching.
 - Active tail sessions are time-bounded authorization leases and must reconnect through
   normal auth. `LOG_TAIL_MAX_SESSION_MS` sets the control-side maximum; invalid or
   empty values fall back to 15 minutes.
@@ -162,8 +163,14 @@ Common rules:
   `shared/observability.js`; Rust services use
   `wdl-rust-common::log::emit_log_line`. Error text is emitted as `error_message`;
   throwables that cannot be converted to text degrade to `Unknown error` instead of
-  replacing the original failure. Secret values, raw credentials, token material, raw
-  Redis keys, and unbounded payloads are not emitted.
+  replacing the original failure. JS logging uses native JSON semantics for ordinary
+  values, including repeated non-circular object references. Its fallback converts
+  BigInt values to strings and marks ancestor cycles as `[Circular]`. A callable root
+  `toJSON` field is ignored so caller fields cannot replace the log envelope through
+  that hook. If field access, nested getters, or nested `toJSON()` hooks prevent
+  serialization, logging emits only the core `ts` / `service` / `level` / `event`
+  envelope plus a serialization `error_message`. Secret values, raw credentials, token
+  material, raw Redis keys, and unbounded payloads are not emitted.
 - Product API response bodies should use camelCase unless an endpoint explicitly
   documents a different wire contract.
 - Metrics should use bounded enumerated labels only.
