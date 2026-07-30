@@ -2,14 +2,15 @@
 
 ## Unreleased
 
-- Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.6.1`.
-- Updated compatible Rust dependencies.
-- Bounded sparse KV list scans to one unfinished Valkey `HSCAN` window per
-  request; incomplete pages may contain fewer than the requested limit,
-  including zero, and callers must follow the cursor until `list_complete`.
-- Updated the bundled workerd and Workers types pins to `1.20260730.1` and
-  `5.20260730.1`; upstream changes only advance release and maximum
-  compatibility dates.
+## wdl.20260730.1 - 2026-07-30
+
+- Further reduced Valkey round trips, command bytes, and request-path allocation across platform control and data paths through a shared typed command surface, bounded mixed pipelines, cached Lua scripts, and reusable RESP buffers.
+- Kept Queue streams with different batch caps progressing alongside idle or slow streams through a shared readiness probe and bounded non-blocking top-ups, limited delayed-message materialization per chunk, and revalidated missing consumers immediately before destructive orphan transitions.
+- Preserved Workflow replay outputs as exact persisted JSON snapshots across run claims, capped cross-request replay retention at 16 MiB per runtime isolate while bounding active-controller working sets, batched `createBatch()` preflight reads, and aligned Runtime JSON depth and lone-surrogate rejection with Rust.
+- Scoped Gateway projection retries to the affected namespace or host after membership gates are warm, avoiding invalidation from unrelated deployments. Reduced serialization, copying, and allocation in D1/DO transport, R2, module loading, live-tail forwarding, and JS/Rust observability.
+- Bounded sparse KV list scans to one unfinished Valkey `HSCAN` window per request; incomplete pages may contain fewer than the requested limit, including zero, and callers must follow the cursor until `list_complete`.
+- Consolidated duplicated runtime, ownership, Redis/RESP, and Rust support helpers under canonical owners, refreshed compatible Rust dependencies, and pinned Quick Start and CLI integration to `@wdl-dev/cli@1.6.1`.
+- Updated the bundled workerd and Workers types pins to `1.20260730.1` and `5.20260730.1`; upstream workerd changes only advance release and maximum compatibility dates.
 
 ## wdl.20260727.1 - 2026-07-27
 
