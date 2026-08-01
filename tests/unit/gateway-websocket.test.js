@@ -18,21 +18,45 @@ class FakeResponse {
   }
 }
 
+/** @param {number} code */
+function isSendableCloseCode(code) {
+  return Number.isInteger(code)
+    && code >= 1000
+    && code < 5000
+    && ![1004, 1005, 1006, 1015].includes(code);
+}
+
 class FakeWebSocket {
   /** @param {string} name */
   constructor(name) {
     this.name = name;
+    this.binaryType = "blob";
     /** @type {unknown[]} */
     this.sent = [];
     /** @type {{ code: number, reason: string } | null} */
     this.closed = null;
+    /** @type {unknown[]} */
+    this.acceptCalls = [];
+    /** @type {string[]} */
+    this.acceptBinaryTypes = [];
+    /** @type {Array<{ code: number | undefined, reason: string | undefined }>} */
+    this.closeCalls = [];
+    this.accepted = false;
+    this.unusable = false;
+    /** @type {Error | null} */
+    this.sendError = null;
     /** @type {FakeWebSocket | null} */
     this.peer = null;
     /** @type {Map<string, Array<(event: any) => void>>} */
     this.listeners = new Map();
   }
 
-  accept() {}
+  /** @param {unknown} [options] */
+  accept(options = undefined) {
+    this.acceptCalls.push(options);
+    this.acceptBinaryTypes.push(this.binaryType);
+    this.accepted = true;
+  }
 
   /** @param {string} type @param {(event: any) => void} callback */
   addEventListener(type, callback) {
@@ -43,19 +67,52 @@ class FakeWebSocket {
 
   /** @param {string} type @param {any} [event] */
   dispatch(type, event = {}) {
+    const acceptOptions = this.acceptCalls.at(-1);
+    const allowHalfOpen = acceptOptions !== null
+      && typeof acceptOptions === "object"
+      && /** @type {{ allowHalfOpen?: unknown }} */ (acceptOptions).allowHalfOpen === true;
+    if (type === "close") {
+      if (event.code === 1006) {
+        this.unusable = true;
+      } else if (
+        this.accepted
+        && !allowHalfOpen
+        && (event.code === 1005 || isSendableCloseCode(event.code))
+      ) {
+        this.closed = { code: event.code, reason: event.reason };
+        if (this.peer) this.peer.closed = { code: event.code, reason: event.reason };
+      }
+    } else if (type === "error") {
+      this.unusable = true;
+    }
     for (const callback of this.listeners.get(type) || []) callback(event);
   }
 
   /** @param {unknown} data */
   send(data) {
+    if (this.sendError) throw this.sendError;
     if (this.closed) throw new Error(`${this.name} is closed`);
+    if (!this.accepted) throw new TypeError(`${this.name} is not accepted`);
     (this.peer || this).sent.push(data);
   }
 
-  /** @param {number} code @param {string} reason */
-  close(code, reason) {
-    this.closed = { code, reason };
-    if (this.peer) this.peer.closed = { code, reason };
+  /** @param {number} [code] @param {string} [reason] */
+  close(code = undefined, reason = undefined) {
+    this.closeCalls.push({ code, reason });
+    if (code !== undefined && !isSendableCloseCode(code)) {
+      throw new DOMException(`Invalid WebSocket close code: ${code}.`, "InvalidAccessError");
+    }
+    if (reason !== undefined && code === undefined) {
+      throw new DOMException("WebSocket close reason requires a code.", "InvalidAccessError");
+    }
+    if (reason !== undefined && new TextEncoder().encode(reason).byteLength > 123) {
+      throw new DOMException("WebSocket close reason exceeds 123 bytes.", "SyntaxError");
+    }
+    if (!this.accepted) throw new TypeError(`${this.name} is not accepted`);
+    if (this.closed || this.unusable) return;
+    const closed = { code: code ?? 1005, reason: reason ?? "" };
+    this.closed = closed;
+    if (this.peer) this.peer.closed = closed;
   }
 }
 
@@ -77,6 +134,7 @@ const { proxyGatewayWebSocket, webSocketProxyOptionsFromEnv } = await importRepo
   [
     [/from "shared-observability";/, `from ${JSON.stringify(repositoryFileUrl("shared/observability.js"))};`],
     [/from "shared-respond";/, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
+    [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
     [/from "gateway-lib";/, `from ${JSON.stringify(repositoryFileUrl("gateway/lib.js"))};`],
   ]
 );
@@ -113,11 +171,35 @@ test("gateway websocket proxy relays upstream server-pushed frames", () => {
     (/** @type {string} */ outcome) => outcomes.push(outcome)
   );
 
+  assert.deepEqual(/** @type {any} */ (lastPair)[1].acceptCalls, [undefined]);
+  assert.deepEqual(upstream.acceptCalls, [undefined]);
+  assert.deepEqual(/** @type {any} */ (lastPair)[1].acceptBinaryTypes, ["arraybuffer"]);
+  assert.deepEqual(upstream.acceptBinaryTypes, ["arraybuffer"]);
+
   assert.equal(response.status, 101);
   assert.equal(response.webSocket, /** @type {any} */ (lastPair)[0]);
   upstream.dispatch("message", { data: "open" });
   assert.deepEqual(responseWebSocket(response).sent, ["open"]);
   assert.deepEqual(outcomes, ["established"]);
+});
+
+test("gateway websocket proxy relays binary frames in both directions", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    }
+  );
+  const fromBackend = Uint8Array.from([0, 1, 127, 128, 255]).buffer;
+  const fromClient = Uint8Array.from([255, 128, 127, 1, 0]).buffer;
+
+  upstream.dispatch("message", { data: fromBackend });
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: fromClient });
+  await waitFor(() => upstream.sent.length === 1);
+
+  assert.deepEqual(responseWebSocket(response).sent, [fromBackend]);
+  assert.deepEqual(upstream.sent, [fromClient]);
 });
 
 test("gateway websocket proxy strips internal routing headers from upgrade response", () => {
@@ -176,6 +258,7 @@ test("gateway websocket proxy proactively reconnects after abnormal upstream clo
   await waitFor(() => connects === 1);
   upstream2.dispatch("message", { data: "after-reconnect" });
 
+  assert.deepEqual(upstream1.closed, { code: 1011, reason: "runtime restart" });
   assert.deepEqual(responseWebSocket(response).sent, ["after-reconnect"]);
   assert.deepEqual(outcomes, ["established", "upstream_abnormal_close", "reconnected"]);
   assert.deepEqual(events, [{
@@ -219,6 +302,7 @@ test("gateway websocket proxy drops queued client frames after downstream close"
   await delay(0);
 
   assert.deepEqual(upstream.sent, []);
+  assert.deepEqual(upstream.closed, { code: 1000, reason: "client done" });
 });
 
 test("gateway websocket proxy ignores delayed close from a replaced upstream", async () => {
@@ -271,7 +355,7 @@ test("gateway websocket proxy closes the session when downstream send fails", ()
     }
   );
 
-  /** @type {any} */ (lastPair)[1].closed = { code: 1011, reason: "write failed" };
+  /** @type {any} */ (lastPair)[1].sendError = new Error("write failed");
   upstream.dispatch("message", { data: "server-push" });
 
   assert.deepEqual(responseWebSocket(response).closed, {
@@ -373,6 +457,36 @@ test("gateway websocket proxy keeps a client send alive across bounded reconnect
   assert.equal(attempts, 3);
   assert.deepEqual(outcomes, ["established", "reconnected"]);
   assert.deepEqual(events, []);
+});
+
+test("gateway websocket proxy closes both upstreams when a retried send also fails", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  upstream1.sendError = new Error("first write failed");
+  upstream2.sendError = new Error("second write failed");
+  /** @type {string[]} */
+  const outcomes = [];
+  let connects = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => {
+      connects += 1;
+      return websocketResponse(upstream2);
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome)
+  );
+
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "cannot-send" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+
+  assert.deepEqual(upstream1.closed, { code: 1011, reason: "upstream send failed" });
+  assert.deepEqual(upstream2.closed, { code: 1011, reason: "upstream send failed" });
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1011,
+    reason: "upstream send failed",
+  });
+  assert.equal(connects, 1);
+  assert.deepEqual(outcomes, ["established", "reconnected", "reconnect_failed"]);
 });
 
 test("gateway websocket proxy reports retry budget exhaustion", async () => {
@@ -586,6 +700,8 @@ test("gateway websocket proxy closes a late reconnect socket after client close"
   resolveReconnect(websocketResponse(upstream2));
 
   await waitFor(() => upstream2.closed !== null);
+  assert.deepEqual(upstream2.acceptCalls, [undefined]);
+  assert.deepEqual(upstream2.acceptBinaryTypes, ["arraybuffer"]);
   assert.deepEqual(upstream2.closed, { code: 1001, reason: "client closed" });
   assert.deepEqual(outcomes, ["established", "upstream_abnormal_close"]);
 });
@@ -664,11 +780,45 @@ test("gateway websocket proxy reports client error session lifetime", () => {
     }
   );
 
-  /** @type {any} */ (lastPair)[1].dispatch("close", { code: 1006, reason: "broken client" });
+  const reason = "broken-client-" + "界".repeat(50);
+  /** @type {any} */ (lastPair)[1].dispatch("close", { code: 1006, reason });
+  /** @type {any} */ (lastPair)[1].dispatch("error");
 
+  assert.deepEqual(/** @type {any} */ (lastPair)[1].closeCalls, [{
+    code: 1011,
+    reason: "broken-client-" + "界".repeat(36),
+  }]);
+  assert.deepEqual(upstream.closed, {
+    code: 1011,
+    reason: "broken-client-" + "界".repeat(36),
+  });
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0][1], "client_error");
   assert.ok(sessions[0][0] >= 0);
+  assert.deepEqual(events, []);
+});
+
+test("gateway websocket proxy preserves a client close without a status code", () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {Array<[number, string]>} */
+  const sessions = [];
+  proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    null,
+    {
+      recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) => sessions.push([durationMs, outcome]),
+    }
+  );
+
+  /** @type {any} */ (lastPair)[1].dispatch("close", { code: 1005, reason: "" });
+
+  assert.deepEqual(upstream.closeCalls, [{ code: undefined, reason: undefined }]);
+  assert.deepEqual(upstream.closed, { code: 1005, reason: "" });
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0][1], "client_closed");
 });
 
 test("gateway websocket proxy reports downstream error session lifetime", () => {
@@ -692,6 +842,14 @@ test("gateway websocket proxy reports downstream error session lifetime", () => 
 
   /** @type {any} */ (lastPair)[1].dispatch("error");
 
+  assert.deepEqual(/** @type {any} */ (lastPair)[1].closeCalls, [{
+    code: 1011,
+    reason: "downstream error",
+  }]);
+  assert.deepEqual(upstream.closed, {
+    code: 1011,
+    reason: "downstream error",
+  });
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0][1], "downstream_error");
   assert.ok(sessions[0][0] >= 0);
@@ -722,6 +880,7 @@ test("gateway websocket proxy propagates normal upstream close", () => {
 
   upstream.dispatch("close", { code: 1000, reason: "done" });
 
+  assert.deepEqual(upstream.closed, { code: 1000, reason: "done" });
   assert.deepEqual(responseWebSocket(response).closed, { code: 1000, reason: "done" });
   assert.deepEqual(adjustments, [
     ["connection", "active", 1],
@@ -730,4 +889,33 @@ test("gateway websocket proxy propagates normal upstream close", () => {
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0][1], "upstream_normal_close");
   assert.ok(sessions[0][0] >= 0);
+});
+
+test("gateway websocket proxy propagates an upstream close without a status code", () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  /** @type {Array<[number, string]>} */
+  const sessions = [];
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {
+      recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) => sessions.push([durationMs, outcome]),
+    }
+  );
+
+  upstream.dispatch("close", { code: 1005, reason: "" });
+
+  assert.deepEqual(/** @type {any} */ (lastPair)[1].closeCalls, [{
+    code: undefined,
+    reason: undefined,
+  }]);
+  assert.deepEqual(responseWebSocket(response).closed, { code: 1005, reason: "" });
+  assert.deepEqual(outcomes, ["established"]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0][1], "upstream_normal_close");
 });

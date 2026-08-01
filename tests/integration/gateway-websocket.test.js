@@ -5,10 +5,15 @@ import {
   adminPost,
   composeRecreate,
   deployAndPromote,
+  encodeClientBinaryFrame,
+  encodeClientCloseFrameWithoutStatus,
   encodeClientTextFrame,
   envoyStat,
+  gatewayFetch,
+  readOneServerBinaryFrame,
   readOneServerCloseFrame,
   readOneServerTextFrame,
+  responseJson,
   hostWsHandshake,
   gatewayUrl,
   wsHandshake,
@@ -16,6 +21,7 @@ import {
   GATEWAY_PORT,
   uniqueNs,
   setupIntegrationSuite,
+  waitUntil,
 } from "./helpers/index.js";
 import { prometheusCounter } from "./helpers/prometheus.js";
 
@@ -53,7 +59,7 @@ async function gatewayWebSocketSessionLifetimeCount(outcome) {
   });
 }
 
-test("ws upgrade: client ⇄ gateway ⇄ runtime ⇄ loaded worker echoes a frame", async () => {
+test("ws upgrade: client ⇄ gateway ⇄ runtime ⇄ loaded worker echoes text and binary frames", async () => {
   const ns = uniqueNs("ws");
   const name = "echo";
   const code = `
@@ -65,8 +71,13 @@ test("ws upgrade: client ⇄ gateway ⇄ runtime ⇄ loaded worker echoes a fram
         const pair = new WebSocketPair();
         const client = pair[0];
         const server = pair[1];
+        server.binaryType = "arraybuffer";
         server.accept();
         server.addEventListener("message", (evt) => {
+          if (evt.data instanceof ArrayBuffer) {
+            server.send(evt.data);
+            return;
+          }
           server.send("echo:" + evt.data);
         });
         return new Response(null, { status: 101, webSocket: client });
@@ -89,6 +100,11 @@ test("ws upgrade: client ⇄ gateway ⇄ runtime ⇄ loaded worker echoes a fram
     const received = readOneServerTextFrame(socket);
     socket.write(encodeClientTextFrame("hello"));
     assert.equal(await received, "echo:hello");
+
+    const binary = Buffer.from([0, 1, 127, 128, 255]);
+    const binaryReceived = readOneServerBinaryFrame(socket);
+    socket.write(encodeClientBinaryFrame(binary));
+    assert.deepEqual(await binaryReceived, binary);
     const afterEnvoy = envoyStat("cluster.user_runtime.upstream_rq_total");
     assert.ok(afterEnvoy > beforeEnvoy, "gateway should reach user-runtime through Envoy for websocket upgrades");
     assert.ok(
@@ -99,6 +115,51 @@ test("ws upgrade: client ⇄ gateway ⇄ runtime ⇄ loaded worker echoes a fram
       await gatewayWebSocketProxyConnections("active") > beforeActiveConnections,
       "gateway should report the active held websocket"
     );
+  } finally {
+    socket.destroy();
+  }
+});
+
+test("ws close without a status remains status-free across gateway and runtime", async () => {
+  const ns = uniqueNs("ws-no-status-close");
+  const name = "echo";
+  const code = `
+    let observedClose = null;
+
+    export default {
+      async fetch(request) {
+        if (request.headers.get("Upgrade") !== "websocket") {
+          return Response.json(observedClose);
+        }
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const server = pair[1];
+        server.accept();
+        server.addEventListener("close", (evt) => {
+          observedClose = { code: evt.code, reason: evt.reason };
+        });
+        return new Response(null, { status: 101, webSocket: client });
+      },
+    };
+  `;
+  await deployAndPromote(ns, name, { code });
+
+  const { status, socket } = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(status, 101);
+    const reciprocalClose = readOneServerCloseFrame(socket);
+    socket.write(encodeClientCloseFrameWithoutStatus());
+    assert.deepEqual(await reciprocalClose, { code: null, reason: "" });
+
+    /** @type {{ code: number, reason: string } | null} */
+    let backendClose = null;
+    await waitUntil("backend observes status-free websocket close", async () => {
+      const response = await gatewayFetch(ns, `/${name}`);
+      if (response.status !== 200) return false;
+      backendClose = await responseJson(response);
+      return backendClose !== null;
+    }, { timeoutMs: 10_000, intervalMs: 100 });
+    assert.deepEqual(backendClose, { code: 1005, reason: "" });
   } finally {
     socket.destroy();
   }

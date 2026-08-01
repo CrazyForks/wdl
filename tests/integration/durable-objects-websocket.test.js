@@ -8,6 +8,7 @@ import {
   composeStop,
   assertStatus,
   deployAndPromote,
+  encodeClientBinaryFrame,
   encodeClientCloseFrame,
   encodeClientTextFrame,
   envoyStat,
@@ -15,6 +16,7 @@ import {
   gatewayUrl,
   frameJson,
   readJsonServerFrame,
+  readOneServerBinaryFrame,
   readOneServerTextFrame,
   serviceInternalGet,
   serviceInternalPost,
@@ -122,6 +124,11 @@ test("Durable Object WebSocket upgrade flows through gateway, Envoy, user-runtim
       storage: 2,
       text: "again",
     });
+
+    const binary = Buffer.from([0, 1, 127, 128, 255]);
+    const binaryReceived = readOneServerBinaryFrame(socket);
+    socket.write(encodeClientBinaryFrame(binary));
+    assert.deepEqual(await binaryReceived, binary);
 
     assert.ok(
       envoyStat("cluster.user_runtime.upstream_rq_total") > beforeUserEnvoy,
@@ -273,6 +280,11 @@ test("Durable Object hibernation WebSocket API round-trips through the gateway-h
       allSockets: 1,
       text: "hello",
     });
+
+    const binary = Buffer.from([255, 128, 127, 1, 0]);
+    const binaryReceived = readOneServerBinaryFrame(socket);
+    socket.write(encodeClientBinaryFrame(binary));
+    assert.deepEqual(await binaryReceived, binary);
   } finally {
     socket.destroy();
   }

@@ -133,6 +133,15 @@ whether a route changed.
 - Pattern branch leaves the request path unchanged; subdomain branch strips the leading
   worker segment.
 - WebSocket backend reconnect is bounded and owns a bounded client-frame buffer.
+- Gateway-owned WebSocket peers use `arraybuffer` binary delivery so text and binary
+  messages can be forwarded without changing their frame type. Tenant WebSocket code
+  retains workerd's normal `binaryType` contract.
+- Client close and error events terminate both the public WebSocket pair and the current
+  backend socket. Backend Close frames use workerd's default reciprocal Close handling
+  instead of leaving old backend sockets half-open during normal closure or reconnect.
+  A Close frame without a status remains status-free; abnormal codes that cannot appear
+  on the wire are forwarded as `1011`, and forwarded reasons are bounded to the WebSocket
+  123-byte UTF-8 limit.
 
 ## Security Boundaries
 

@@ -26,9 +26,14 @@ export class Room extends DurableObject {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
+    server.binaryType = "arraybuffer";
     server.accept();
     const objectId = String(this.ctx.id);
     server.addEventListener("message", (evt) => {
+      if (evt.data instanceof ArrayBuffer) {
+        server.send(evt.data);
+        return;
+      }
       this.memory += 1;
       server.send(JSON.stringify({
         objectId,

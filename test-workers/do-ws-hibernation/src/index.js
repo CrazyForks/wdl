@@ -43,6 +43,10 @@ export class Room extends DurableObject {
   }
 
   async webSocketMessage(ws, message) {
+    if (message instanceof ArrayBuffer) {
+      ws.send(message);
+      return;
+    }
     const attachment = ws.deserializeAttachment();
     if (String(message) === "bump") {
       const next = {

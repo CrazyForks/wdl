@@ -1,5 +1,6 @@
 import { logStructured } from "shared-observability";
 import { discardResponseBody } from "shared-respond";
+import { utf8ByteLength } from "shared-utf8";
 import { deleteGatewayInternalHeaders } from "gateway-lib";
 
 /**
@@ -19,6 +20,37 @@ import { deleteGatewayInternalHeaders } from "gateway-lib";
  * }} GatewayWebSocketObservability
  */
 
+const MAX_WEBSOCKET_CLOSE_REASON_BYTES = 123;
+const UNSENDABLE_WEBSOCKET_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
+
+/** @param {number} code */
+function sendableWebSocketCloseCode(code) {
+  if (
+    !Number.isInteger(code)
+    || code < 1000
+    || code >= 5000
+    || UNSENDABLE_WEBSOCKET_CLOSE_CODES.has(code)
+  ) {
+    return 1011;
+  }
+  return code;
+}
+
+/** @param {string} reason */
+function boundedWebSocketCloseReason(reason) {
+  let bytes = 0;
+  let end = 0;
+  for (const character of reason) {
+    const characterBytes = utf8ByteLength(character);
+    if (bytes + characterBytes > MAX_WEBSOCKET_CLOSE_REASON_BYTES) {
+      return reason.slice(0, end);
+    }
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return reason;
+}
+
 /**
  * @param {WebSocket} peer
  * @param {number} code
@@ -26,15 +58,25 @@ import { deleteGatewayInternalHeaders } from "gateway-lib";
  */
 function closeWebSocket(peer, code, reason) {
   try {
-    peer.close(code, reason);
+    if (code === 1005 && reason === "") {
+      peer.close();
+      return;
+    }
+    peer.close(sendableWebSocketCloseCode(code), boundedWebSocketCloseReason(reason));
   } catch {
     // Closing a socket that is already closed or closing is harmless.
   }
 }
 
+/** @param {WebSocket} peer */
+function acceptProxyWebSocket(peer) {
+  peer.binaryType = "arraybuffer";
+  peer.accept();
+}
+
 /** @param {{ code: number }} evt */
 function websocketClosedNormally(evt) {
-  return evt.code === 1000;
+  return evt.code === 1000 || evt.code === 1005;
 }
 
 // Keep these defaults mirrored with the deployment env defaults when changing
@@ -157,7 +199,7 @@ export function proxyGatewayWebSocket(
   let sessionLifetimeRecorded = false;
   const sessionStartedAt = Date.now();
 
-  downstream.accept({ allowHalfOpen: true });
+  acceptProxyWebSocket(downstream);
 
   const reconnectDelaysMs = Array.isArray(options.reconnectDelaysMs)
     ? options.reconnectDelaysMs
@@ -254,8 +296,10 @@ export function proxyGatewayWebSocket(
    * @param {string} outcome
    */
   function closeDownstreamAndUpstream(code, reason, outcome) {
+    const currentUpstream = upstream;
+    upstream = null;
     closeDownstream(code, reason, outcome);
-    if (upstream) closeWebSocket(upstream, code, reason);
+    if (currentUpstream) closeWebSocket(currentUpstream, code, reason);
   }
 
   /** @param {WebSocket} nextUpstream */
@@ -263,7 +307,7 @@ export function proxyGatewayWebSocket(
     const attachedUpstream = nextUpstream;
     upstream = attachedUpstream;
     setDetached(false);
-    attachedUpstream.accept({ allowHalfOpen: true });
+    acceptProxyWebSocket(attachedUpstream);
     attachedUpstream.addEventListener("message", (evt) => {
       if (upstream !== attachedUpstream) return;
       try {
@@ -311,6 +355,7 @@ export function proxyGatewayWebSocket(
           throw new Error(`WebSocket reconnect failed with status ${response.status}`);
         }
         if (downstreamClosed) {
+          acceptProxyWebSocket(response.webSocket);
           closeWebSocket(response.webSocket, 1001, "client closed");
           throw new Error("WebSocket reconnect completed after client close");
         }
@@ -361,7 +406,7 @@ export function proxyGatewayWebSocket(
     });
   }
 
-  /** @param {string | ArrayBuffer | Blob} data */
+  /** @param {string | ArrayBuffer} data */
   async function sendClientMessage(data) {
     const current = upstream || await reconnectWithBudget();
     if (!current) throw new Error("WebSocket upstream unavailable");
@@ -369,6 +414,7 @@ export function proxyGatewayWebSocket(
       current.send(data);
     } catch {
       if (upstream === current) upstream = null;
+      closeWebSocket(current, 1011, "upstream send failed");
       setDetached(true);
       const reconnected = await reconnectWithBudget();
       if (!reconnected) throw new Error("WebSocket upstream unavailable");
@@ -403,7 +449,7 @@ export function proxyGatewayWebSocket(
           recordEvent("warn", "websocket_reconnect_failed", {
             reason: "send_failed",
           });
-          closeDownstream(1011, "upstream send failed", "reconnect_failed");
+          closeDownstreamAndUpstream(1011, "upstream send failed", "reconnect_failed");
         }
       }
     }).finally(() => {
@@ -414,13 +460,16 @@ export function proxyGatewayWebSocket(
     });
   });
   downstream.addEventListener("close", (evt) => {
-    markDownstreamClosed(websocketClosedNormally(evt) ? "client_closed" : "client_error");
-    if (upstream) closeWebSocket(upstream, evt.code, evt.reason);
+    closeDownstreamAndUpstream(
+      evt.code,
+      evt.reason,
+      websocketClosedNormally(evt) ? "client_closed" : "client_error"
+    );
   });
   downstream.addEventListener("error", () => {
+    if (downstreamClosed) return;
     recordEvent("warn", "websocket_downstream_error");
-    markDownstreamClosed("downstream_error");
-    if (upstream) closeWebSocket(upstream, 1011, "downstream error");
+    closeDownstreamAndUpstream(1011, "downstream error", "downstream_error");
   });
 
   record("established");

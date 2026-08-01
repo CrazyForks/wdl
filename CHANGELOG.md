@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Closed both sides of completed or failed Gateway WebSocket sessions, preserved status-free closes, normalized unsendable abnormal close codes, enabled bidirectional binary-frame forwarding, and restored public and backend close handshakes so abandoned sockets do not remain pinned until an external idle timeout.
+- Updated the bundled workerd and Workers types pins to `1.20260801.1` and `5.20260801.1`; upstream changes only advance release and maximum compatibility dates.
+
 ## wdl.20260730.1 - 2026-07-30
 
 - Further reduced Valkey round trips, command bytes, and request-path allocation across platform control and data paths through a shared typed command surface, bounded mixed pipelines, cached Lua scripts, and reusable RESP buffers.

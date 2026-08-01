@@ -74,6 +74,8 @@ Control 写 Redis 并 publish invalidation。Gateway 不反向调用 control 查
 - 数据面 route lookup 遇到 Redis outage 会表现为 gateway failure；admin-host forwarding 不依赖 route Redis 状态。
 - Pattern 分支保持原始 path；subdomain 分支会去掉最前面的 worker segment。
 - WebSocket backend reconnect 有上限，并且 client-frame buffer 有上限。
+- Gateway 自有 WebSocket peer 使用 `arraybuffer` 接收二进制消息，使文本帧和二进制帧都能保持原类型转发；tenant WebSocket 代码仍遵循 workerd 的常规 `binaryType` 合同。
+- Client close 和 error event 会同时终止公开 WebSocket pair 与当前 backend socket。Backend Close frame 使用 workerd 默认的 reciprocal Close 处理，不会在正常关闭或重连时留下半开旧 backend socket。无状态码 Close frame 仍保持无状态码；不能出现在 wire 上的异常 close code 会按 `1011` 转发，转发 reason 遵守 WebSocket 的 123-byte UTF-8 上限。
 
 ## 安全边界
 
