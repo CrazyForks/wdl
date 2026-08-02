@@ -1,8 +1,6 @@
-// Holds a WebSocket open for >4 minutes through the gateway. Anchors the
-// workerd hang-window regression: a gateway-worker fetch handler holding
-// a 101 used to be aborted with `Worker's code had hung` past ~3 min;
-// the GatewayWsHolder DO routes the upgrade onto an actor IoContext,
-// which `IoContext::abortFromHang` skips.
+// Holds a WebSocket open for >4 minutes through the direct gateway proxy.
+// Anchors the historical workerd hang-window regression after the gateway
+// WebSocket proxy moved back onto the ordinary worker entrypoint.
 //
 // Renamed off `.test.js` so the default integration runner does not pick
 // it up. Run explicitly:
@@ -28,7 +26,7 @@ before(async () => {
 });
 
 test(
-  "gateway holds a WebSocket open for >4 minutes across the workerd hang window",
+  "direct gateway proxy holds a WebSocket open for >4 minutes",
   { timeout: TICK_COUNT * HEARTBEAT_INTERVAL_MS + 60_000 },
   async () => {
     const ns = uniqueNs("ws-long-hold");

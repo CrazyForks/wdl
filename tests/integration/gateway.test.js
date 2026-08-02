@@ -166,7 +166,6 @@ test("gateway strips client-supplied internal forwarding headers", async () => {
         return Response.json({
           workerId: request.headers.get("x-worker-id"),
           prefix: request.headers.get("x-worker-prefix"),
-          upstreamBinding: request.headers.get("x-wdl-upstream-binding"),
           internalAuth: request.headers.get("x-wdl-internal-auth"),
           doOwnerHint: request.headers.get("x-wdl-do-owner-hint"),
           d1OwnerEndpoint: request.headers.get("x-wdl-d1-owner-endpoint"),
@@ -178,7 +177,6 @@ test("gateway strips client-supplied internal forwarding headers", async () => {
     headers: {
       "x-worker-id": "__platform__:platform-api:v1",
       "x-worker-prefix": "/forged",
-      "x-wdl-upstream-binding": "RUNTIME_SYSTEM",
       "x-wdl-internal-auth": "spoofed",
       "x-wdl-do-owner-hint": "1",
       "x-wdl-d1-owner-endpoint": "d1-runtime-a:8787",
@@ -187,7 +185,6 @@ test("gateway strips client-supplied internal forwarding headers", async () => {
   await assertIntegrationJson(res, 200, {
     workerId: "gwns-internal-headers:echo:v1",
     prefix: "/echo",
-    upstreamBinding: null,
     internalAuth: null,
     doOwnerHint: null,
     d1OwnerEndpoint: null,

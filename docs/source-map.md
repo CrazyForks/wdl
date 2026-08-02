@@ -16,9 +16,9 @@ are outside this map unless they own runtime or deployable service behavior.
 | `envoy/envoy.yaml` | Local Compose private mesh proxy used by integration tests and local development. |
 | `gateway/config.capnp` | Gateway workerd config: public `:8080`, `RUNTIME_USER`, `RUNTIME_SYSTEM`, and `CONTROL` externals. |
 | `gateway/config-local.capnp` | Local gateway workerd config compiled for Docker Compose with Envoy-backed private service routes. |
-| `gateway/index.js` | Gateway worker dispatch branches: admin-host short-circuit, subdomain routing, and pattern routing. |
+| `gateway/index.js` | Gateway worker dispatch branches: admin-host short-circuit, subdomain routing, pattern routing, and routed WebSocket proxy setup. |
 | `gateway/dispatch.js` | Pure gateway dispatch decision tree and route target selection. |
-| `gateway/holder.js`, `gateway/websocket.js` | WebSocket holder, reconnect forwarding, and `101` upgrade preservation. |
+| `gateway/websocket.js` | Local `WebSocketPair` termination, reconnect forwarding, and `101` upgrade preservation. |
 | `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, logging, metrics, and health/metrics snapshots. |
 | `gateway/lib.js` | Pure routing helpers used by workerd and Node tests. |
 | `runtime/config-user.capnp` | User runtime config: loader `:8081`, internal `:8088`, public-only loaded-worker outbound. |

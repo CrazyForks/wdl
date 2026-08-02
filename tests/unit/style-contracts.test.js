@@ -739,6 +739,16 @@ test("gateway entrypoint keeps persistent routing state in gateway/runtime.js", 
   assert.deepEqual(offenders, []);
 });
 
+test("gateway websocket proxy does not reintroduce GatewayWsHolder", () => {
+  const config = withoutLineComments(readRepoFile("gateway/config.capnp"));
+  const entrypoint = withoutLineComments(readRepoFile("gateway/index.js"));
+  const source = `${config}\n${entrypoint}`;
+  assert.doesNotMatch(
+    source,
+    /GatewayWsHolder|WS_HOLDER|gateway-ws-holder-v1|gateway-holder/
+  );
+});
+
 test("JS HTTP entrypoints use the shared request scope", () => {
   const files = ["control/index.js", "gateway/index.js", "runtime/index.js", "runtime/internal.js", "d1-runtime/index.js", "do-runtime/index.js"];
   const offenders = [];

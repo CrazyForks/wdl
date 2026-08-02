@@ -115,7 +115,7 @@ The platform is split into seven app services plus shared state:
 
 | Service | Role |
 |---|---|
-| `gateway` | Public/control ingress, host routing, custom pattern routing, WebSocket holder path. |
+| `gateway` | Public/control ingress, host routing, custom pattern routing, and WebSocket proxy/reconnect path. |
 | `user-runtime` | Tenant worker runtime pool, public-only outbound, local redis-proxy sidecar. |
 | `system-runtime` | Control/auth/static system workers and privileged `__system__` runtime pool. |
 | `d1-runtime` | D1 SQLite execution with owner leases and supervised workerd process. |

@@ -17,7 +17,6 @@ import { sanitizeRequestId } from "shared-observability";
 const SERVICE_BINDING_INTERNAL_HEADERS = [
   "x-worker-id",
   "x-worker-prefix",
-  "x-wdl-upstream-binding",
   INTERNAL_AUTH_HEADER,
 ];
 

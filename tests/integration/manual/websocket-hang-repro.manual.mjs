@@ -1,8 +1,6 @@
-// Local/manual websocket hang repro. Stops the backend longer
-// than the reconnect budget, then closes the client to drop the
-// remaining couple()-side PendingEvent so workerd's hang detector can
-// fire if this path is on the gateway-worker IoContext. The DO holder
-// path is exempt and should produce no "had hung".
+// Local/manual direct gateway websocket lifecycle regression. Stops the
+// backend longer than the reconnect budget, then closes the client. The
+// gateway should release the session without a "had hung" failure.
 //
 // Renamed off `.test.js` so the default integration runner does not
 // pick it up — this test stops `user-runtime`, which would break every
@@ -30,9 +28,10 @@ before(async () => {
 });
 
 test(
-  "backend stays down past reconnect budget while WS is held",
+  "direct gateway proxy releases a websocket after reconnect budget exhaustion",
   { timeout: 6 * 60_000 },
   async () => {
+    const logSince = new Date().toISOString();
     const ns = uniqueNs("ws-hang-repro");
     const code = `
       export default {
@@ -89,32 +88,32 @@ test(
 
     // workerd's hang error is from server.c++ stderr, not our structured
     // logger, so it may not carry our request id — search both.
-    const gatewayLogs = sh("docker compose logs gateway --since=8m", { stdio: "pipe" });
+    const gatewayLogs = sh(
+      `docker compose logs --no-color --since=${logSince} gateway`,
+      { stdio: "pipe" }
+    );
     const idLogs = gatewayLogs
       .split("\n")
       .filter((line) => line.includes(requestId))
       .join("\n");
-    const allLogs = gatewayLogs
+    const hangPattern = /had hung|abortFromHang|worker.*hung/i;
+    const hangLogs = gatewayLogs
       .split("\n")
-      .filter((line) => /had hung|abortFromHang|worker.*hung/i.test(line))
+      .filter((line) => hangPattern.test(line))
       .join("\n");
-    const hung = /had hung/i.test(idLogs) || /had hung/i.test(allLogs);
+    const hung = hangPattern.test(idLogs) || hangLogs.trim().length > 0;
     const reconnectFailed = /websocket_reconnect_failed/.test(idLogs);
 
     console.log("repro result", { requestId, reconnectFailed, hung });
     console.log("---structured log for this request---");
     console.log(idLogs);
-    if (allLogs.trim().length > 0) {
+    if (hangLogs.trim().length > 0) {
       console.log("---hang-related lines (any request)---");
-      console.log(allLogs);
+      console.log(hangLogs);
     }
 
     assert.ok(reconnectFailed, "gateway should log websocket_reconnect_failed");
-
-    if (hung) {
-      console.log("HANG DETECTOR FIRED on this path");
-    } else {
-      console.log("no hang detector fire on this path");
-    }
+    assert.equal(hung, false, `gateway hang detector fired:\n${hangLogs || idLogs}`);
+    console.log("no hang detector fire on this path");
   }
 );

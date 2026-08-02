@@ -6,7 +6,7 @@ Gateway 是公开数据面入口，也是 admin-host 入口 shim。它把 tenant
 
 ## 当前实现
 
-workerd 入口是 `gateway/index.js`。纯 route 解析在 `gateway/dispatch.js` 和 `gateway/lib.js`；静态 routing option memoization 及 Redis/cache/subscriber 逻辑在 `gateway/runtime.js`；WebSocket 生命周期在 `gateway/holder.js` 和 `gateway/websocket.js`。
+workerd 入口是 `gateway/index.js`。纯 route 解析在 `gateway/dispatch.js` 和 `gateway/lib.js`；静态 routing option memoization 及 Redis/cache/subscriber 逻辑在 `gateway/runtime.js`；WebSocket 生命周期在 `gateway/websocket.js`。
 
 Gateway 有三条 dispatch 分支：
 
@@ -26,7 +26,7 @@ Gateway 有三条 dispatch 分支：
 - Health 和 metrics：公开 listener 上的根 `/healthz` 和 `/_metrics` 是 gateway 保留路径。
 - Admin-host forwarding：`ADMIN_HOST` 转发到 control。
 - 数据面 forwarding：进入 runtime loader socket，而不是 runtime internal dispatch socket。
-- WebSocket upgrade：移入 `GatewayWsHolder` Durable Object，避免长生命周期 101 响应挂在普通 gateway request IoContext 上。
+- WebSocket upgrade：gateway 在本地终结公开 `WebSocketPair`，并直接通过解析出的 runtime binding 代理。
 
 ## Routing 和 Cache 模型
 
@@ -39,7 +39,7 @@ Gateway 没有控制面权威。它只是把 Redis route state 投影成一个�
 - Route 和 pattern cache 是每个 gateway isolate 内的有界性能 cache。它们不是事实来源；Redis 才是当前 route source of truth。
 - `routes:invalidate`、`patterns:invalidate` 和 `routes:flush` 是非持久 pub/sub hint。Gateway 在 subscriber connect/disconnect 时清 cache，因此漏掉消息后下一次 lookup 会重新读 Redis 修复。
 - Pattern host ownership 移动会 publish `patterns:invalidate`，但这个 hint 仍然非持久。Gateway 如果错过 pub/sub message，可能继续从有界内存 cache 提供旧的 `patterns:<host>` projection，直到 subscriber reconnect 或 process restart 清空 cache；这是已接受的 stale-cache window，不是持久授权记录。
-- WebSocket upgrade 使用和 HTTP 相同的 route resolution，然后把公开 socket 交给 `GatewayWsHolder`。Holder 负责 backend reconnect 尝试和有界 client-frame buffer；rolling gateway 或 runtime 仍可能断开物理 client connection。
+- WebSocket upgrade 使用和 HTTP 相同的 route resolution。Gateway 在本地终结公开 socket，并直接通过解析出的 runtime binding 代理。Proxy 负责 backend reconnect 尝试和有界 client-frame buffer；rolling gateway 或 runtime 仍可能断开物理 client connection。
 
 ## Redis / Storage 合同
 
@@ -105,8 +105,8 @@ Gateway 输出包含 request id、route context 和 outcome 的 request log。Me
 - `tests/unit/gateway-lib.test.js`
 - `tests/unit/gateway-runtime.test.js`
 - `tests/unit/gateway-websocket.test.js`
-- `tests/unit/gateway-holder.test.js`
 - `tests/integration/gateway.test.js`
+- `tests/integration/gateway-websocket.test.js`
 - `tests/integration/routing-gateway.test.js`
 - `tests/unit/style-contracts.test.js`
 

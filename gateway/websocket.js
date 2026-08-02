@@ -18,6 +18,7 @@ import { deleteGatewayInternalHeaders } from "gateway-lib";
  *   adjustBufferedMessages?: (delta: number) => void,
  *   recordSessionLifetime?: (durationMs: number, outcome: string) => void,
  * }} GatewayWebSocketObservability
+ * @typedef {{ fetch(request: Request): Promise<Response> }} GatewayWebSocketUpstream
  */
 
 const MAX_WEBSOCKET_CLOSE_REASON_BYTES = 123;
@@ -165,6 +166,21 @@ export function webSocketProxyOptionsFromEnv(env = {}) {
 /** @param {number} ms */
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Build a fresh upstream upgrade request for the initial connection and every
+ * reconnect while preserving the routed URL, headers, and WebSocket key.
+ * @param {Request} request
+ * @param {GatewayWebSocketUpstream} upstream
+ * @returns {() => Promise<Response & { webSocket?: WebSocket }>}
+ */
+export function createGatewayWebSocketUpstreamFetch(request, upstream) {
+  const url = request.url;
+  const headers = new Headers(request.headers);
+  return async () => /** @type {Response & { webSocket?: WebSocket }} */ (
+    await upstream.fetch(new Request(url, { method: "GET", headers }))
+  );
 }
 
 /**

@@ -454,10 +454,9 @@ export function recordPatternMatchComparisons(outcome, comparisons) {
   metrics.observe("pattern_match_comparisons", { service: "gateway", outcome }, comparisons);
 }
 
-// WS upgrades return 101 from the holder DO once the initial upstream
-// handshake completes; the proxy then runs async on the DO actor, so this
-// metric covers handshake only. Full WS session lifetime is reported by
-// recordGatewayWebSocketSessionLifetime.
+// WS upgrades return 101 once the initial upstream handshake completes; the
+// local proxy then runs asynchronously, so this metric covers handshake only.
+// Full WS session lifetime is reported by recordGatewayWebSocketSessionLifetime.
 /**
  * @param {number} durationMs
  * @param {string} binding

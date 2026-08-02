@@ -16,7 +16,7 @@ DO 执行被隔离在 `do-runtime`，这是监听 `:8788` 的独立 workerd serv
 - `do-runtime/alarm*.js`
 - 负责 drain/renew process supervision 的 `supervisor`
 
-workerd 在 host actor 内提供 native Durable Object 执行模型：class construction、facet identity、SQLite-backed storage、同步 `ctx.storage.sql`、alarm 的 storage-facing API surface，以及 facet 内 WebSocket hibernation API。WDL 补的是 Cloudflare 平台通常在 isolate 外部提供的部分：namespace binding materialization、owner lookup、路由到 owning task、Redis-backed lease/fence state、gateway-held public WebSocket forwarding、通过 Workflows 驱动的 alarm scheduling 和 lifecycle cleanup metadata。
+workerd 在 host actor 内提供 native Durable Object 执行模型：class construction、facet identity、SQLite-backed storage、同步 `ctx.storage.sql`、alarm 的 storage-facing API surface，以及 facet 内 WebSocket hibernation API。WDL 补的是 Cloudflare 平台通常在 isolate 外部提供的部分：namespace binding materialization、owner lookup、路由到 owning task、Redis-backed lease/fence state、gateway-managed public WebSocket forwarding、通过 Workflows 驱动的 alarm scheduling 和 lifecycle cleanup metadata。
 
 WDL 会 shim `ctx.storage.setAlarm()`、`getAlarm()` 和 `deleteAlarm()`，因为 stock workerd 在 WDL 使用的 SQLite-backed facet 上会对 native alarm 抛错。Alarm state 存在 object SQLite 中；Workflows 在 DB 2 中拥有 backend due/retry/discard job state。Alarm 写入支持在 async `ctx.storage.transaction()` callback 内使用，shim 会在 transaction commit 后 flush backend side effect。`transactionSync()` 无法 await 这些 side effect，因此在同步 transaction callback 内调用 `setAlarm()` 或 `deleteAlarm()` 会抛错。
 
@@ -157,7 +157,7 @@ do-runtime 围绕 owner resolution、dispatch、alarm execution、drain、renew 
 - 当前 lifecycle 不会在 worker delete 时物理清除 native facet SQLite storage。
 - Whole-worker delete 会删除 active `worker:do-storage:<ns>:<worker>` pointer，并在 delete commit 后请求 Workflows 删除 internal DO alarm jobs；pointer 消失后，旧 facet 的 late `setAlarm()` 写入会被忽略。Cleanup 会 fence 到被删除的 `doStorageId`，因此同名 worker 以新 storage id redeploy 后不会被旧 delete 扫掉。如果 best-effort cleanup 失败，远期残留 alarm job 可能留在 DB 2 直到到期；随后 dispatch 会因为 storage pointer 已消失而自清理。First owner claim 会 WATCH 同一把 per-worker delete lock 和 storage pointer；只有 `whole` lock kind 会拒绝 ownership，因此删除 inactive version 不会中断 active worker，而 whole-worker delete 也不会漏掉最终 owner scan 之后创建的 owner/generation state。`do:objects:<doStorageId>` 会作为未来 platform cleanup 的 tombstone 保留。
 - DO object registry 写入是 best-effort。Registry 写失败时 dispatch 会继续，因此 tombstone set 可能不完整；未来 cleanup 必须容忍缺失 member，并把 active storage pointer、owner/alarm state 当成更强的 lifecycle signal。
-- Gateway-held WebSocket recovery 只对 client connection continuity 做 best-effort。Backend DO facet 在初始 `101` 之后不会逐消息 re-fence；owner handoff 安全依赖 reconnect/rebind 行为，以及创建 backend facet 前运行的 owner-side dispatch fence。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
+- Gateway-proxied WebSocket recovery 只对 client connection continuity 做 best-effort。Backend DO facet 在初始 `101` 之后不会逐消息 re-fence；owner handoff 安全依赖 reconnect/rebind 行为，以及创建 backend facet 前运行的 owner-side dispatch fence。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
 - Owner-hinted WebSocket direct retry 失败不会 fall back 到 router，因为最终 101 必须来自 owner endpoint。
 - 无可信标记的 ordinary fetch/RPC direct failure 只有安全的 `GET`/`HEAD` request 会 fall back 到 router。非幂等 method 和 RPC 在 outcome 可能未知时返回 `owner_unavailable`。可信 owner-hint 或明确的 stale-owner/owner-race response 对所有 method 都可重试一次，因为它们证明 dispatch 未进入 tenant code。
 - Renamed/deleted migrations 延后。

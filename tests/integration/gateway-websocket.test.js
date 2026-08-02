@@ -1,19 +1,24 @@
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import {
   adminPost,
   composeRecreate,
+  delay,
   deployAndPromote,
   encodeClientBinaryFrame,
+  encodeClientCloseFrame,
   encodeClientCloseFrameWithoutStatus,
   encodeClientTextFrame,
   envoyStat,
   gatewayFetch,
+  parseStdoutJson,
   readOneServerBinaryFrame,
   readOneServerCloseFrame,
   readOneServerTextFrame,
   responseJson,
+  sh,
   hostWsHandshake,
   gatewayUrl,
   wsHandshake,
@@ -26,6 +31,214 @@ import {
 import { prometheusCounter } from "./helpers/prometheus.js";
 
 setupIntegrationSuite();
+
+const GATEWAY_HANG_PATTERN = /had hung and would never generate a response/i;
+const TRACKED_WEBSOCKET_WORKER = readFileSync(
+  new URL("../../test-workers/ws-lifecycle/src/index.js", import.meta.url),
+  "utf8"
+);
+/**
+ * @typedef {{
+ *   active: number,
+ *   opened: number,
+ *   closed: number,
+ *   lastClose: { code: number | null, reason: string } | null,
+ * }} TrackedWebSocketState
+ * @typedef {{
+ *   socketFds: number,
+ *   closeWait: number,
+ *   processStartTicks: string,
+ *   socketInodes: string[],
+ * }} GatewaySocketStats
+ * @typedef {{ baselineInodes: Set<string>, trackedInodes: Set<string> }} GatewaySocketTracker
+ */
+const GATEWAY_SOCKET_PROBE = `
+  import { readdirSync, readFileSync, readlinkSync } from "node:fs";
+
+  const socketInodes = [];
+  for (const fd of readdirSync("/proc/1/fd")) {
+    try {
+      const match = readlinkSync("/proc/1/fd/" + fd).match(/^socket:\\[(\\d+)\\]$/);
+      if (match) socketInodes.push(match[1]);
+    } catch {}
+  }
+
+  let closeWait = 0;
+  for (const table of ["/proc/1/net/tcp", "/proc/1/net/tcp6"]) {
+    const rows = readFileSync(table, "utf8").trimEnd().split("\\n").slice(1);
+    for (const row of rows) {
+      if (row.trim().split(/\\s+/)[3] === "08") closeWait += 1;
+    }
+  }
+
+  const stat = readFileSync("/proc/1/stat", "utf8");
+  const processStartTicks = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\\s+/)[19];
+  process.stdout.write(JSON.stringify({
+    socketFds: socketInodes.length,
+    closeWait,
+    processStartTicks,
+    socketInodes: socketInodes.sort(),
+  }) + "\\n");
+`;
+
+/** @returns {GatewaySocketStats} */
+function gatewaySocketStats() {
+  const containerId = sh("docker compose ps -q gateway").trim();
+  assert.match(containerId, /^[0-9a-f]{12,64}$/i, "gateway container id");
+  const output = sh(
+    `docker run -i --rm --pull=never --network=none --pid=container:${containerId} ` +
+      "node:24-slim node --input-type=module",
+    { input: GATEWAY_SOCKET_PROBE }
+  );
+  const stats = /** @type {GatewaySocketStats} */ (
+    parseStdoutJson(output, "gateway socket probe stdout")
+  );
+  assert.equal(stats.socketFds, stats.socketInodes.length, "gateway socket probe fd count");
+  return stats;
+}
+
+async function gatewaySocketBaseline() {
+  // Let preparatory HTTP metric/state reads drop their keep-alive sockets,
+  // then sample across Docker health checks to find the process socket floor.
+  await delay(5_000);
+  /** @type {GatewaySocketStats | null} */
+  let baseline = null;
+  let processStartTicks = "";
+  for (let sample = 0; sample < 8; sample += 1) {
+    const current = gatewaySocketStats();
+    if (processStartTicks) {
+      assert.equal(current.processStartTicks, processStartTicks, "gateway restarted during baseline");
+    } else {
+      processStartTicks = current.processStartTicks;
+    }
+    if (current.closeWait === 0 && (!baseline || current.socketFds < baseline.socketFds)) {
+      baseline = current;
+    }
+    if (sample < 7) await delay(250);
+  }
+  assert.ok(baseline, "gateway should reach a baseline without CLOSE_WAIT sockets");
+  return baseline;
+}
+
+/**
+ * @param {GatewaySocketStats} baseline
+ * @param {GatewaySocketStats} active
+ * @param {number} minimumNewSockets
+ * @returns {GatewaySocketTracker}
+ */
+function gatewaySocketTracker(baseline, active, minimumNewSockets) {
+  assert.equal(active.processStartTicks, baseline.processStartTicks);
+  const baselineInodes = new Set(baseline.socketInodes);
+  const trackedInodes = new Set(
+    active.socketInodes.filter((inode) => !baselineInodes.has(inode))
+  );
+  assert.ok(
+    trackedInodes.size >= minimumNewSockets,
+    `gateway socket probe observed ${trackedInodes.size}, expected at least ${minimumNewSockets}`
+  );
+  return { baselineInodes, trackedInodes };
+}
+
+/**
+ * @param {GatewaySocketStats} baseline
+ * @param {GatewaySocketTracker} tracker
+ * @param {string} label
+ */
+async function waitForGatewaySocketsReleased(baseline, tracker, label) {
+  let stableSamples = 0;
+  let current = gatewaySocketStats();
+  /** @type {string[]} */
+  let retainedInodes = [];
+  try {
+    await waitUntil(label, () => {
+      current = gatewaySocketStats();
+      assert.equal(
+        current.processStartTicks,
+        baseline.processStartTicks,
+        "gateway restarted while releasing websocket sockets"
+      );
+      for (const inode of current.socketInodes) {
+        if (!tracker.baselineInodes.has(inode)) tracker.trackedInodes.add(inode);
+      }
+      retainedInodes = current.socketInodes.filter((inode) => tracker.trackedInodes.has(inode));
+      if (
+        current.closeWait === 0 &&
+        current.socketFds <= baseline.socketFds &&
+        retainedInodes.length === 0
+      ) {
+        stableSamples += 1;
+      } else {
+        stableSamples = 0;
+      }
+      return stableSamples >= 2;
+    }, { timeoutMs: 15_000, intervalMs: 250 });
+  } catch (err) {
+    throw new Error(
+      `${label}: baseline=${baseline.socketFds}, current=${current.socketFds}, ` +
+        `CLOSE_WAIT=${current.closeWait}, retained=${retainedInodes.join(",") || "none"}`,
+      { cause: err }
+    );
+  }
+}
+
+/** @param {string} since */
+async function assertNoGatewayHangSince(since) {
+  // Historical lifecycle failures reached abortFromHang within 500 ms. Leave
+  // the Gateway idle before reading logs so this check cannot mask the signal.
+  await delay(1_000);
+  const logs = sh(`docker compose logs --no-color --since=${since} gateway`);
+  assert.doesNotMatch(logs, GATEWAY_HANG_PATTERN);
+}
+
+/** @param {import("node:net").Socket} socket */
+function waitForSocketClose(socket) {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for websocket TCP close"));
+    }, 5_000);
+    function cleanup() {
+      clearTimeout(timer);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    }
+    function onClose() {
+      cleanup();
+      resolve(undefined);
+    }
+    /** @param {unknown} err */
+    function onError(err) {
+      cleanup();
+      reject(err);
+    }
+    socket.on("close", onClose);
+    socket.on("error", onError);
+  });
+}
+
+/** @param {string} ns @param {string} name @returns {Promise<TrackedWebSocketState>} */
+async function trackedWebSocketState(ns, name) {
+  const response = await gatewayFetch(ns, `/${name}`);
+  assert.equal(response.status, 200, "tracked websocket state response");
+  return /** @type {TrackedWebSocketState} */ (responseJson(response));
+}
+
+/** @param {string} ns @param {string} name @param {string} payload */
+async function openEchoWebSocket(ns, name, payload) {
+  const { status, socket } = await wsHandshake(ns, `/${name}`);
+  socket.on("error", () => {});
+  try {
+    assert.equal(status, 101);
+    const echoed = readOneServerTextFrame(socket);
+    socket.write(encodeClientTextFrame(payload));
+    assert.equal(await echoed, `echo:${payload}`);
+    return socket;
+  } catch (err) {
+    socket.destroy();
+    throw err;
+  }
+}
 
 
 /** @param {string} outcome */
@@ -48,6 +261,15 @@ async function gatewayWebSocketProxyConnections(state) {
     service: "gateway",
     state,
   });
+}
+
+/** @param {string} label */
+async function waitForNoActiveGatewayWebSockets(label) {
+  await waitUntil(
+    label,
+    async () => (await gatewayWebSocketProxyConnections("active")) === 0,
+    { timeoutMs: 10_000, intervalMs: 100 }
+  );
 }
 
 /** @param {string} outcome */
@@ -109,7 +331,7 @@ test("ws upgrade: client ⇄ gateway ⇄ runtime ⇄ loaded worker echoes text a
     assert.ok(afterEnvoy > beforeEnvoy, "gateway should reach user-runtime through Envoy for websocket upgrades");
     assert.ok(
       await gatewayWebSocketProxyEstablished() > beforeProxy,
-      "gateway should hold the external websocket and proxy frames to runtime"
+      "gateway should proxy the external websocket to runtime"
     );
     assert.ok(
       await gatewayWebSocketProxyConnections("active") > beforeActiveConnections,
@@ -165,7 +387,132 @@ test("ws close without a status remains status-free across gateway and runtime",
   }
 });
 
-test("gateway-held ws reconnects backend after user-runtime restart", async () => {
+test("gateway-proxied ws survives idle then cleanly releases both peers and process sockets", async () => {
+  const ns = uniqueNs("ws-clean-close");
+  const name = "echo";
+  await deployAndPromote(ns, name, { code: TRACKED_WEBSOCKET_WORKER });
+
+  assert.deepEqual(await trackedWebSocketState(ns, name), {
+    active: 0,
+    opened: 0,
+    closed: 0,
+    lastClose: null,
+  });
+  await waitForNoActiveGatewayWebSockets(
+    "gateway active websocket gauge is idle before clean close test"
+  );
+  const socketBaseline = await gatewaySocketBaseline();
+  const logSince = new Date().toISOString();
+  /** @type {import("node:net").Socket | null} */
+  let socket = null;
+
+  try {
+    const openedSocket = await openEchoWebSocket(ns, name, "clean-close");
+    socket = openedSocket;
+    const socketTracker = gatewaySocketTracker(
+      socketBaseline,
+      gatewaySocketStats(),
+      1
+    );
+    await delay(1_000);
+    const afterIdle = readOneServerTextFrame(openedSocket);
+    openedSocket.write(encodeClientTextFrame("after-idle"));
+    assert.equal(await afterIdle, "echo:after-idle");
+
+    const reciprocalClose = readOneServerCloseFrame(openedSocket);
+    openedSocket.write(encodeClientCloseFrame(1000, "test complete"));
+    assert.deepEqual(await reciprocalClose, { code: 1000, reason: "test complete" });
+    await waitForSocketClose(openedSocket);
+    await waitForGatewaySocketsReleased(
+      socketBaseline,
+      socketTracker,
+      "gateway process sockets return to baseline after clean close"
+    );
+
+    await waitUntil("backend releases cleanly closed websocket", async () => {
+      const state = await trackedWebSocketState(ns, name);
+      return state.active === 0 && state.closed === 1;
+    }, { timeoutMs: 10_000, intervalMs: 100 });
+    const finalState = await trackedWebSocketState(ns, name);
+    assert.deepEqual(finalState, {
+      active: 0,
+      opened: 1,
+      closed: 1,
+      lastClose: { code: 1000, reason: "test complete" },
+    });
+    await waitForNoActiveGatewayWebSockets(
+      "gateway active websocket gauge returns to zero after clean close"
+    );
+    await assertNoGatewayHangSince(logSince);
+  } finally {
+    socket?.destroy();
+  }
+});
+
+test("gateway-proxied ws client resets release public and backend sockets", async () => {
+  const ns = uniqueNs("ws-client-reset");
+  const name = "echo";
+  const connectionCount = 32;
+  await deployAndPromote(ns, name, { code: TRACKED_WEBSOCKET_WORKER });
+
+  assert.equal((await trackedWebSocketState(ns, name)).active, 0);
+  await waitForNoActiveGatewayWebSockets(
+    "gateway active websocket gauge is idle before client reset test"
+  );
+  const socketBaseline = await gatewaySocketBaseline();
+  const logSince = new Date().toISOString();
+  /** @type {import("node:net").Socket[]} */
+  const sockets = [];
+
+  try {
+    const attempts = await Promise.allSettled(
+      Array.from(
+        { length: connectionCount },
+        (_value, index) => openEchoWebSocket(ns, name, `reset-${index}`)
+      )
+    );
+    for (const attempt of attempts) {
+      if (attempt.status === "fulfilled") sockets.push(attempt.value);
+    }
+    const failed = attempts.find((attempt) => attempt.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+
+    assert.equal(
+      (await trackedWebSocketState(ns, name)).active,
+      connectionCount,
+      "all backend websocket sessions should remain active before client resets"
+    );
+    const activeSockets = gatewaySocketStats();
+    const socketTracker = gatewaySocketTracker(
+      socketBaseline,
+      activeSockets,
+      connectionCount
+    );
+
+    for (const socket of sockets) socket.resetAndDestroy();
+    await waitForGatewaySocketsReleased(
+      socketBaseline,
+      socketTracker,
+      "gateway process sockets return to baseline after client resets"
+    );
+
+    await waitUntil("backend releases reset websocket batch", async () => {
+      const state = await trackedWebSocketState(ns, name);
+      return state.active === 0 && state.closed === connectionCount;
+    }, { timeoutMs: 15_000, intervalMs: 100 });
+    const finalState = await trackedWebSocketState(ns, name);
+    assert.equal(finalState.opened, connectionCount);
+    assert.equal(finalState.closed, connectionCount);
+    await waitForNoActiveGatewayWebSockets(
+      "gateway active websocket gauge returns to zero after client resets"
+    );
+    await assertNoGatewayHangSince(logSince);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+  }
+});
+
+test("gateway-proxied ws reconnects backend after user-runtime restart", async () => {
   const ns = uniqueNs("ws-reconnect");
   const name = "echo";
   const code = `
@@ -217,7 +564,7 @@ test("gateway-held ws reconnects backend after user-runtime restart", async () =
   }
 });
 
-test("gateway-held pattern-routed ws reconnects backend after user-runtime restart", async () => {
+test("gateway-proxied pattern-routed ws reconnects backend after user-runtime restart", async () => {
   const ns = uniqueNs("ws-pattern-reconnect");
   const name = "echo";
   const host = `${ns}.routes.workers.example`;
@@ -270,7 +617,7 @@ test("gateway-held pattern-routed ws reconnects backend after user-runtime resta
   }
 });
 
-test("gateway-held ws proactively reconnects backend for server-pushed frames", async () => {
+test("gateway-proxied ws proactively reconnects backend for server-pushed frames", async () => {
   const ns = uniqueNs("ws-push-reconnect");
   const name = "push";
   const code = `
@@ -323,7 +670,7 @@ test("gateway-held ws proactively reconnects backend for server-pushed frames", 
   }
 });
 
-test("gateway-held ws closes with 1011 when backend reconnect cannot produce an upgrade", async () => {
+test("gateway-proxied ws closes with 1011 when backend reconnect cannot produce an upgrade", async () => {
   const ns = uniqueNs("ws-reconnect-fail");
   const name = "fail";
   const code = `
@@ -344,7 +691,7 @@ test("gateway-held ws closes with 1011 when backend reconnect cannot produce an 
         server.accept();
         setTimeout(() => {
           server.close(1011, "backend lost");
-        }, 100);
+        }, 2_000);
         return new Response(null, { status: 101, webSocket: client });
       },
     };
@@ -353,12 +700,27 @@ test("gateway-held ws closes with 1011 when backend reconnect cannot produce an 
 
   const beforeFailed = await gatewayWebSocketProxyCount("reconnect_failed");
   const beforeSessionFailures = await gatewayWebSocketSessionLifetimeCount("reconnect_failed");
+  await waitForNoActiveGatewayWebSockets(
+    "gateway active websocket gauge is idle before reconnect exhaustion test"
+  );
+  const socketBaseline = await gatewaySocketBaseline();
+  const logSince = new Date().toISOString();
   const { status, socket } = await wsHandshake(ns, `/${name}`);
   try {
     assert.equal(status, 101);
-    assert.deepEqual(
-      await readOneServerCloseFrame(socket, { timeoutMs: 15_000 }),
-      { code: 1011, reason: "upstream reconnect failed" }
+    const socketTracker = gatewaySocketTracker(
+      socketBaseline,
+      gatewaySocketStats(),
+      1
+    );
+    const close = await readOneServerCloseFrame(socket, { timeoutMs: 15_000 });
+    assert.deepEqual(close, { code: 1011, reason: "upstream reconnect failed" });
+    if (!socket.destroyed) socket.write(encodeClientCloseFrame(close.code, close.reason));
+    await waitForSocketClose(socket);
+    await waitForGatewaySocketsReleased(
+      socketBaseline,
+      socketTracker,
+      "gateway process sockets return to baseline after reconnect exhaustion"
     );
     assert.ok(
       await gatewayWebSocketProxyCount("reconnect_failed") > beforeFailed,
@@ -368,6 +730,10 @@ test("gateway-held ws closes with 1011 when backend reconnect cannot produce an 
       await gatewayWebSocketSessionLifetimeCount("reconnect_failed") > beforeSessionFailures,
       "gateway should report websocket session lifetime for reconnect failures"
     );
+    await waitForNoActiveGatewayWebSockets(
+      "gateway active websocket gauge returns to zero after reconnect exhaustion"
+    );
+    await assertNoGatewayHangSince(logSince);
   } finally {
     socket.destroy();
   }

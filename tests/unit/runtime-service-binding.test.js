@@ -52,7 +52,6 @@ function makeEntrypointMethods(/** @type {string} */ name, /** @type {any} */ op
         requestId: request.headers.get("x-request-id"),
         workerId: request.headers.get("x-worker-id"),
         workerPrefix: request.headers.get("x-worker-prefix"),
-        upstreamBinding: request.headers.get("x-wdl-upstream-binding"),
         internalAuth: request.headers.get(TEST_INTERNAL_AUTH_HEADER),
       });
     },
@@ -117,7 +116,6 @@ test("ServiceBinding fetch strips caller-supplied platform forwarding headers", 
       "x-request-id": "rid-service",
       "x-worker-id": "caller:forged:v1",
       "x-worker-prefix": "/forged",
-      "x-wdl-upstream-binding": "RUNTIME_SYSTEM",
       [TEST_INTERNAL_AUTH_HEADER]: "forged-token",
     },
   }));
@@ -127,7 +125,6 @@ test("ServiceBinding fetch strips caller-supplied platform forwarding headers", 
   assert.equal(result.requestId, "rid-service");
   assert.equal(result.workerId, "target-ns:api:v1");
   assert.equal(result.workerPrefix, null);
-  assert.equal(result.upstreamBinding, null);
   assert.equal(result.internalAuth, null);
 });
 

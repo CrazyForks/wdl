@@ -69,7 +69,7 @@ WDL 首先是基础设施项目：operator 运行自己的 platform，tenant 用
 
 | Service | 角色 |
 |---|---|
-| `gateway` | public/control ingress、host routing、自定义 pattern routing、WebSocket holder path。 |
+| `gateway` | public/control ingress、host routing、自定义 pattern routing、WebSocket proxy/reconnect path。 |
 | `user-runtime` | tenant worker runtime pool、public-only outbound、本地 redis-proxy sidecar。 |
 | `system-runtime` | control/auth/static system worker 和特权 `__system__` runtime pool。 |
 | `d1-runtime` | D1 SQLite execution，使用 owner lease 和 supervisor 管理 workerd process。 |

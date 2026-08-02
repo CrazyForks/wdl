@@ -129,7 +129,11 @@ let lastPair = null;
   }
 };
 
-const { proxyGatewayWebSocket, webSocketProxyOptionsFromEnv } = await importRepositoryModule(
+const {
+  createGatewayWebSocketUpstreamFetch,
+  proxyGatewayWebSocket,
+  webSocketProxyOptionsFromEnv,
+} = await importRepositoryModule(
   "gateway/websocket.js",
   [
     [/from "shared-observability";/, `from ${JSON.stringify(repositoryFileUrl("shared/observability.js"))};`],
@@ -138,6 +142,40 @@ const { proxyGatewayWebSocket, webSocketProxyOptionsFromEnv } = await importRepo
     [/from "gateway-lib";/, `from ${JSON.stringify(repositoryFileUrl("gateway/lib.js"))};`],
   ]
 );
+
+test("gateway websocket upstream fetch creates fresh requests with stable upgrade headers", async () => {
+  /** @type {Request[]} */
+  const requests = [];
+  const upstreamFetch = createGatewayWebSocketUpstreamFetch(
+    new Request("https://runtime.workers.example/ws", {
+      headers: {
+        "sec-websocket-key": "socket-key",
+        "x-request-id": "rid-1",
+        "x-worker-id": "demo:chat:v7",
+      },
+    }),
+    {
+      /** @param {Request} request */
+      async fetch(request) {
+        requests.push(request);
+        return new Response(null);
+      },
+    }
+  );
+
+  await upstreamFetch();
+  await upstreamFetch();
+
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0], requests[1]);
+  for (const request of requests) {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "https://runtime.workers.example/ws");
+    assert.equal(request.headers.get("sec-websocket-key"), "socket-key");
+    assert.equal(request.headers.get("x-request-id"), "rid-1");
+    assert.equal(request.headers.get("x-worker-id"), "demo:chat:v7");
+  }
+});
 
 /** @param {FakeWebSocket} socket */
 function websocketResponse(socket) {
@@ -210,7 +248,6 @@ test("gateway websocket proxy strips internal routing headers from upgrade respo
       headers: new Headers({
         "x-worker-id": "demo:worker:v1",
         "x-worker-prefix": "/app",
-        "x-wdl-upstream-binding": "ROOM",
         "x-wdl-internal-auth": "secret",
         "x-wdl-do-owner-hint": "1",
         "x-wdl-d1-owner-endpoint": "d1-runtime-a:8787",
@@ -226,7 +263,6 @@ test("gateway websocket proxy strips internal routing headers from upgrade respo
 
   assert.equal(response.headers.get("x-worker-id"), null);
   assert.equal(response.headers.get("x-worker-prefix"), null);
-  assert.equal(response.headers.get("x-wdl-upstream-binding"), null);
   assert.equal(response.headers.get("x-wdl-internal-auth"), null);
   assert.equal(response.headers.get("x-wdl-do-owner-hint"), null);
   assert.equal(response.headers.get("x-wdl-d1-owner-endpoint"), null);

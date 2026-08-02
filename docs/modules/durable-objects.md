@@ -26,7 +26,7 @@ construction, facet identity, SQLite-backed storage, synchronous `ctx.storage.sq
 alarms as a storage-facing API surface, and the in-facet WebSocket hibernation APIs. WDL
 supplies the parts that Cloudflare's platform would normally provide outside the
 isolate: namespace binding materialization, owner lookup, routing to the owning task,
-Redis-backed lease/fence state, gateway-held public WebSocket forwarding, alarm
+Redis-backed lease/fence state, gateway-managed public WebSocket forwarding, alarm
 scheduling through Workflows, and lifecycle cleanup metadata.
 
 The runtime shims `ctx.storage.setAlarm()`, `getAlarm()`, and `deleteAlarm()` because
@@ -346,7 +346,7 @@ lifetime of backend WebSocket recovery after the initial 101.
   fails, so the tombstone set may be incomplete; future cleanup must tolerate missing
   members and treat the active storage pointer plus owner/alarm state as the stronger
   lifecycle signals.
-- Gateway-held WebSocket recovery is best-effort for client connection continuity.
+- Gateway-proxied WebSocket recovery is best-effort for client connection continuity.
   Backend DO facets are not re-fenced per message after the initial `101`; owner handoff
   safety relies on reconnect/rebind behavior and the owner-side dispatch fences that run
   before a backend facet is created. Client messages queued under an older backend

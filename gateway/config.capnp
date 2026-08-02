@@ -33,7 +33,6 @@ const config :Workerd.Config = (
 const gatewayWorker :Workerd.Worker = (
   modules = [
     (name = "worker", esModule = embed "index.js"),
-    (name = "gateway-holder", esModule = embed "holder.js"),
     (name = "gateway-dispatch", esModule = embed "dispatch.js"),
     (name = "gateway-lib", esModule = embed "lib.js"),
     (name = "gateway-runtime", esModule = embed "runtime.js"),
@@ -59,20 +58,10 @@ const gatewayWorker :Workerd.Worker = (
   ],
   compatibilityDate = "2026-04-24",
   globalOutbound = "network",
-  # WS upgrades are dispatched into this DO so the 101 fetch handler runs
-  # on an actor IoContext (skipped by `IoContext::abortFromHang`).
-  # Do not set preventEviction here: gateway uses one holder actor per
-  # session, and the accepted socket keeps the active actor alive while
-  # allowing completed sessions to be collected.
-  durableObjectNamespaces = [
-    (className = "GatewayWsHolder", uniqueKey = "gateway-ws-holder-v1"),
-  ],
-  durableObjectStorage = (inMemory = void),
   bindings = [
     (name = "RUNTIME_USER",   service = "runtime-user"),
     (name = "RUNTIME_SYSTEM", service = "runtime-system"),
     (name = "CONTROL",        service = "control-ext"),
-    (name = "WS_HOLDER", durableObjectNamespace = "GatewayWsHolder"),
     (name = "REDIS_ADDR",     fromEnvironment = "REDIS_ADDR"),
     (name = "PLATFORM_DOMAIN", fromEnvironment = "PLATFORM_DOMAIN"),
     (name = "ADMIN_HOST",     fromEnvironment = "ADMIN_HOST"),

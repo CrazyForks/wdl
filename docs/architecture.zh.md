@@ -72,7 +72,7 @@ Tenant HTTP/WebSocket 流量：
 4. Runtime 通过 `workerLoader` 加载 immutable worker bundle。
 5. Runtime materialize bindings 并调用 worker。
 
-WebSocket upgrade 先落到 gateway 的 WebSocket holder Durable Object，再转发给 backend，避免长生命周期 `101` response 留在普通 gateway request IoContext 上。
+WebSocket upgrade 由 gateway 在本地终结公开 `WebSocketPair`，再直接代理到解析出的 runtime binding；初始 `101` response 之后，同一 proxy 负责有界 backend reconnect 和 client-frame buffer。
 
 Admin/control 流量：
 

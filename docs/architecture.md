@@ -107,9 +107,9 @@ Tenant HTTP/WebSocket traffic:
 4. Runtime loads the immutable worker bundle through `workerLoader`.
 5. Runtime materializes bindings and invokes the worker.
 
-WebSocket upgrades first land on gateway's WebSocket holder Durable Object before
-backend forwarding, so long-lived `101` responses do not stay on the ordinary gateway
-request IoContext.
+For WebSocket upgrades, gateway terminates a local public `WebSocketPair` and proxies
+directly to the resolved runtime binding. The same proxy owns bounded backend reconnect
+and client-frame buffering after the initial `101` response.
 
 Admin/control traffic:
 

@@ -13,9 +13,9 @@
 | `envoy/envoy.yaml` | 本地 Compose private mesh proxy，供集成测试和本地开发使用。 |
 | `gateway/config.capnp` | Gateway workerd config：public `:8080`，`RUNTIME_USER`、`RUNTIME_SYSTEM` 和 `CONTROL` externals。 |
 | `gateway/config-local.capnp` | 为 Docker Compose 编译的本地 Gateway workerd config，使用 Envoy-backed private service routes。 |
-| `gateway/index.js` | Gateway worker dispatch 分支：admin-host short-circuit、subdomain routing 和 pattern routing。 |
+| `gateway/index.js` | Gateway worker dispatch 分支：admin-host short-circuit、subdomain routing、pattern routing 和 routed WebSocket proxy setup。 |
 | `gateway/dispatch.js` | 纯 gateway dispatch decision tree 和 route target selection。 |
-| `gateway/holder.js`、`gateway/websocket.js` | WebSocket holder、reconnect forwarding 和 `101` upgrade preservation。 |
+| `gateway/websocket.js` | 本地 `WebSocketPair` 终结、reconnect forwarding 和 `101` upgrade preservation。 |
 | `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、logging、metrics 和 health/metrics snapshots。 |
 | `gateway/lib.js` | workerd 和 Node tests 共用的纯 routing helpers。 |
 | `runtime/config-user.capnp` | User runtime config：loader `:8081`、internal `:8088`、loaded-worker public-only outbound。 |

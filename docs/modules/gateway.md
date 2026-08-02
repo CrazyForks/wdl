@@ -11,7 +11,7 @@ traffic to control without making control aware of gateway topology.
 The workerd entrypoint is `gateway/index.js`. Pure route parsing lives in
 `gateway/dispatch.js` and `gateway/lib.js`; static routing-option memoization plus
 Redis/cache/subscriber mechanics live in `gateway/runtime.js`; WebSocket lifetime
-management lives in `gateway/holder.js` and `gateway/websocket.js`.
+management lives in `gateway/websocket.js`.
 
 Gateway has three dispatch branches:
 
@@ -50,8 +50,8 @@ default.
   paths on the public listener.
 - Admin-host forwarding: `ADMIN_HOST` routed to control.
 - Data-plane forwarding: runtime loader socket, not runtime internal dispatch socket.
-- WebSocket upgrades: moved into `GatewayWsHolder` Durable Object so long-lived 101
-  responses do not live on the ordinary gateway request IoContext.
+- WebSocket upgrades: gateway terminates a local public `WebSocketPair` and proxies
+  directly through the resolved runtime binding.
 
 ## Routing And Cache Model
 
@@ -83,10 +83,10 @@ routing cache:
   `patterns:<host>` projection from its bounded in-memory cache until subscriber
   reconnect or process restart clears it; this is an accepted stale-cache window, not a
   durable authorization record.
-- WebSocket upgrades use the same route resolution as HTTP, then transfer the public
-  socket to `GatewayWsHolder`. The holder owns backend reconnect attempts and a bounded
-  client-frame buffer; rolling gateway or runtime can still drop the physical client
-  connection.
+- WebSocket upgrades use the same route resolution as HTTP. Gateway terminates the
+  public socket locally and proxies directly through the resolved runtime binding. The
+  proxy owns backend reconnect attempts and a bounded client-frame buffer; rolling
+  gateway or runtime can still drop the physical client connection.
 
 ## Redis / Storage Contracts
 
@@ -195,8 +195,8 @@ readiness.
 - `tests/unit/gateway-lib.test.js`
 - `tests/unit/gateway-runtime.test.js`
 - `tests/unit/gateway-websocket.test.js`
-- `tests/unit/gateway-holder.test.js`
 - `tests/integration/gateway.test.js`
+- `tests/integration/gateway-websocket.test.js`
 - `tests/integration/routing-gateway.test.js`
 - `tests/unit/style-contracts.test.js`
 

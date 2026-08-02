@@ -32,6 +32,11 @@ const GATEWAY_INDEX_TEST_STATE = {
     platformDomain: string,
   }>} */ ([]),
   routingOptionsCalls: /** @type {object[]} */ ([]),
+  websocketAdjustments: /** @type {unknown[][]} */ ([]),
+  websocketEvents: /** @type {unknown[][]} */ ([]),
+  websocketOptionCalls: /** @type {object[]} */ ([]),
+  websocketProxyCalls: /** @type {any[]} */ ([]),
+  websocketUpstreamCalls: /** @type {any[]} */ ([]),
   routingUnavailable: false,
 };
 
@@ -58,10 +63,19 @@ export function gatewayRoutingOptionsFromEnv(env) {
     normalizedAdminHost: "",
   };
 }
-export const log = () => {};
+export const log = (...args) => globalThis.__gatewayIndexTestState.websocketEvents.push(args);
 export const metrics = {};
+export function adjustGatewayWebSocketProxyBufferedMessages(...args) {
+  globalThis.__gatewayIndexTestState.websocketAdjustments.push(["buffered", ...args]);
+}
+export function adjustGatewayWebSocketProxyConnections(...args) {
+  globalThis.__gatewayIndexTestState.websocketAdjustments.push(["connections", ...args]);
+}
 export function prepareGatewayMetrics() {}
 export function recordGatewayWebSocketProxy() {}
+export function recordGatewayWebSocketSessionLifetime(...args) {
+  globalThis.__gatewayIndexTestState.websocketAdjustments.push(["lifetime", ...args]);
+}
 export function recordRuntimeForwardDuration() {}
 export function runtimeForwardOutcome() { return "error"; }
 `);
@@ -109,8 +123,25 @@ const workerIdUrl = moduleDataUrl(`
 export function formatWorkerId() { return "demo:worker:v1"; }
 `);
 
-const holderUrl = moduleDataUrl(`
-export class GatewayWsHolder {}
+const websocketUrl = moduleDataUrl(`
+export function createGatewayWebSocketUpstreamFetch(request, upstream) {
+  globalThis.__gatewayIndexTestState.websocketUpstreamCalls.push({ request, upstream });
+  return async () => await upstream.fetch(new Request(request));
+}
+export function proxyGatewayWebSocket(initial, upstreamFetch, recordProxyOutcome, observability, options) {
+  globalThis.__gatewayIndexTestState.websocketProxyCalls.push({
+    initial,
+    upstreamFetch,
+    recordProxyOutcome,
+    observability,
+    options,
+  });
+  return new Response("proxied");
+}
+export function webSocketProxyOptionsFromEnv(env) {
+  globalThis.__gatewayIndexTestState.websocketOptionCalls.push(env);
+  return { maxBufferedClientMessages: 7 };
+}
 `);
 
 const gatewayIndex = (await importRepositoryModule(
@@ -122,8 +153,8 @@ const gatewayIndex = (await importRepositoryModule(
     "gateway-lib": gatewayLibUrl,
     "gateway-dispatch": dispatchUrl,
     "gateway-runtime": runtimeUrl,
+    "gateway-websocket": websocketUrl,
     "shared-worker-id": workerIdUrl,
-    "gateway-holder": holderUrl,
   })
 )).default;
 
@@ -141,6 +172,11 @@ beforeEach(() => {
   GATEWAY_INDEX_TEST_STATE.forwardedRequests.length = 0;
   GATEWAY_INDEX_TEST_STATE.dispatchCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.routingOptionsCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.websocketAdjustments.length = 0;
+  GATEWAY_INDEX_TEST_STATE.websocketEvents.length = 0;
+  GATEWAY_INDEX_TEST_STATE.websocketOptionCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.websocketUpstreamCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.routingUnavailable = false;
 });
 
@@ -283,4 +319,84 @@ test("gateway preserves unchanged-path requests and rewrites changed paths", asy
       marker: null,
     },
   ]);
+});
+
+test("gateway proxies websocket upgrades through the routed runtime binding", async () => {
+  /** @type {Request[]} */
+  const requests = [];
+  const accepted = { status: 101, webSocket: {} };
+  const runtimeBinding = {
+    /** @param {Request} request */
+    async fetch(request) {
+      requests.push(request);
+      return accepted;
+    },
+  };
+  const env = {
+    REDIS_ADDR: "redis:6379",
+    RUNTIME_USER: runtimeBinding,
+  };
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: {
+        Upgrade: "websocket",
+        "x-wdl-forged-private": "forged",
+      },
+    }),
+    /** @type {any} */ (env),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "proxied");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].headers.get("upgrade"), "websocket");
+  assert.equal(requests[0].headers.get("x-worker-id"), "demo:worker:v1");
+  assert.equal(requests[0].headers.get("x-wdl-forged-private"), null);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketUpstreamCalls.length, 1);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketUpstreamCalls[0].upstream, runtimeBinding);
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.websocketOptionCalls, [env]);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length, 1);
+  const proxyCall = GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0];
+  assert.equal(proxyCall.initial, accepted);
+  assert.deepEqual(proxyCall.options, { maxBufferedClientMessages: 7 });
+  proxyCall.observability.recordEvent("warn", "ws_retry", { detail: "again" });
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.websocketEvents, [[
+    "warn",
+    "ws_retry",
+    {
+      request_id: "rid-gateway-index",
+      namespace: "demo",
+      worker: "worker",
+      version: "v1",
+      binding: "RUNTIME_USER",
+      detail: "again",
+    },
+  ]]);
+});
+
+test("gateway returns rejected websocket upgrades without starting the proxy", async () => {
+  const runtimeBinding = {
+    async fetch() {
+      return new Response("upgrade rejected", { status: 426 });
+    },
+  };
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: runtimeBinding,
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 426);
+  assert.equal(await response.text(), "upgrade rejected");
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketUpstreamCalls.length, 1);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length, 0);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketOptionCalls.length, 0);
 });

@@ -140,14 +140,14 @@ test("Durable Object WebSocket upgrade flows through gateway, Envoy, user-runtim
     );
     assert.ok(
       await gatewayWebSocketProxyEstablished() > beforeGatewayProxy,
-      "gateway should hold the external DO websocket while proxying to the runtime path"
+      "gateway should proxy the external DO websocket through the runtime path"
     );
   } finally {
     socket.destroy();
   }
 });
 
-test("gateway-held Durable Object WebSocket reconnects backend after do-runtime restart", async () => {
+test("gateway-proxied Durable Object WebSocket reconnects backend after do-runtime restart", async () => {
   const ns = uniqueNs("do-ws-reconnect");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",
@@ -206,7 +206,7 @@ test("gateway-held Durable Object WebSocket reconnects backend after do-runtime 
   }
 });
 
-test("gateway-held Durable Object WebSocket proactively reconnects backend for server-pushed frames", async () => {
+test("gateway-proxied Durable Object WebSocket proactively reconnects backend for server-pushed frames", async () => {
   const ns = uniqueNs("do-ws-push-reconnect");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",
@@ -253,7 +253,7 @@ test("gateway-held Durable Object WebSocket proactively reconnects backend for s
   }
 });
 
-test("Durable Object hibernation WebSocket API round-trips through the gateway-held path", async () => {
+test("Durable Object hibernation WebSocket API round-trips through the gateway proxy", async () => {
   const ns = uniqueNs("do-ws-hibernate-api");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",
@@ -344,7 +344,7 @@ test("Durable Object hibernation tracks tags, attachment mutation, and auto-resp
   }
 });
 
-test("gateway-held Durable Object hibernation WebSocket reconnects backend after do-runtime restart", async () => {
+test("gateway-proxied Durable Object hibernation WebSocket reconnects backend after do-runtime restart", async () => {
   const ns = uniqueNs("do-ws-hibernate-reconnect");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",

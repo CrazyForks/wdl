@@ -28,6 +28,8 @@ import {
 } from "gateway-dispatch";
 import {
   GatewayRoutingUnavailableError,
+  adjustGatewayWebSocketProxyBufferedMessages,
+  adjustGatewayWebSocketProxyConnections,
   createGatewayRedis,
   ensureGatewaySubscriber,
   gatewayHealthSnapshot,
@@ -36,14 +38,16 @@ import {
   metrics,
   prepareGatewayMetrics,
   recordGatewayWebSocketProxy,
+  recordGatewayWebSocketSessionLifetime,
   recordRuntimeForwardDuration,
   runtimeForwardOutcome,
 } from "gateway-runtime";
+import {
+  createGatewayWebSocketUpstreamFetch,
+  proxyGatewayWebSocket,
+  webSocketProxyOptionsFromEnv,
+} from "gateway-websocket";
 import { formatWorkerId } from "shared-worker-id";
-
-// Re-exported so workerd's capnp `durableObjectNamespaces` entry resolves
-// the class name against this worker's exports.
-export { GatewayWsHolder } from "gateway-holder";
 
 /**
  * @typedef {{
@@ -51,7 +55,8 @@ export { GatewayWsHolder } from "gateway-holder";
  *   LOG_LEVEL?: unknown,
  *   PLATFORM_DOMAIN?: string,
  *   ADMIN_HOST?: string,
- *   WS_HOLDER: DurableObjectNamespace,
+ *   WEBSOCKET_MAX_BUFFERED_MESSAGES?: unknown,
+ *   WEBSOCKET_RECONNECT_DELAYS_MS?: unknown,
  *   CONTROL: Fetcher,
  *   RUNTIME_SYSTEM: Fetcher,
  *   RUNTIME_USER: Fetcher,
@@ -65,6 +70,35 @@ function notFoundResponse() {
 }
 
 const bindLogLevel = createLogLevelBinder();
+
+/**
+ * @param {string} requestId
+ * @param {string | null} namespace
+ * @param {string | null} worker
+ * @param {string | null} version
+ * @param {string} binding
+ */
+function gatewayWebSocketObservability(requestId, namespace, worker, version, binding) {
+  return {
+    adjustBufferedMessages: adjustGatewayWebSocketProxyBufferedMessages,
+    adjustConnections: adjustGatewayWebSocketProxyConnections,
+    recordEvent(
+      /** @type {string} */ level,
+      /** @type {string} */ event,
+      /** @type {Record<string, unknown>} */ fields = {}
+    ) {
+      log(level, event, {
+        request_id: requestId,
+        namespace,
+        worker,
+        version,
+        binding,
+        ...fields,
+      });
+    },
+    recordSessionLifetime: recordGatewayWebSocketSessionLifetime,
+  };
+}
 
 export default {
   /**
@@ -154,11 +188,26 @@ export default {
       try {
         let response;
         if (isWebSocketUpgrade(request) && dispatch.bindingName !== "CONTROL") {
-          // Routed through a DO so the long-lived 101 lives on an actor
-          // IoContext, which workerd's hang detector skips.
-          forwardRequest.headers.set("x-wdl-upstream-binding", dispatch.bindingName);
-          const holderId = env.WS_HOLDER.newUniqueId();
-          response = await env.WS_HOLDER.get(holderId).fetch(forwardRequest);
+          const upstreamFetch = createGatewayWebSocketUpstreamFetch(
+            forwardRequest,
+            env[dispatch.bindingName]
+          );
+          const initial = await upstreamFetch();
+          response = initial.status === 101 && initial.webSocket
+            ? proxyGatewayWebSocket(
+              initial,
+              upstreamFetch,
+              recordGatewayWebSocketProxy,
+              gatewayWebSocketObservability(
+                scope.requestId,
+                namespace,
+                worker,
+                version,
+                dispatch.bindingName
+              ),
+              webSocketProxyOptionsFromEnv(env)
+            )
+            : initial;
         } else {
           response = await env[dispatch.bindingName].fetch(forwardRequest);
         }
