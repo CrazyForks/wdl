@@ -1,33 +1,32 @@
 import { spawn } from "node:child_process";
 
-import { composeNoBuildFlag } from "../../../scripts/integration-environment.js";
+import { composeNoBuildArgs } from "../../../scripts/integration-environment.js";
 import { ROOT } from "./env.js";
 import { sh } from "./cli.js";
 
-export function composeUpNoBuildFlag() {
-  return composeNoBuildFlag();
-}
-
 /**
- * @param {string} args
+ * @param {string[]} args
  * @param {{ stdio?: any }} [opts]
  */
 export function composeUp(args, opts = {}) {
-  return sh(`docker compose up -d${composeUpNoBuildFlag()} ${args}`.trimEnd(), opts);
+  return sh(["docker", "compose", "up", "-d", ...composeNoBuildArgs(), ...args], opts);
 }
 
 /**
  * @param {string} profile
- * @param {string} args
+ * @param {string[]} args
  * @param {{ stdio?: any, env?: NodeJS.ProcessEnv }} [opts]
  */
 export function composeProfileUp(profile, args, opts = {}) {
-  return sh(`COMPOSE_PROFILES=${profile} docker compose up -d${composeUpNoBuildFlag()} ${args}`, opts);
+  return sh(
+    ["docker", "compose", "up", "-d", ...composeNoBuildArgs(), ...args],
+    { ...opts, env: { ...opts.env, COMPOSE_PROFILES: profile } }
+  );
 }
 
 /** @param {Record<string, string | number | boolean>} env */
 function composeEnvArgs(env) {
-  return Object.entries(env).map(([key, value]) => `-e ${key}=${String(value)}`).join(" ");
+  return Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${String(value)}`]);
 }
 
 const TEST_PROBE_SERVICE = "test-probe";
@@ -38,10 +37,9 @@ const TEST_PROBE_SERVICE = "test-probe";
  */
 export function runProbeNode(script, { env = {} } = {}) {
   const envArgs = composeEnvArgs(env);
-  return sh(
-    `docker compose exec -T${envArgs ? ` ${envArgs}` : ""} ${TEST_PROBE_SERVICE} node`,
-    { input: script }
-  );
+  return sh(["docker", "compose", "exec", "-T", ...envArgs, TEST_PROBE_SERVICE, "node"], {
+    input: script,
+  });
 }
 
 /**
@@ -74,36 +72,36 @@ export function runProbeNodeAsync(script, { env = {}, input = "", evalScript = f
   });
 }
 
-/** @param {string} service @param {string} cmd */
-export function composeExec(service, cmd) {
-  return sh(`docker compose exec -T ${service} ${cmd}`);
+/** @param {string} service @param {string[]} args */
+export function composeExec(service, args) {
+  return sh(["docker", "compose", "exec", "-T", service, ...args]);
 }
 
 /** @param {string} service */
 export function composeStop(service) {
-  return sh(`docker compose stop ${service}`);
+  return sh(["docker", "compose", "stop", service]);
 }
 
 /** @param {string} service */
 export function composeStart(service) {
-  return sh(`docker compose start ${service}`);
+  return sh(["docker", "compose", "start", service]);
 }
 
 /** @param {string} service */
 export function composeRestart(service) {
-  sh(`docker compose restart ${service}`);
-  return composeUp(`--wait ${service}`);
+  sh(["docker", "compose", "restart", service]);
+  return composeUp(["--wait", service]);
 }
 
 /** @param {string} service @param {number} replicas */
 export function composeScale(service, replicas) {
-  return composeUp(`--wait --scale ${service}=${replicas} ${service}`);
+  return composeUp(["--wait", "--scale", `${service}=${replicas}`, service]);
 }
 
 /** @param {string} service */
 export function composeRecreate(service) {
-  sh(`docker compose rm -sf ${service}`);
-  return composeUp(`--wait ${service}`);
+  sh(["docker", "compose", "rm", "-sf", service]);
+  return composeUp(["--wait", service]);
 }
 
 /**

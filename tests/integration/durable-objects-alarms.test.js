@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   adminFetch,
-  composeUpNoBuildFlag,
+  composeProfileUp,
   composeScale,
   delay,
   deployAndPromote,
@@ -1106,7 +1106,10 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
     );
 
     try {
-      sh(`COMPOSE_PROFILES=do-multi docker compose kill -s KILL ${killedTask}`, { stdio: "pipe" });
+      sh(["docker", "compose", "kill", "-s", "KILL", killedTask], {
+        stdio: "pipe",
+        env: { COMPOSE_PROFILES: "do-multi" },
+      });
       redisSetDoOwner(ownerKey, { ...owner, leaseExpiresAt: Date.now() - 1000 });
 
       const retryDue = Date.now() - 1000;
@@ -1127,9 +1130,7 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
         15000
       );
     } finally {
-      sh(`COMPOSE_PROFILES=do-multi docker compose up -d${composeUpNoBuildFlag()} --wait ${killedTask}`, {
-        stdio: "pipe",
-      });
+      composeProfileUp("do-multi", ["--wait", killedTask], { stdio: "pipe" });
     }
   });
 });

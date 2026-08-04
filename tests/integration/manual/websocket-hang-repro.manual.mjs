@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import {
   composeStart,
   composeStop,
-  composeUpNoBuildFlag,
+  composeUp,
   deployAndPromote,
   ensureStackUp,
   encodeClientTextFrame,
@@ -79,7 +79,7 @@ test(
       if (backendStopped) {
         try {
           composeStart("user-runtime");
-          sh(`docker compose up -d${composeUpNoBuildFlag()} --wait user-runtime`);
+          composeUp(["--wait", "user-runtime"]);
         } catch (err) {
           console.error("failed to restart user-runtime:", err);
         }
@@ -89,7 +89,7 @@ test(
     // workerd's hang error is from server.c++ stderr, not our structured
     // logger, so it may not carry our request id — search both.
     const gatewayLogs = sh(
-      `docker compose logs --no-color --since=${logSince} gateway`,
+      ["docker", "compose", "logs", "--no-color", `--since=${logSince}`, "gateway"],
       { stdio: "pipe" }
     );
     const idLogs = gatewayLogs

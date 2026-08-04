@@ -14,6 +14,16 @@ const INTERNAL_FORWARD_HEADERS = [
   "x-worker-prefix",
 ];
 
+export class GatewayRoutingUnavailableError extends Error {
+  constructor() {
+    super("Gateway routing state changed throughout the bounded lookup");
+    this.name = "GatewayRoutingUnavailableError";
+    this.status = 503;
+    this.code = "gateway_routing_unavailable";
+    this.publicMessage = "Gateway routing temporarily unavailable";
+  }
+}
+
 /** @param {Headers} headers */
 export function deleteGatewayInternalHeaders(headers) {
   for (const name of INTERNAL_FORWARD_HEADERS) headers.delete(name);
@@ -22,11 +32,6 @@ export function deleteGatewayInternalHeaders(headers) {
     if (name.startsWith(INTERNAL_HEADER_PREFIX)) privateHeaders.push(name);
   }
   for (const name of privateHeaders) headers.delete(name);
-}
-
-/** @param {string} s */
-export function escapeRegex(s) {
-  return RegExp.escape(s);
 }
 
 // Strip trailing FQDN dot(s). WHATWG URL preserves them, so without this
@@ -66,7 +71,7 @@ function hostRegex(platformDomain, nsPattern) {
   const key = `${platformDomain}\n${nsPattern}`;
   let re = hostRegexCache.get(key);
   if (!re) {
-    re = new RegExp(`^(${nsPattern})\\.${escapeRegex(platformDomain)}$`);
+    re = new RegExp(`^(${nsPattern})\\.${RegExp.escape(platformDomain)}$`);
     hostRegexCache.set(key, re);
   }
   return re;
@@ -94,9 +99,6 @@ export function classifyHost(hostname, platformDomain, nsPattern) {
  * @param {(ns: string) => boolean} isValidRouteNamespace
  */
 export function sortPatterns(entries, isValidRouteNamespace) {
-  if (typeof isValidRouteNamespace !== "function") {
-    throw new TypeError("sortPatterns requires shared isValidRouteNs");
-  }
   /** @type {PatternEntry[]} */
   const sorted = [];
   /** @type {PatternError[]} */

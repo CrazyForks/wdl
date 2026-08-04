@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { adminPost, deployAndPromote } from "./admin-http.js";
-import { composeUp, composeUpNoBuildFlag } from "./compose.js";
+import { composeProfileUp, composeUp } from "./compose.js";
 import { ensureD1SingleRuntime, recreateD1MultiRuntimes } from "./runtimes.js";
 import { gatewayFetch } from "./gateway-http.js";
 import {
@@ -202,21 +202,26 @@ export function restoreD1MultiTasks() {
 }
 
 export function startD1EnvoyOwnerPair() {
-  return sh(`COMPOSE_PROFILES=d1-multi docker compose up -d${composeUpNoBuildFlag()} --force-recreate --wait d1-runtime-a`, {
-    stdio: "pipe",
-  });
+  return composeProfileUp(
+    "d1-multi",
+    ["--force-recreate", "--wait", "d1-runtime-a"],
+    { stdio: "pipe" }
+  );
 }
 
 export function stopD1EnvoyOwnerPair() {
-  return sh("COMPOSE_PROFILES=d1-multi docker compose rm -sf d1-runtime-a", { stdio: "pipe" });
+  return sh(["docker", "compose", "rm", "-sf", "d1-runtime-a"], {
+    stdio: "pipe",
+    env: { COMPOSE_PROFILES: "d1-multi" },
+  });
 }
 
 export function stopD1Router() {
-  return sh("docker compose stop d1-runtime", { stdio: "pipe" });
+  return sh(["docker", "compose", "stop", "d1-runtime"], { stdio: "pipe" });
 }
 
 export function startD1Router() {
-  return composeUp("--wait d1-runtime", { stdio: "pipe" });
+  return composeUp(["--wait", "d1-runtime"], { stdio: "pipe" });
 }
 
 export function restoreD1SingleRuntime() {

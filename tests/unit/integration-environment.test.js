@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import {
   ROOT,
-  composeNoBuildFlag,
+  composeNoBuildArgs,
   resolveWdlCliBin,
 } from "../../scripts/integration-environment.js";
 import {
@@ -24,34 +24,40 @@ const composeHelper = await importRepositoryModule(
       "scripts/integration-environment.js"
     ),
     "./env.js": moduleDataUrl('export const ROOT = ".";'),
-    "./cli.js": moduleDataUrl("export function sh(command) { return command; }"),
+    "./cli.js": moduleDataUrl("export function sh(argv, opts = {}) { return { argv, opts }; }"),
   })
 );
 
-test("compose no-build flag follows the integration environment", () => {
-  assert.equal(composeNoBuildFlag({ WDL_INTEGRATION_NO_BUILD: "1" }), " --no-build");
-  assert.equal(composeNoBuildFlag({}), "");
+test("compose no-build args follow the integration environment", () => {
+  assert.deepEqual(composeNoBuildArgs({ WDL_INTEGRATION_NO_BUILD: "1" }), ["--no-build"]);
+  assert.deepEqual(composeNoBuildArgs({}), []);
 });
 
 test("compose helpers consume the shared preflight no-build flag", async () => {
   await withMockedProperty(process.env, "WDL_INTEGRATION_NO_BUILD", "1", () => {
-    assert.equal(
-      composeHelper.composeUp("--wait gateway"),
-      "docker compose up -d --no-build --wait gateway"
+    assert.deepEqual(
+      composeHelper.composeUp(["--wait", "gateway"]),
+      { argv: ["docker", "compose", "up", "-d", "--no-build", "--wait", "gateway"], opts: {} }
     );
-    assert.equal(
-      composeHelper.composeProfileUp("d1-multi", "--wait d1-runtime-a"),
-      "COMPOSE_PROFILES=d1-multi docker compose up -d --no-build --wait d1-runtime-a"
+    assert.deepEqual(
+      composeHelper.composeProfileUp("d1-multi", ["--wait", "d1-runtime-a"]),
+      {
+        argv: ["docker", "compose", "up", "-d", "--no-build", "--wait", "d1-runtime-a"],
+        opts: { env: { COMPOSE_PROFILES: "d1-multi" } },
+      }
     );
   });
   await withMockedProperty(process.env, "WDL_INTEGRATION_NO_BUILD", "0", () => {
-    assert.equal(
-      composeHelper.composeUp("--wait gateway"),
-      "docker compose up -d --wait gateway"
+    assert.deepEqual(
+      composeHelper.composeUp(["--wait", "gateway"]),
+      { argv: ["docker", "compose", "up", "-d", "--wait", "gateway"], opts: {} }
     );
-    assert.equal(
-      composeHelper.composeProfileUp("d1-multi", "--wait d1-runtime-a"),
-      "COMPOSE_PROFILES=d1-multi docker compose up -d --wait d1-runtime-a"
+    assert.deepEqual(
+      composeHelper.composeProfileUp("d1-multi", ["--wait", "d1-runtime-a"]),
+      {
+        argv: ["docker", "compose", "up", "-d", "--wait", "d1-runtime-a"],
+        opts: { env: { COMPOSE_PROFILES: "d1-multi" } },
+      }
     );
   });
 });
